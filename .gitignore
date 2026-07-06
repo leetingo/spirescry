@@ -1,0 +1,15 @@
+# Game/engine dlls — not distributable; populate with ./build.sh libs
+/lib/
+
+# Build outputs
+src/bin/
+src/obj/
+cli/target/
+headless/build/
+headless/*/bin/
+headless/*/obj/
+
+# OS / editor cruft
+.DS_Store
+.vscode/
+.idea/
