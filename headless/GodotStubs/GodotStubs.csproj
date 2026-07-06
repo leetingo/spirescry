@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <RootNamespace>Godot</RootNamespace>
+    <!-- Same name + version as the real GodotSharp so sts2.dll's
+         AssemblyRef resolves to us at runtime. -->
+    <AssemblyName>GodotSharp</AssemblyName>
+    <Version>4.5.1.0</Version>
+    <AssemblyVersion>4.5.1.0</AssemblyVersion>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+</Project>

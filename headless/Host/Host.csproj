@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net9.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>Spirescry.Host</RootNamespace>
+    <AssemblyName>spirescry_host</AssemblyName>
+    <CopyLocalLockFileAssemblies>false</CopyLocalLockFileAssemblies>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- The stub declares the same assembly name + version as the real
+         GodotSharp, so both our IL and sts2.headless.dll resolve to it at
+         runtime. -->
+    <ProjectReference Include="../GodotStubs/GodotStubs.csproj" />
+    <Reference Include="sts2">
+      <HintPath>..\..\lib\sts2.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="0Harmony">
+      <HintPath>..\build\lib\0Harmony.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+  <ItemGroup>
+    <!-- Compile the mod's source straight in: the bridge, snapshotters,
+         and dispatcher are reused verbatim; RunMode picks the headless
+         branches at runtime. -->
+    <Compile Include="..\..\src\**\*.cs" Exclude="..\..\src\bin\**\*.cs;..\..\src\obj\**\*.cs" />
+  </ItemGroup>
+</Project>
