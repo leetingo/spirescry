@@ -28,7 +28,9 @@ def record(d):
     if not phase or d.get("available") is False:
         return
     slot = KEYS.setdefault(phase, {})
-    slot.setdefault("top", sorted(d.keys()))
+    # changed/events are the long-poll envelope (only present on
+    # obs --since responses), not part of the phase snapshot shape.
+    slot.setdefault("top", sorted(d.keys() - {"changed", "events"}))
     for k, v in d.items():
         if isinstance(v, list) and v and isinstance(v[0], dict):
             slot.setdefault(k + "[]", sorted(v[0].keys()))
