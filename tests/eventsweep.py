@@ -5,11 +5,13 @@ Run against either boot (host is fastest). Not part of ./build.sh verify —
 it takes minutes and mutates a throwaway run heavily; use it after engine
 updates or event-related changes.
 """
-import json, subprocess, sys, time
+import json, sys, time
 from collections import Counter
 
+import bridge
+
 def run(*a, ok=False):
-    r = subprocess.run(["spirescry", *a], capture_output=True, text=True)
+    r = bridge.cli(*a)
     if r.returncode != 0:
         if ok:
             return {"_err": r.stderr.strip()}
@@ -19,18 +21,13 @@ def run(*a, ok=False):
 obs = lambda: run("obs")
 
 def wait(*want, timeout=20):
-    for _ in range(timeout * 2):
-        d = obs()
-        if d.get("phase") in want:
-            return d
-        time.sleep(0.5)
-    return None
+    return bridge.wait_phase(*want, timeout=timeout, raise_on_timeout=False)
 
 def fresh_run():
     run("abandon", ok=True)
     time.sleep(1)
-    for attempt in range(3):
-        r = run("new-run", "IRONCLAD", ok=True)
+    for _ in range(3):
+        run("new-run", "IRONCLAD", ok=True)
         if wait("event", timeout=30) is not None:
             break
     run("proceed", ok=True)

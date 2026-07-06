@@ -7,40 +7,36 @@ namespace Spirescry.Host;
 
 internal static class HeadlessLocalization
 {
-    private static string? _locRoot;
-    private static Type? _locTableType;
-    private static System.Reflection.ConstructorInfo? _locTableCtor;
-
     public static void Init()
     {
         try
         {
             var libDir = Environment.GetEnvironmentVariable("STS2_HEADLESS_LIB");
             if (string.IsNullOrEmpty(libDir)) return;
-            _locRoot = Path.Combine(libDir, "localization");
-            if (!Directory.Exists(_locRoot))
+            var locRoot = Path.Combine(libDir, "localization");
+            if (!Directory.Exists(locRoot))
             {
-                Console.Error.WriteLine($"[spirescry_host] no localization at {_locRoot}; text falls back to entry keys");
+                HostLog.Info($"no localization at {locRoot}; text falls back to entry keys");
                 return;
             }
 
             var asm = typeof(MegaCrit.Sts2.Core.Models.AbstractModelSubtypes).Assembly;
             var locManagerType = asm.GetType("MegaCrit.Sts2.Core.Localization.LocManager")
                 ?? throw new InvalidOperationException("LocManager type missing");
-            _locTableType = asm.GetType("MegaCrit.Sts2.Core.Localization.LocTable")
+            var locTableType = asm.GetType("MegaCrit.Sts2.Core.Localization.LocTable")
                 ?? throw new InvalidOperationException("LocTable type missing");
-            _locTableCtor = _locTableType.GetConstructors().FirstOrDefault(c =>
+            var locTableCtor = locTableType.GetConstructors().FirstOrDefault(c =>
                     c.GetParameters().Length == 3
                     && c.GetParameters()[0].ParameterType == typeof(string)
                     && c.GetParameters()[1].ParameterType == typeof(Dictionary<string, string>))
                 ?? throw new InvalidOperationException("LocTable(string, Dictionary, LocTable) ctor missing");
 
             var lang = Environment.GetEnvironmentVariable("STS2_AGENT_LANG");
-            if (string.IsNullOrWhiteSpace(lang) || !Directory.Exists(Path.Combine(_locRoot, lang)))
+            if (string.IsNullOrWhiteSpace(lang) || !Directory.Exists(Path.Combine(locRoot, lang)))
                 lang = "eng";
 
-            var eng = LoadTables("eng", null);
-            var tables = lang == "eng" ? eng : LoadTables(lang, eng);
+            var eng = LoadTables(locRoot, locTableType, locTableCtor, "eng", null);
+            var tables = lang == "eng" ? eng : LoadTables(locRoot, locTableType, locTableCtor, lang, eng);
             if (tables is null) return;
 
             // LocManager's ctor walks res:// — build an empty instance and
@@ -80,22 +76,23 @@ internal static class HeadlessLocalization
             }
             catch (Exception ex)
             {
-                Console.Error.WriteLine($"[spirescry_host] LoadLocFormatters: {ex.GetType().Name}: {ex.Message}");
+                HostLog.Error("LoadLocFormatters", ex);
             }
-            Console.Error.WriteLine($"[spirescry_host] localization: lang={lang}, {tables.Count} tables");
+            HostLog.Info($"localization: lang={lang}, {tables.Count} tables");
         }
         catch (Exception ex)
         {
-            Console.Error.WriteLine($"[spirescry_host] localization init failed: {ex.GetType().Name}: {ex.Message}");
+            HostLog.Error("localization init failed", ex);
         }
     }
 
     private static System.Collections.IDictionary? LoadTables(
+        string locRoot, Type locTableType, System.Reflection.ConstructorInfo locTableCtor,
         string lang, System.Collections.IDictionary? fallbackTables)
     {
-        var langDir = Path.Combine(_locRoot!, lang);
+        var langDir = Path.Combine(locRoot, lang);
         if (!Directory.Exists(langDir)) return null;
-        var dictType = typeof(Dictionary<,>).MakeGenericType(typeof(string), _locTableType!);
+        var dictType = typeof(Dictionary<,>).MakeGenericType(typeof(string), locTableType);
         var tables = (System.Collections.IDictionary)Activator.CreateInstance(dictType)!;
         var jsonOpts = new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true };
         foreach (var path in Directory.GetFiles(langDir, "*.json"))
@@ -108,11 +105,11 @@ internal static class HeadlessLocalization
                 var fallback = fallbackTables is not null && fallbackTables.Contains(name)
                     ? fallbackTables[name]
                     : null;
-                tables[name] = _locTableCtor!.Invoke(new object?[] { name, entries, fallback });
+                tables[name] = locTableCtor.Invoke(new object?[] { name, entries, fallback });
             }
             catch (Exception ex)
             {
-                Console.Error.WriteLine($"[spirescry_host] loc table {path}: {ex.Message}");
+                HostLog.Error($"loc table {path}", ex);
             }
         }
         return tables;

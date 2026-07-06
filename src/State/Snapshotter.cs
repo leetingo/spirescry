@@ -20,6 +20,7 @@ using MegaCrit.Sts2.Core.Nodes.Screens.Overlays;
 using MegaCrit.Sts2.Core.Rewards;
 using MegaCrit.Sts2.Core.Rooms;
 using MegaCrit.Sts2.Core.Runs;
+using CrystalMinigame = MegaCrit.Sts2.Core.Events.Custom.CrystalSphereEvent.CrystalSphereMinigame;
 
 namespace Spirescry.State;
 
@@ -84,10 +85,8 @@ public static class Snapshotter
     {
         var entity = RunMode.IsHeadless
             ? HeadlessCrystal.Entity
-            : NOverlayStack.Instance?.Peek()
-                    is MegaCrit.Sts2.Core.Nodes.Events.Custom.CrystalSphere.NCrystalSphereScreen screen
-                ? Reflect.FieldValue(screen, "_entity")
-                    as MegaCrit.Sts2.Core.Events.Custom.CrystalSphereEvent.CrystalSphereMinigame
+            : Screens.Crystal() is { } screen
+                ? Reflect.FieldValue(screen, "_entity") as CrystalMinigame
                 : null;
         if (entity is null) return new { phase, available = false };
 
@@ -223,6 +222,17 @@ public static class Snapshotter
             stocked = e.IsStocked,
             affordable = e.EnoughGold,
         };
+        // Model goes null once the entry is purchased — like CardEntry,
+        // render the sold-out tile instead of throwing.
+        object StockEntry(string? model, LocString? title, MegaCrit.Sts2.Core.Entities.Merchant.MerchantEntry e, int i) => new
+        {
+            idx = i,
+            model,
+            title = SafeText(title),
+            cost = e.Cost,
+            stocked = e.IsStocked,
+            affordable = e.EnoughGold,
+        };
         return new
         {
             phase,
@@ -230,24 +240,10 @@ public static class Snapshotter
             player = FooterView(),
             cards = inv.CharacterCardEntries.Select(CardEntry).ToArray(),
             colorless = inv.ColorlessCardEntries.Select(CardEntry).ToArray(),
-            relics = inv.RelicEntries.Select((e, i) => new
-            {
-                idx = i,
-                model = e.Model.Id.Entry,
-                title = SafeText(e.Model.Title),
-                cost = e.Cost,
-                stocked = e.IsStocked,
-                affordable = e.EnoughGold,
-            }).ToArray(),
-            potions = inv.PotionEntries.Select((e, i) => new
-            {
-                idx = i,
-                model = e.Model.Id.Entry,
-                title = SafeText(e.Model.Title),
-                cost = e.Cost,
-                stocked = e.IsStocked,
-                affordable = e.EnoughGold,
-            }).ToArray(),
+            relics = inv.RelicEntries
+                .Select((e, i) => StockEntry(e.Model?.Id.Entry, e.Model?.Title, e, i)).ToArray(),
+            potions = inv.PotionEntries
+                .Select((e, i) => StockEntry(e.Model?.Id.Entry, e.Model?.Title, e, i)).ToArray(),
             cardRemoval = inv.CardRemovalEntry is { } cr
                 ? new { cost = cr.Cost, used = cr.Used, affordable = cr.EnoughGold }
                 : null,
@@ -280,8 +276,7 @@ public static class Snapshotter
     private static object TreasureSnapshot(string phase)
     {
         var room = NRun.Instance?.TreasureRoom;
-        var opened = room is not null
-            && Reflect.FieldValue(room, "_hasChestBeenOpened") is true;
+        var opened = room is not null && Screens.ChestOpened(room);
         var sync = RunManager.Instance?.TreasureRoomRelicSynchronizer;
 
         // Headless: no chest button to click — open the chest through the
@@ -311,9 +306,8 @@ public static class Snapshotter
 
     private static object RelicRewardSnapshot(string phase)
     {
-        var screen = NOverlayStack.Instance?.Peek() as NChooseARelicSelection;
-        var row = screen is null ? null : Reflect.Field<Godot.Control>(screen, "_relicRow");
-        var holders = row?.GetChildren().OfType<NRelicBasicHolder>().ToList();
+        var screen = Screens.Top<NChooseARelicSelection>();
+        var holders = screen is null ? null : Screens.RelicHolders(screen);
         if (holders is null || holders.Count == 0)
             return new { phase, available = false };
         return new
@@ -343,38 +337,30 @@ public static class Snapshotter
             {
                 phase,
                 player = FooterView(),
-                rewards = HeadlessRewards.Slotted().Select(s => (object)new
-                {
-                    idx = s.idx,
-                    type = RewardType(s.reward),
-                    amount = s.reward is GoldReward g ? g.Amount : (int?)null,
-                    description = SafeText(s.reward.Description),
-                }).ToList(),
+                rewards = HeadlessRewards.Slotted()
+                    .Select(s => RewardView(s.reward, s.idx)).ToList(),
             };
 
         var screen = NOverlayStack.Instance?.Peek() as NRewardsScreen;
-        var buttons = screen is null
-            ? null
-            : Reflect.Field<System.Collections.IEnumerable>(screen, "_rewardButtons");
+        var buttons = screen is null ? null : Screens.RewardButtons(screen);
         if (buttons is null) return new { phase, available = false };
 
         var rewards = new List<object>();
-        var idx = 0;
-        foreach (var item in buttons)
-        {
-            var i = idx++;
-            if (item is not NRewardButton btn || !btn.IsEnabled || btn.Reward is null)
-                continue;
-            rewards.Add(new
-            {
-                idx = i,
-                type = RewardType(btn.Reward),
-                amount = btn.Reward is GoldReward g ? g.Amount : (int?)null,
-                description = SafeText(btn.Reward.Description),
-            });
-        }
+        for (var i = 0; i < buttons.Count; i++)
+            if (Screens.ClaimableReward(buttons[i]) is { } btn)
+                rewards.Add(RewardView(btn.Reward!, i));
         return new { phase, player = FooterView(), rewards };
     }
+
+    // Shared reward-tile view — see the per-card views below for why both
+    // boots build their snapshots through one shape.
+    private static object RewardView(Reward r, int i) => new
+    {
+        idx = i,
+        type = RewardType(r),
+        amount = r is GoldReward g ? g.Amount : (int?)null,
+        description = SafeText(r.Description),
+    };
 
     private static string RewardType(Reward r) => r switch
     {
@@ -403,11 +389,8 @@ public static class Snapshotter
             };
         }
 
-        var screen = NOverlayStack.Instance?.Peek() as NCardRewardSelectionScreen;
-        var row = screen is null ? null : Reflect.Field<Godot.Control>(screen, "_cardRow");
-        var holders = row?.GetChildren().OfType<NCardHolder>().ToList();
-        // The screen exists a frame or two before its card row is wired —
-        // an empty list means "poll again", not "zero cards".
+        var screen = Screens.Top<NCardRewardSelectionScreen>();
+        var holders = screen is null ? null : Screens.CardHolders(screen);
         if (holders is null || holders.Count == 0)
             return new { phase, available = false };
 
@@ -417,8 +400,7 @@ public static class Snapshotter
             player = FooterView(),
             cards = holders.Select((h, i) => RewardCardView(h.CardModel, i)).ToArray(),
             // Non-card choices (skip, trade offers, …) — target of `skip`.
-            alternatives = (Reflect.Field<System.Collections.IEnumerable>(screen!, "_extraOptions")
-                    ?.Cast<object>() ?? [])
+            alternatives = Screens.ExtraOptions(screen!)
                 .Select((o, i) => new
                 {
                     idx = i,
@@ -479,7 +461,7 @@ public static class Snapshotter
             seed = rs.Rng?.StringSeed ?? "",
             player = FooterView(),
             current = rs.CurrentMapCoord is { } c ? new[] { c.col, c.row } : null,
-            next = next ?? [],
+            next,
             graph = rs.Map is { } map
                 ? AllMapPoints(map).Select(p => new
                 {
@@ -650,11 +632,11 @@ public static class Snapshotter
     // Key sets mirror the GUI snapshots (prompt is unknown here — the
     // engine doesn't pass it through ICardSelector; skip always cancels,
     // so cancelable is true).
-    private static object PickerSnapshot(string phase)
+    private static object PickerSnapshot(string phase, bool handSelect)
     {
         if (!HeadlessPicker.IsActive) return new { phase, available = false };
         var picked = HeadlessPicker.Picked;
-        if (phase == Phase.HandSelect.AsString())
+        if (handSelect)
             return new
             {
                 phase,
@@ -684,14 +666,13 @@ public static class Snapshotter
 
     private static object CardSelectSnapshot(string phase)
     {
-        if (RunMode.IsHeadless) return PickerSnapshot(phase);
+        if (RunMode.IsHeadless) return PickerSnapshot(phase, handSelect: false);
 
         // Choose-a-card overlays (Discovery, event card offers): a card
         // row, pick one, done — no confirm step.
         if (NOverlayStack.Instance?.Peek() is NChooseACardSelectionScreen choose)
         {
-            var chooseRow = Reflect.Field<Godot.Control>(choose, "_cardRow");
-            var chooseHolders = chooseRow?.GetChildren().OfType<NCardHolder>().ToList();
+            var chooseHolders = Screens.CardHolders(choose);
             if (chooseHolders is null || chooseHolders.Count == 0)
                 return new { phase, available = false };
             return new
@@ -701,21 +682,18 @@ public static class Snapshotter
                 prompt = "",
                 min = 1,
                 max = 1,
-                cancelable = Reflect.Field<MegaCrit.Sts2.Core.Nodes.GodotExtensions.NClickableControl>(
-                    choose, "_skipButton") is { IsEnabled: true },
+                cancelable = Screens.ChooseSkipEnabled(choose),
                 cards = chooseHolders.Select((h, i) => SelectCardView(h.CardModel, i, false)).ToArray(),
             };
         }
 
         var screen = NOverlayStack.Instance?.Peek() as NCardGridSelectionScreen;
-        var grid = screen is null ? null : Reflect.Field<NCardGrid>(screen, "_grid");
-        var cards = grid?.CurrentlyDisplayedCards.ToList();
+        var cards = screen is null ? null : Screens.GridCards(screen);
         if (screen is null || cards is null || cards.Count == 0)
             return new { phase, available = false };
 
-        var prefs = (CardSelectorPrefs)Reflect.FieldValue(screen, "_prefs")!;
-        var selected = Reflect.Field<IEnumerable<CardModel>>(screen, "_selectedCards")
-            ?.ToHashSet() ?? [];
+        var prefs = Screens.Prefs(screen);
+        var selected = Screens.SelectedCards(screen).ToHashSet();
         return new
         {
             phase,
@@ -733,13 +711,13 @@ public static class Snapshotter
     // ActiveHolders (into the selected row), so idx tracks what's on screen.
     private static object HandSelectSnapshot(string phase)
     {
-        if (RunMode.IsHeadless) return PickerSnapshot(phase);
+        if (RunMode.IsHeadless) return PickerSnapshot(phase, handSelect: true);
 
         var hand = NPlayerHand.Instance;
         if (hand is null) return new { phase, available = false };
 
-        var prefs = (CardSelectorPrefs)Reflect.FieldValue(hand, "_prefs")!;
-        var selected = Reflect.Field<IEnumerable<CardModel>>(hand, "_selectedCards") ?? [];
+        var prefs = Screens.Prefs(hand);
+        var selected = Screens.SelectedCards(hand);
         return new
         {
             phase,

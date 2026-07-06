@@ -37,6 +37,19 @@ die()  { printf '\033[1;31m✗\033[0m %s\n' "$*" >&2; exit 1; }
 
 need_game_dir() { [ -n "${STS2_GAME_DIR:-}" ] || die "STS2_GAME_DIR not set and game install not auto-detected"; }
 
+# wait_bridge <timeout_s> <log>: poll /health until the bridge answers.
+wait_bridge() {
+    port="${STS2_AGENT_PORT:-7777}"
+    for _ in $(seq 1 "$1"); do
+        if curl -sf "http://127.0.0.1:$port/health" > /dev/null; then
+            ok "bridge up — try: spirescry obs"
+            return
+        fi
+        sleep 1
+    done
+    die "bridge not up after ${1}s (see $2)"
+}
+
 # Godot puts the .NET assemblies in a data_sts2_* dir: next to the game
 # binary on Windows/Linux, under Contents/Resources on macOS.
 find_data_dir() {
@@ -114,14 +127,7 @@ launch_host() {
     # Through the dotnet CLI, not the apphost — the CLI resolves its own
     # runtime regardless of DOTNET_ROOT.
     nohup dotnet headless/Host/bin/Release/spirescry_host.dll > "$log" 2>&1 &
-    for _ in $(seq 1 30); do
-        if curl -sf "http://127.0.0.1:$port/health" > /dev/null; then
-            ok "bridge up — try: spirescry obs"
-            return
-        fi
-        sleep 1
-    done
-    die "bridge not up after 30s (see $log)"
+    wait_bridge 30 "$log"
 }
 
 build_mod() {
@@ -175,14 +181,7 @@ launch_headless() {
     log="${TMPDIR:-/tmp}/spirescry-headless.log"
     step "launch headless (bridge port $port, log $log)"
     nohup "$game_bin" --headless > "$log" 2>&1 &
-    for _ in $(seq 1 60); do
-        if curl -sf "http://127.0.0.1:$port/health" > /dev/null; then
-            ok "bridge up — try: spirescry obs"
-            return
-        fi
-        sleep 1
-    done
-    die "bridge not up after 60s (see $log)"
+    wait_bridge 60 "$log"
 }
 
 stop_game() {

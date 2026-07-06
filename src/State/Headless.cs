@@ -6,6 +6,7 @@ using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Rewards;
 using MegaCrit.Sts2.Core.Runs;
 using MegaCrit.Sts2.Core.TestSupport;
+using CrystalMinigame = MegaCrit.Sts2.Core.Events.Custom.CrystalSphereEvent.CrystalSphereMinigame;
 
 namespace Spirescry.State;
 
@@ -41,14 +42,18 @@ public static class HeadlessPicker
     public static int MinSelect { get; private set; }
     public static int MaxSelect { get; private set; }
 
+    // Push/PopIfInactive are no-ops in GUI boots — callers sandwich any
+    // engine call that may open a card pick without checking the mode.
     public static void Push()
     {
+        if (!RunMode.IsHeadless) return;
         if (_scope is not null) return;
         _scope = CardSelectCmd.PushSelector(new Deferred());
     }
 
     public static void PopIfInactive()
     {
+        if (!RunMode.IsHeadless) return;
         if (_tcs is not null) return;
         var s = _scope;
         _scope = null;
@@ -172,16 +177,27 @@ public static class HeadlessBundle
 // divination, or ForceMinigameEnd) resumes the awaiting event.
 public static class HeadlessCrystal
 {
-    public static MegaCrit.Sts2.Core.Events.Custom.CrystalSphereEvent.CrystalSphereMinigame?
-        Entity { get; private set; }
+    public static CrystalMinigame? Entity { get; private set; }
 
     public static bool IsActive => Entity is { IsFinished: false };
 
-    public static void Park(
-        MegaCrit.Sts2.Core.Events.Custom.CrystalSphereEvent.CrystalSphereMinigame entity) =>
-        Entity = entity;
+    public static void Park(CrystalMinigame entity) => Entity = entity;
 
     public static void Clear() => Entity = null;
+}
+
+// Every stand-in above holds run-scoped state; abandon calls this so no
+// parked completion source or captured entity leaks into the next run.
+// A new stand-in belongs on this list.
+public static class HeadlessState
+{
+    public static void ResetAll()
+    {
+        HeadlessRewards.Clear();
+        HeadlessPicker.CancelIfActive();
+        HeadlessBundle.CancelIfActive();
+        HeadlessCrystal.Clear();
+    }
 }
 
 public static class HeadlessRewards

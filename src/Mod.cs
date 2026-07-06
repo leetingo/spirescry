@@ -48,11 +48,9 @@ internal static class Boot
         var tree = (SceneTree)Engine.GetMainLoop();
         MainThreadPump.Bootstrap(tree);
 
-        var portVar = System.Environment.GetEnvironmentVariable("STS2_AGENT_PORT");
-        var port = int.TryParse(portVar, out var p) ? p : 7777;
         try
         {
-            new HttpBridge().Start("127.0.0.1", port);
+            HttpBridge.StartFromEnv();
         }
         catch (Exception ex)
         {

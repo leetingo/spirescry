@@ -5,13 +5,14 @@
 // Default lib dir: ../../build/lib relative to the host binary.
 
 using System.Runtime.Loader;
+using Spirescry.Host;
 
 var libDir = Environment.GetEnvironmentVariable("STS2_HEADLESS_LIB");
 if (string.IsNullOrEmpty(libDir))
     libDir = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "build", "lib"));
 if (!Directory.Exists(libDir))
 {
-    Console.Error.WriteLine($"[spirescry_host] lib dir not found: {libDir} — run ./build.sh headless-setup");
+    HostLog.Info($"lib dir not found: {libDir} — run ./build.sh headless-setup");
     return 2;
 }
 Environment.SetEnvironmentVariable("STS2_HEADLESS_LIB", libDir);
@@ -27,18 +28,18 @@ AssemblyLoadContext.Default.Resolving += (ctx, name) =>
 var sts2Path = Path.Combine(libDir, "sts2.headless.dll");
 if (!File.Exists(sts2Path))
 {
-    Console.Error.WriteLine($"[spirescry_host] missing {sts2Path} — run ./build.sh headless-setup");
+    HostLog.Info($"missing {sts2Path} — run ./build.sh headless-setup");
     return 2;
 }
 AssemblyLoadContext.Default.LoadFromAssemblyPath(sts2Path);
 
 try
 {
-    Spirescry.Host.HeadlessBoot.Start();
+    HeadlessBoot.Start();
 }
 catch (Exception ex)
 {
-    Console.Error.WriteLine($"[spirescry_host] boot failed: {ex}");
+    HostLog.Info($"boot failed: {ex}");
     return 1;
 }
 

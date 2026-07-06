@@ -22,6 +22,16 @@ public sealed class HttpBridge
 {
     private HttpListener? _listener;
 
+    // The shared startup for both boots: STS2_AGENT_PORT (default 7777),
+    // loopback only. Returns the bound port.
+    public static int StartFromEnv()
+    {
+        var portVar = Environment.GetEnvironmentVariable("STS2_AGENT_PORT");
+        var port = int.TryParse(portVar, out var p) ? p : 7777;
+        new HttpBridge().Start("127.0.0.1", port);
+        return port;
+    }
+
     public void Start(string host, int port)
     {
         _listener = new HttpListener();
@@ -37,12 +47,7 @@ public sealed class HttpBridge
         {
             HttpListenerContext ctx;
             try { ctx = await _listener!.GetContextAsync(); }
-            catch (HttpListenerException ex)
-            {
-                SafeLog.Error("accept loop stopped", ex);
-                break;
-            }
-            catch (ObjectDisposedException ex)
+            catch (Exception ex) when (ex is HttpListenerException or ObjectDisposedException)
             {
                 SafeLog.Error("accept loop stopped", ex);
                 break;

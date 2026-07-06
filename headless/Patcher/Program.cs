@@ -98,7 +98,6 @@ foreach (var type in module.GetTypes())
 // We don't know the declaring type up front (sts2 may rename across
 // versions), so match on method name + signature: returns Task, takes no
 // args. There may be overloads; patch all.
-TypeReference taskType = module.ImportReference(typeof(System.Threading.Tasks.Task));
 MethodReference completedTaskGetter = module.ImportReference(
     typeof(System.Threading.Tasks.Task).GetProperty("CompletedTask")!.GetGetMethod()!);
 

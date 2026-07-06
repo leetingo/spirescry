@@ -18,17 +18,8 @@ public static class Handlers
             var exec = rm?.ActionExecutor;
             var running = exec?.CurrentlyRunningAction;
             var queues = new List<object>();
-            if (rm?.ActionQueueSet is { } aqs
-                && Reflect.FieldValue(aqs, "_actionQueues")
-                    is System.Collections.IEnumerable qs)
-                foreach (var q in qs)
-                    queues.Add(new
-                    {
-                        owner = Reflect.FieldValue(q, "ownerId"),
-                        depth = (Reflect.FieldValue(q, "actions")
-                            as System.Collections.ICollection)?.Count ?? 0,
-                        paused = Reflect.FieldValue(q, "isPaused") is true,
-                    });
+            foreach (var (owner, depth, paused) in EngineQueues.All(rm))
+                queues.Add(new { owner, depth, paused });
             return new
             {
                 phase = PhaseDetector.Current().AsString(),

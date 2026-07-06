@@ -48,10 +48,8 @@ internal static class HeadlessBoot
         _signalTimer = new Timer(
             _ => MainThreadPump.Instance?.Run(() => true), null, 250, 250);
 
-        var portVar = Environment.GetEnvironmentVariable("STS2_AGENT_PORT");
-        var port = int.TryParse(portVar, out var p) ? p : 7777;
-        new HttpBridge().Start("127.0.0.1", port);
-        Console.Error.WriteLine($"[spirescry_host] bridge listening on http://127.0.0.1:{port}/");
+        var port = HttpBridge.StartFromEnv();
+        HostLog.Info($"bridge listening on http://127.0.0.1:{port}/");
     }
 
     private static void InitModelDb()
@@ -74,21 +72,21 @@ internal static class HeadlessBoot
             try { ModelDb.Inject(t); registered++; }
             catch { failed++; }
         }
-        Console.Error.WriteLine($"[spirescry_host] ModelDb: {registered} registered, {failed} failed (of {subtypes.Count})");
+        HostLog.Info($"ModelDb: {registered} registered, {failed} failed (of {subtypes.Count})");
 
         // Adding cards/relics writes their saved properties; the cache is
         // normally primed during the game's boot (and its ContentSorter
         // wants AssemblyInfo first).
         try { AssemblyInfo.Init(); }
-        catch (Exception ex) { Console.Error.WriteLine($"[spirescry_host] AssemblyInfo: {ex.GetType().Name}: {ex.Message}"); }
+        catch (Exception ex) { HostLog.Error("AssemblyInfo", ex); }
         try { MegaCrit.Sts2.Core.Saves.Runs.SavedPropertiesTypeCache.Init(); }
-        catch (Exception ex) { Console.Error.WriteLine($"[spirescry_host] SavedPropertiesTypeCache: {ex.GetType().Name}: {ex.Message}"); }
+        catch (Exception ex) { HostLog.Error("SavedPropertiesTypeCache", ex); }
 
         // After the models: progress data walks the character registry.
         try { SaveManager.Instance.InitProfileId(0); }
-        catch (Exception ex) { Console.Error.WriteLine($"[spirescry_host] InitProfileId: {ex.Message}"); }
+        catch (Exception ex) { HostLog.Error("InitProfileId", ex); }
         try { SaveManager.Instance.InitProgressData(); }
-        catch (Exception ex) { Console.Error.WriteLine($"[spirescry_host] InitProgressData: {ex.Message}"); }
+        catch (Exception ex) { HostLog.Error("InitProgressData", ex); }
 
         RebuildModelIdSerializationCache();
     }
@@ -158,11 +156,11 @@ internal static class HeadlessBoot
             SetBacking("EntryIdBitSize", Bits(entryList.Count));
             SetBacking("EpochIdBitSize", 1);
             SetBacking("Hash", (uint)((catList.Count * 397) ^ entryList.Count));
-            Console.Error.WriteLine($"[spirescry_host] serialization cache: {catList.Count} categories, {entryList.Count} entries");
+            HostLog.Info($"serialization cache: {catList.Count} categories, {entryList.Count} entries");
         }
         catch (Exception ex)
         {
-            Console.Error.WriteLine($"[spirescry_host] cache rebuild failed: {ex.GetType().Name}: {ex.Message}");
+            HostLog.Error("cache rebuild failed", ex);
         }
     }
 
@@ -195,7 +193,7 @@ internal static class HeadlessBoot
         }
         catch (Exception ex)
         {
-            Console.Error.WriteLine($"[spirescry_host] cosmetic patch failed: {ex.GetType().Name}: {ex.Message}");
+            HostLog.Error("cosmetic patch failed", ex);
         }
     }
 
@@ -240,14 +238,19 @@ internal static class HeadlessBoot
     }
 
     // GetTypes throws ReflectionTypeLoadException for the handful of types
-    // the stub doesn't cover; the partial result is fine.
+    // the stub doesn't cover; the partial result is fine. Several patch
+    // passes sweep the whole assembly — resolve it once.
+    private static Type[]? _safeTypes;
+
     private static Type[] SafeTypes()
     {
-        try { return typeof(AbstractModelSubtypes).Assembly.GetTypes(); }
+        if (_safeTypes is not null) return _safeTypes;
+        try { _safeTypes = typeof(AbstractModelSubtypes).Assembly.GetTypes(); }
         catch (System.Reflection.ReflectionTypeLoadException ex)
         {
-            return ex.Types.Where(t => t is not null).ToArray()!;
+            _safeTypes = ex.Types.Where(t => t is not null).ToArray()!;
         }
+        return _safeTypes;
     }
 
     private static readonly HarmonyMethod Swallow = new(
@@ -355,13 +358,13 @@ internal static class HeadlessBoot
             System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
         if (m is null)
         {
-            Console.Error.WriteLine("[spirescry_host] FromChooseABundleScreen not found — bundle offers unsupported");
+            HostLog.Info("FromChooseABundleScreen not found — bundle offers unsupported");
             return;
         }
         _harmony!.Patch(m, prefix: new HarmonyMethod(typeof(HeadlessBoot).GetMethod(
             nameof(BundlePrefix),
             System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)));
-        Console.Error.WriteLine("[spirescry_host] rerouted bundle offers to the headless stand-in");
+        HostLog.Info("rerouted bundle offers to the headless stand-in");
     }
 
     private static bool BundlePrefix(
@@ -383,13 +386,13 @@ internal static class HeadlessBoot
                 System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
         if (m is null)
         {
-            Console.Error.WriteLine("[spirescry_host] NCrystalSphereScreen.ShowScreen not found — crystal sphere unsupported");
+            HostLog.Info("NCrystalSphereScreen.ShowScreen not found — crystal sphere unsupported");
             return;
         }
         _harmony!.Patch(m, prefix: new HarmonyMethod(typeof(HeadlessBoot).GetMethod(
             nameof(CrystalPrefix),
             System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)));
-        Console.Error.WriteLine("[spirescry_host] rerouted crystal sphere to the headless stand-in");
+        HostLog.Info("rerouted crystal sphere to the headless stand-in");
     }
 
     private static bool CrystalPrefix(
@@ -420,7 +423,7 @@ internal static class HeadlessBoot
             try { _harmony!.Patch(m, finalizer: fin); patched++; }
             catch { }
         }
-        Console.Error.WriteLine($"[spirescry_host] swallowed {patched} progress-tracking methods");
+        HostLog.Info($"swallowed {patched} progress-tracking methods");
     }
 
     // Monster model flavor hooks (BeforeDeath, BeforeRemovedFromRoom) play
@@ -446,7 +449,7 @@ internal static class HeadlessBoot
                 catch { }
             }
         }
-        Console.Error.WriteLine($"[spirescry_host] swallowed {patched} monster flavor hooks");
+        HostLog.Info($"swallowed {patched} monster flavor hooks");
     }
 
     // Some monster death hooks call NAudioManager.Instance.PlayOneShot
@@ -455,31 +458,29 @@ internal static class HeadlessBoot
     // pure output, no game state.
     private static void ImmunizeAudioSingletons()
     {
-        foreach (var name in new[] { "MegaCrit.Sts2.Core.Nodes.Audio.NAudioManager" })
+        const string name = "MegaCrit.Sts2.Core.Nodes.Audio.NAudioManager";
+        var t = typeof(AbstractModelSubtypes).Assembly.GetType(name);
+        if (t is null) return;
+        try
         {
-            var t = typeof(AbstractModelSubtypes).Assembly.GetType(name);
-            if (t is null) continue;
-            try
+            var inst = System.Runtime.CompilerServices.RuntimeHelpers.GetUninitializedObject(t);
+            var bf = System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic
+                     | System.Reflection.BindingFlags.Static;
+            (t.GetField("<Instance>k__BackingField", bf)
+                ?? t.GetField("_instance", bf))?.SetValue(null, inst);
+            var patched = 0;
+            foreach (var m in t.GetMethods(System.Reflection.BindingFlags.Public
+                | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.DeclaredOnly))
             {
-                var inst = System.Runtime.CompilerServices.RuntimeHelpers.GetUninitializedObject(t);
-                var bf = System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic
-                         | System.Reflection.BindingFlags.Static;
-                (t.GetField("<Instance>k__BackingField", bf)
-                    ?? t.GetField("_instance", bf))?.SetValue(null, inst);
-                var patched = 0;
-                foreach (var m in t.GetMethods(System.Reflection.BindingFlags.Public
-                    | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.DeclaredOnly))
-                {
-                    if (m.IsAbstract || m.IsGenericMethodDefinition || m.IsSpecialName) continue;
-                    try { _harmony!.Patch(m, finalizer: Swallow); patched++; }
-                    catch { }
-                }
-                Console.Error.WriteLine($"[spirescry_host] immunized {t.Name}: {patched} methods");
+                if (m.IsAbstract || m.IsGenericMethodDefinition || m.IsSpecialName) continue;
+                try { _harmony!.Patch(m, finalizer: Swallow); patched++; }
+                catch { }
             }
-            catch (Exception ex)
-            {
-                Console.Error.WriteLine($"[spirescry_host] immunize {name}: {ex.Message}");
-            }
+            HostLog.Info($"immunized {t.Name}: {patched} methods");
+        }
+        catch (Exception ex)
+        {
+            HostLog.Error($"immunize {name}", ex);
         }
     }
 

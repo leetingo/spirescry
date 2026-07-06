@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Minimal Godot 4.x .pck extractor for the localization/ subtree."""
+import mmap
 import struct
 import os
 import sys
@@ -16,8 +17,10 @@ def main(pck_path: str, out_dir: str, prefix: str = "res://localization/"):
     out.mkdir(parents=True, exist_ok=True)
     out_resolved = out.resolve()
 
+    # The pack is gigabytes and we want <1% of it — map instead of read,
+    # so only the header, directory, and matched bodies get paged in.
     with open(pck_path, "rb") as f:
-        data = f.read()
+        data = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
 
     base = 0
     if data[base:base + 4] != MAGIC:
@@ -54,6 +57,11 @@ def main(pck_path: str, out_dir: str, prefix: str = "res://localization/"):
     file_count = struct.unpack_from("<I", data, pos)[0]; pos += 4
     print(f"file_count={file_count}", file=sys.stderr)
 
+    # Pck paths are stored without the "res://" scheme prefix.
+    # Strip it from the user's prefix arg if present.
+    scheme = "res://"
+    clean_prefix = prefix[len(scheme):] if prefix.startswith(scheme) else prefix
+
     extracted = 0
     for _ in range(file_count):
         path_len = struct.unpack_from("<I", data, pos)[0]; pos += 4
@@ -62,14 +70,10 @@ def main(pck_path: str, out_dir: str, prefix: str = "res://localization/"):
         path = path_raw.rstrip(b"\x00").decode("utf-8", errors="replace")
         offset = struct.unpack_from("<Q", data, pos)[0]; pos += 8
         size = struct.unpack_from("<Q", data, pos)[0]; pos += 8
-        md5 = data[pos:pos + 16]; pos += 16
+        pos += 16  # md5
         file_flags = 0
         if pack_format >= 2:
             file_flags = struct.unpack_from("<I", data, pos)[0]; pos += 4
-        # Pck paths are stored without the "res://" scheme prefix.
-        # Strip it from the user's prefix arg if present.
-        scheme = "res://"
-        clean_prefix = prefix[len(scheme):] if prefix.startswith(scheme) else prefix
         if not path.startswith(clean_prefix):
             continue
         if file_flags & FILE_FLAG_ENCRYPTED:

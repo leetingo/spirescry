@@ -15,9 +15,10 @@ recordings: same phase => same keys, so the modes can't silently drift.
 """
 import argparse
 import json
-import subprocess
 import sys
 import time
+
+import bridge
 
 KEYS: dict[str, dict[str, list[str]]] = {}
 
@@ -34,20 +35,14 @@ def record(d):
 
 
 def run(*args, ok_fail=False):
-    # not_ready is the bridge's transient signal (queue paused, map intro
-    # window, ...) — by contract the agent retries it.
-    for _ in range(15):
-        r = subprocess.run(["spirescry", *args], capture_output=True, text=True)
-        if r.returncode == 0 or "not_ready" not in r.stderr:
-            break
-        time.sleep(0.4)
+    r = bridge.cli(*args)
     if r.returncode != 0 and not ok_fail:
         sys.exit(f"FAIL: spirescry {' '.join(args)} -> {r.stderr.strip()}")
     return json.loads(r.stdout) if r.stdout.strip() else {}
 
 
 def obs():
-    d = run("obs")
+    d = bridge.obs()
     record(d)
     return d
 
@@ -57,12 +52,21 @@ def phase():
 
 
 def wait_phase(*want, timeout=20):
-    for _ in range(timeout * 2):
-        ph = phase()
-        if ph in want:
-            return ph
-        time.sleep(0.5)
-    raise AssertionError(f"phase stuck at {phase()}, wanted {want}")
+    bridge.wait_phase(*want, timeout=timeout, on_obs=record)
+
+
+def launch_run():
+    # A launch fired into a cold boot window can be dropped silently —
+    # retry it if it didn't land.
+    for attempt in range(3):
+        run("new-run", "IRONCLAD", ok_fail=attempt > 0)
+        try:
+            wait_phase("event", timeout=40)
+            return
+        except AssertionError:
+            if attempt == 2:
+                raise
+            print("    launch didn't land, retrying")
 
 
 def confirm_if_selecting():
@@ -91,7 +95,7 @@ def kill_current_combat():
             continue
         if not used_potion:
             used_potion = True
-            pot = next(iter(d["you"].get("potions", [])), None)
+            pot = next(iter(d.get("potions", [])), None)
             if pot:
                 alive_now = [e for e in d["enemies"] if e["alive"]]
                 if pot["target"] == "anyenemy" and alive_now:
@@ -126,18 +130,9 @@ def drive():
     step("new-run")
     run("abandon", ok_fail=True)
     # The bridge comes up during mod init, before a cold engine boot's
-    # menu is actually ready — a launch fired into that window can be
-    # dropped silently. Settle, then retry the launch if it didn't land.
+    # menu is actually ready. Settle, then launch.
     time.sleep(5)
-    for attempt in range(3):
-        run("new-run", "IRONCLAD", ok_fail=attempt > 0)
-        try:
-            wait_phase("event", timeout=40)
-            break
-        except AssertionError:
-            if attempt == 2:
-                raise
-            print("    launch didn't land, retrying")
+    launch_run()
 
     step("neow: proceed past")
     run("proceed")
@@ -219,9 +214,11 @@ def drive():
             print("    no potions in the shop this run — skipped")
         else:
             print(f"    bought {bought} potion(s)")
-            slot = obs()["potions"][0]["slot"]
+            # The shop's own stock is top-level `potions`; the player's
+            # belt (with slot numbers) rides under `player`.
+            slot = obs()["player"]["potions"][0]["slot"]
             run("potion-discard", str(slot))
-            assert not any(p["slot"] == slot for p in obs()["potions"]), \
+            assert not any(p["slot"] == slot for p in obs()["player"]["potions"]), \
                 "potion-discard did not clear the slot"
 
         run("leave")
@@ -261,14 +258,7 @@ def drive():
     run("abandon")
     wait_phase("main_menu")
     time.sleep(3)
-    for attempt in range(3):
-        run("new-run", "IRONCLAD", ok_fail=attempt > 0)
-        try:
-            wait_phase("event", timeout=40)
-            break
-        except AssertionError:
-            if attempt == 2:
-                raise
+    launch_run()
     run("proceed")
     wait_phase("map")
     node = next(p for p in obs()["next"] if p["type"] == "monster")

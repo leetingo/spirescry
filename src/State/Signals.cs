@@ -20,7 +20,6 @@ public static class Signals
     private static readonly List<TaskCompletionSource<bool>> Waiters = new();
     private static long _revision;
     private static string _lastPhase = "";
-    public static DateTime LastPhaseChangeUtc { get; private set; }
     private static GameAction? _watchedAction;
     private static DateTime _watchedSinceUtc;
     private static bool _wedgeAnnounced;
@@ -67,7 +66,6 @@ public static class Signals
         if (phase == _lastPhase) return;
         var from = _lastPhase;
         _lastPhase = phase;
-        LastPhaseChangeUtc = DateTime.UtcNow;
         Bump($"phase:{from}->{phase}");
     }
 

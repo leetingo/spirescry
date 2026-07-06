@@ -25,6 +25,7 @@ using MegaCrit.Sts2.Core.Nodes.Screens.Overlays;
 using MegaCrit.Sts2.Core.Rooms;
 using MegaCrit.Sts2.Core.Runs;
 using Spirescry.State;
+using CrystalMinigame = MegaCrit.Sts2.Core.Events.Custom.CrystalSphereEvent.CrystalSphereMinigame;
 
 namespace Spirescry.Actions;
 
@@ -63,11 +64,9 @@ public static class Dispatcher
 
     private static DispatchResult Cheat(JsonElement args)
     {
-        if (args.ValueKind != JsonValueKind.Object
-            || !args.TryGetProperty("name", out var nameEl)
-            || nameEl.ValueKind != JsonValueKind.String)
+        if (!TryGetString(args, "name", out var name))
             return DispatchResult.Reject("bad_request", "missing args.name");
-        return nameEl.GetString() switch
+        return name switch
         {
             "goto" => CheatGoto(args),
             "gold" => CheatGold(args),
@@ -85,10 +84,8 @@ public static class Dispatcher
     private static DispatchResult CheatEvent(JsonElement args)
     {
         if (RequirePhase(Phase.Map) is { } err) return err;
-        if (args.ValueKind != JsonValueKind.Object
-            || !args.TryGetProperty("id", out var idEl) || idEl.ValueKind != JsonValueKind.String)
+        if (!TryGetString(args, "id", out var id))
             return DispatchResult.Reject("bad_request", "missing args.id (event model entry)");
-        var id = idEl.GetString()!;
         var model = ModelDb.AllEvents.FirstOrDefault(e =>
             string.Equals(e.Id.Entry, id, StringComparison.OrdinalIgnoreCase));
         if (model is null)
@@ -113,11 +110,16 @@ public static class Dispatcher
     {
         if (!TryGetInt(args, "value", out var value))
             return DispatchResult.Reject("bad_request", "missing args.value");
+        return SetLocalHp(c => Math.Clamp(value, 1, c.MaxHp));
+    }
+
+    private static DispatchResult SetLocalHp(Func<Creature, int> hp)
+    {
         var rs = RunManager.Instance?.DebugOnlyGetState();
         var creature = rs is null ? null : LocalContext.GetMe(rs)?.Creature;
         if (creature is null)
             return DispatchResult.Reject("not_ready", "no local creature");
-        return Reflect.SetProperty(creature, "CurrentHp", Math.Clamp(value, 1, creature.MaxHp))
+        return Reflect.SetProperty(creature, "CurrentHp", hp(creature))
             ? DispatchResult.Success()
             : DispatchResult.Reject("internal", "CurrentHp setter not found");
     }
@@ -142,12 +144,7 @@ public static class Dispatcher
         if (target is null)
             return DispatchResult.Reject("bad_target", $"no map node at {col},{row} (see obs.graph)");
 
-        if (LocalQueueBlocked(rm, player))
-            return DispatchResult.Reject("not_ready", "action queue is paused — retry");
-        if (MapIntroBlocksTravel())
-            return DispatchResult.Reject("not_ready", "map intro animation — retry");
-        EnqueueMapVote(rm, rs, player, target.coord);
-        return DispatchResult.Success();
+        return TravelTo(rm, rs, player, target);
     }
 
     private static DispatchResult CheatGold(JsonElement args)
@@ -163,16 +160,7 @@ public static class Dispatcher
             : DispatchResult.Reject("internal", "Gold setter not found");
     }
 
-    private static DispatchResult CheatHeal()
-    {
-        var rs = RunManager.Instance?.DebugOnlyGetState();
-        var creature = rs is null ? null : LocalContext.GetMe(rs)?.Creature;
-        if (creature is null)
-            return DispatchResult.Reject("not_ready", "no local creature");
-        return Reflect.SetProperty(creature, "CurrentHp", creature.MaxHp)
-            ? DispatchResult.Success()
-            : DispatchResult.Reject("internal", "CurrentHp setter not found");
-    }
+    private static DispatchResult CheatHeal() => SetLocalHp(c => c.MaxHp);
 
     // Leaves every enemy at 1 HP with no block, so one normal play ends the
     // fight through the engine's real death pipeline. (Writing 0 directly
@@ -225,20 +213,14 @@ public static class Dispatcher
         // sticks on combat.
         if (CombatManager.Instance is { IsInProgress: true } cm)
         {
-            if (!Reflect.SetProperty(cm, "IsInProgress", false))
-                Reflect.SetField(cm, "<IsInProgress>k__BackingField", false);
+            Reflect.SetPropertyOrBackingField(cm, "IsInProgress", false);
             Reflect.SetField(cm, "_state", null);
         }
         // Stale queued actions must not leak into the next run.
         try { rm.ActionQueueSet?.Reset(); } catch { }
-        if (!Reflect.SetProperty(rm, "State", null))
-            Reflect.SetField(rm, "<State>k__BackingField", null);
-        if (!Reflect.SetProperty(rm, "IsAbandoned", false))
-            Reflect.SetField(rm, "<IsAbandoned>k__BackingField", false);
-        HeadlessRewards.Clear();
-        HeadlessPicker.CancelIfActive();
-        HeadlessBundle.CancelIfActive();
-        HeadlessCrystal.Clear();
+        Reflect.SetPropertyOrBackingField(rm, "State", null);
+        Reflect.SetPropertyOrBackingField(rm, "IsAbandoned", false);
+        HeadlessState.ResetAll();
         return DispatchResult.Success();
     }
 
@@ -258,6 +240,30 @@ public static class Dispatcher
             && args.TryGetProperty(name, out var el)
             && el.ValueKind == JsonValueKind.Number
             && el.TryGetInt32(out value);
+    }
+
+    private static bool TryGetString(JsonElement args, string name, out string value)
+    {
+        value = "";
+        if (args.ValueKind != JsonValueKind.Object
+            || !args.TryGetProperty(name, out var el)
+            || el.ValueKind != JsonValueKind.String)
+            return false;
+        value = el.GetString()!;
+        return true;
+    }
+
+    // Shared travel tail — the gates every travel verb must pass, then the
+    // engine's own vote enqueue.
+    private static DispatchResult TravelTo(
+        RunManager rm, RunState rs, Player player, MapPoint target)
+    {
+        if (LocalQueueBlocked(rm, player))
+            return DispatchResult.Reject("not_ready", "action queue is paused — retry");
+        if (MapIntroBlocksTravel())
+            return DispatchResult.Reject("not_ready", "map intro animation — retry");
+        EnqueueMapVote(rm, rs, player, target.coord);
+        return DispatchResult.Success();
     }
 
     // The engine's own travel entry: a vote whose source is read from the
@@ -303,14 +309,9 @@ public static class Dispatcher
     // agent retries deterministically instead of waiting on silence.
     private static bool LocalQueueBlocked(RunManager rm, Player player)
     {
-        if (rm.ActionQueueSet is not { } aqs
-            || Reflect.FieldValue(aqs, "_actionQueues")
-                is not System.Collections.IEnumerable queues) return false;
-        foreach (var q in queues)
-        {
-            if (Reflect.FieldValue(q, "ownerId") is ulong owner && owner == player.NetId)
-                return Reflect.FieldValue(q, "isPaused") is true;
-        }
+        foreach (var q in EngineQueues.All(rm))
+            if (q.owner == player.NetId)
+                return q.paused;
         return false;
     }
 
@@ -337,11 +338,8 @@ public static class Dispatcher
     {
         if (RequirePhase(Phase.MainMenu) is { } err) return err;
 
-        if (args.ValueKind != JsonValueKind.Object
-            || !args.TryGetProperty("character", out var charEl)
-            || charEl.ValueKind != JsonValueKind.String)
+        if (!TryGetString(args, "character", out var entry))
             return DispatchResult.Reject("bad_request", "missing args.character");
-        var entry = charEl.GetString()!;
 
         var character = ModelDb.AllCharacters.FirstOrDefault(c =>
             string.Equals(c.Id.Entry, entry, StringComparison.OrdinalIgnoreCase));
@@ -368,14 +366,13 @@ public static class Dispatcher
                 return DispatchResult.Reject("run_exists",
                     "a run is loaded — if you just called new-run, poll /obs; otherwise call abandon first");
             SafeLog.Info("clearing a parked boot launch and relaunching");
-            if (!Reflect.SetProperty(prior, "State", null))
-                Reflect.SetField(prior, "<State>k__BackingField", null);
+            Reflect.SetPropertyOrBackingField(prior, "State", null);
         }
         _lastNewRunUtc = DateTime.UtcNow;
 
         // Optional reproducibility knobs; empty seed = engine random.
-        var seed = args.TryGetProperty("seed", out var seedEl) && seedEl.ValueKind == JsonValueKind.String
-            ? seedEl.GetString()!.ToUpperInvariant()
+        var seed = TryGetString(args, "seed", out var seedStr)
+            ? seedStr.ToUpperInvariant()
             : "";
         TryGetInt(args, "ascension", out var ascension);
 
@@ -473,11 +470,6 @@ public static class Dispatcher
 
     // ---- crystal sphere ---------------------------------------------------
 
-    private static MegaCrit.Sts2.Core.Nodes.Events.Custom.CrystalSphere.NCrystalSphereScreen?
-        CrystalScreen() =>
-        NOverlayStack.Instance?.Peek()
-            as MegaCrit.Sts2.Core.Nodes.Events.Custom.CrystalSphere.NCrystalSphereScreen;
-
     private static DispatchResult CrystalClick(int col, int row)
     {
         // Host: no screen — click the minigame model itself; its own
@@ -494,7 +486,7 @@ public static class Dispatcher
             return DispatchResult.Success();
         }
 
-        if (CrystalScreen() is not { } screen)
+        if (Screens.Crystal() is not { } screen)
             return DispatchResult.Reject("not_ready", "crystal sphere screen not mounted");
         var container = Reflect.Field<Godot.Control>(screen, "_cellContainer");
         var uiCell = FindCrystalCell(container, col, row);
@@ -529,12 +521,12 @@ public static class Dispatcher
             if (HeadlessCrystal.Entity is not { } entity)
                 return DispatchResult.Reject("not_ready", "no crystal sphere in progress");
             entity.SetTool(idx == 0
-                ? MegaCrit.Sts2.Core.Events.Custom.CrystalSphereEvent.CrystalSphereMinigame.CrystalSphereToolType.Small
-                : MegaCrit.Sts2.Core.Events.Custom.CrystalSphereEvent.CrystalSphereMinigame.CrystalSphereToolType.Big);
+                ? CrystalMinigame.CrystalSphereToolType.Small
+                : CrystalMinigame.CrystalSphereToolType.Big);
             return DispatchResult.Success();
         }
 
-        if (CrystalScreen() is not { } screen)
+        if (Screens.Crystal() is not { } screen)
             return DispatchResult.Reject("not_ready", "crystal sphere screen not mounted");
         Reflect.Invoke(screen, idx == 0 ? "SetSmallDivination" : "SetBigDivination",
             new object?[] { null });
@@ -556,9 +548,9 @@ public static class Dispatcher
         // Headless: an option that opens a deck picker (transform,
         // upgrade, …) awaits a card selection with no screen to serve it —
         // pre-arm the deferred picker; drop it if the option never asked.
-        if (RunMode.IsHeadless) HeadlessPicker.Push();
+        HeadlessPicker.Push();
         RunManager.Instance!.EventSynchronizer.ChooseLocalOption(idx);
-        if (RunMode.IsHeadless) HeadlessPicker.PopIfInactive();
+        HeadlessPicker.PopIfInactive();
         return DispatchResult.Success();
     }
 
@@ -675,7 +667,7 @@ public static class Dispatcher
                     HeadlessCrystal.Clear();
                     return DispatchResult.Success();
                 }
-                if (CrystalScreen() is not { } sphere)
+                if (Screens.Crystal() is not { } sphere)
                     return DispatchResult.Reject("not_ready", "crystal sphere screen not mounted");
                 Reflect.Invoke(sphere, "OnProceedButtonPressed", new object?[] { null });
                 return DispatchResult.Success();
@@ -730,11 +722,11 @@ public static class Dispatcher
     private static DispatchResult Buy(JsonElement args)
     {
         if (RequirePhase(Phase.Shop) is { } err) return err;
-        if (args.ValueKind != JsonValueKind.Object
-            || !args.TryGetProperty("kind", out var kindEl)
-            || kindEl.ValueKind != JsonValueKind.String)
+        if (!TryGetString(args, "kind", out var kind))
             return DispatchResult.Reject("bad_request", "missing args.kind");
-        var kind = kindEl.GetString()!;
+        if (kind is not ("card" or "colorless" or "relic" or "potion" or "card_removal"))
+            return DispatchResult.Reject("bad_request",
+                $"unknown kind '{kind}' (card, colorless, relic, potion, card_removal)");
         TryGetInt(args, "idx", out var idx);
 
         var rs = RunManager.Instance?.DebugOnlyGetState();
@@ -748,12 +740,8 @@ public static class Dispatcher
             "colorless" => inv.ColorlessCardEntries.ElementAtOrDefault(idx),
             "relic" => inv.RelicEntries.ElementAtOrDefault(idx),
             "potion" => inv.PotionEntries.ElementAtOrDefault(idx),
-            "card_removal" => inv.CardRemovalEntry,
-            _ => null,
+            _ => inv.CardRemovalEntry,
         };
-        if (kind is not ("card" or "colorless" or "relic" or "potion" or "card_removal"))
-            return DispatchResult.Reject("bad_request",
-                $"unknown kind '{kind}' (card, colorless, relic, potion, card_removal)");
         if (entry is null)
             return DispatchResult.Reject("bad_index", $"no {kind} at idx {idx}");
         if (!entry.IsStocked)
@@ -767,9 +755,9 @@ public static class Dispatcher
         // Card removal opens a deck-select sub-screen and the Task stays
         // pending until it's driven — poll /obs. Headless pre-arms the
         // deferred picker to stand in for that screen.
-        if (RunMode.IsHeadless) HeadlessPicker.Push();
+        HeadlessPicker.Push();
         Fire(entry.OnTryPurchaseWrapper(inv, false), "buy");
-        if (RunMode.IsHeadless) HeadlessPicker.PopIfInactive();
+        HeadlessPicker.PopIfInactive();
         return DispatchResult.Success();
     }
 
@@ -803,10 +791,9 @@ public static class Dispatcher
                     // The chest must be opened before picking or the room
                     // never wires its exit. (Headless: the treasure snapshot
                     // opens the chest through the room model instead.)
-                    if (room is not null
-                        && Reflect.FieldValue(room, "_hasChestBeenOpened") is not true)
+                    if (room is not null && !Screens.ChestOpened(room))
                     {
-                        var chest = Reflect.Field<MegaCrit.Sts2.Core.Nodes.GodotExtensions.NButton>(room, "_chestButton");
+                        var chest = Reflect.Field<NButton>(room, "_chestButton");
                         if (chest is null)
                             return DispatchResult.Reject("not_ready", "chest button not found");
                         chest.ForceClick();
@@ -824,9 +811,8 @@ public static class Dispatcher
 
             case Phase.RelicReward:
                 {
-                    var screen = NOverlayStack.Instance?.Peek() as NChooseARelicSelection;
-                    var row = screen is null ? null : Reflect.Field<Godot.Control>(screen, "_relicRow");
-                    var holders = row?.GetChildren().OfType<NRelicBasicHolder>().ToList();
+                    var screen = Screens.Top<NChooseARelicSelection>();
+                    var holders = screen is null ? null : Screens.RelicHolders(screen);
                     if (screen is null || holders is null || holders.Count == 0)
                         return DispatchResult.Reject("not_ready", "relic row not wired yet — retry");
                     if (idx < 0 || idx >= holders.Count)
@@ -856,15 +842,12 @@ public static class Dispatcher
                 : DispatchResult.Success();
 
         var screen = NOverlayStack.Instance?.Peek() as NRewardsScreen;
-        var buttons = screen is null
-            ? null
-            : Reflect.Field<System.Collections.IEnumerable>(screen, "_rewardButtons")
-                ?.Cast<object>().ToList();
+        var buttons = screen is null ? null : Screens.RewardButtons(screen);
         if (buttons is null)
             return DispatchResult.Reject("not_ready", "rewards screen not mounted");
         if (idx < 0 || idx >= buttons.Count)
             return DispatchResult.Reject("bad_index", $"reward idx {idx} out of range [0,{buttons.Count - 1}]");
-        if (buttons[idx] is not NRewardButton btn || !btn.IsEnabled || btn.Reward is null)
+        if (Screens.ClaimableReward(buttons[idx]) is not { } btn)
             return DispatchResult.Reject("bad_index", $"reward idx {idx} is not claimable (already taken?)");
 
         // The button's own async claim path; for card tiles the Task stays
@@ -917,9 +900,8 @@ public static class Dispatcher
                 ? DispatchResult.Reject("bad_index", msg)
                 : DispatchResult.Success();
 
-        var screen = NOverlayStack.Instance?.Peek() as NCardRewardSelectionScreen;
-        var row = screen is null ? null : Reflect.Field<Godot.Control>(screen, "_cardRow");
-        var holders = row?.GetChildren().OfType<NCardHolder>().ToList();
+        var screen = Screens.Top<NCardRewardSelectionScreen>();
+        var holders = screen is null ? null : Screens.CardHolders(screen);
         if (screen is null || holders is null || holders.Count == 0)
             return DispatchResult.Reject("not_ready", "card row not wired yet — retry");
         if (idx < 0 || idx >= holders.Count)
@@ -943,8 +925,7 @@ public static class Dispatcher
         // Choose-a-card overlays resolve on the pick itself.
         if (NOverlayStack.Instance?.Peek() is NChooseACardSelectionScreen choose)
         {
-            var chooseRow = Reflect.Field<Godot.Control>(choose, "_cardRow");
-            var chooseHolders = chooseRow?.GetChildren().OfType<NCardHolder>().ToList();
+            var chooseHolders = Screens.CardHolders(choose);
             if (chooseHolders is null || chooseHolders.Count == 0)
                 return DispatchResult.Reject("not_ready", "card row not wired yet — retry");
             if (idx < 0 || idx >= chooseHolders.Count)
@@ -955,8 +936,7 @@ public static class Dispatcher
         }
 
         var screen = NOverlayStack.Instance?.Peek() as NCardGridSelectionScreen;
-        var grid = screen is null ? null : Reflect.Field<NCardGrid>(screen, "_grid");
-        var cards = grid?.CurrentlyDisplayedCards.ToList();
+        var cards = screen is null ? null : Screens.GridCards(screen);
         if (screen is null || cards is null || cards.Count == 0)
             return DispatchResult.Reject("not_ready", "card grid not wired yet — retry");
         if (idx < 0 || idx >= cards.Count)
@@ -1008,9 +988,8 @@ public static class Dispatcher
                 var screen = NOverlayStack.Instance?.Peek() as NCardGridSelectionScreen;
                 if (screen is null)
                     return DispatchResult.Reject("not_ready", "selection screen not mounted");
-                var prefs = (CardSelectorPrefs)Reflect.FieldValue(screen, "_prefs")!;
-                var count = Reflect.Field<IEnumerable<CardModel>>(screen, "_selectedCards")
-                    ?.Count() ?? 0;
+                var prefs = Screens.Prefs(screen);
+                var count = Screens.SelectedCards(screen).Count();
                 switch (screen)
                 {
                     // These complete through their confirm button; mirror its gate.
@@ -1050,9 +1029,8 @@ public static class Dispatcher
                 var btn = Reflect.Field<NClickableControl>(hand, "_selectModeConfirmButton");
                 if (btn is not { IsEnabled: true })
                 {
-                    var prefs = (CardSelectorPrefs)Reflect.FieldValue(hand, "_prefs")!;
-                    var count = Reflect.Field<IEnumerable<CardModel>>(hand, "_selectedCards")
-                        ?.Count() ?? 0;
+                    var prefs = Screens.Prefs(hand);
+                    var count = Screens.SelectedCards(hand).Count();
                     return DispatchResult.Reject("not_ready",
                         $"confirm not available — {count} selected, need {prefs.MinSelect}..{prefs.MaxSelect}");
                 }
@@ -1064,6 +1042,17 @@ public static class Dispatcher
                 return DispatchResult.Reject("bad_phase",
                     $"confirm is valid in card_select/hand_select, current is {p.AsString()}");
         }
+    }
+
+    // Skip's alternative choice defaults to the lone alternative;
+    // otherwise args.idx must name one — same rule in both boots.
+    private static DispatchResult? ResolveAltIdx(JsonElement args, int count, out int idx)
+    {
+        idx = TryGetInt(args, "idx", out var i) ? i : (count == 1 ? 0 : -1);
+        return idx < 0 || idx >= count
+            ? DispatchResult.Reject("bad_request",
+                $"multiple alternatives — pass args.idx in [0,{count - 1}] (see obs.alternatives)")
+            : null;
     }
 
     private static DispatchResult Skip(JsonElement args)
@@ -1079,12 +1068,8 @@ public static class Dispatcher
                 var headlessAlts = HeadlessRewards.Alternatives();
                 if (headlessAlts.Count == 0)
                     return DispatchResult.Reject("bad_request", "this card reward cannot be skipped");
-                var headlessAltIdx = TryGetInt(args, "idx", out var headlessAlt)
-                    ? headlessAlt
-                    : (headlessAlts.Count == 1 ? 0 : -1);
-                if (headlessAltIdx < 0 || headlessAltIdx >= headlessAlts.Count)
-                    return DispatchResult.Reject("bad_request",
-                        $"multiple alternatives — pass args.idx in [0,{headlessAlts.Count - 1}] (see obs.alternatives)");
+                if (ResolveAltIdx(args, headlessAlts.Count, out var headlessAltIdx) is { } headlessErr)
+                    return headlessErr;
                 return HeadlessRewards.PickCard(headlessAltIdx, alternative: true) is { } altMsg
                     ? DispatchResult.Reject("bad_index", altMsg)
                     : DispatchResult.Success();
@@ -1110,14 +1095,11 @@ public static class Dispatcher
                 // Skip is one of the screen's "alternative" choices; picking
                 // alternative j resolves the screen's completion source just
                 // like a card click does.
-                var extras = Reflect.Field<System.Collections.IEnumerable>(cardScreen, "_extraOptions")
-                    ?.Cast<object>().ToList();
-                if (extras is null || extras.Count == 0)
+                var extras = Screens.ExtraOptions(cardScreen);
+                if (extras.Count == 0)
                     return DispatchResult.Reject("bad_request", "this card reward cannot be skipped");
-                var altIdx = TryGetInt(args, "idx", out var i) ? i : (extras.Count == 1 ? 0 : -1);
-                if (altIdx < 0 || altIdx >= extras.Count)
-                    return DispatchResult.Reject("bad_request",
-                        $"multiple alternatives — pass args.idx in [0,{extras.Count - 1}] (see obs.alternatives)");
+                if (ResolveAltIdx(args, extras.Count, out var altIdx) is { } altErr)
+                    return altErr;
                 Reflect.Invoke(cardScreen, "OnAlternateRewardSelected", altIdx);
                 return DispatchResult.Success();
 
@@ -1137,8 +1119,7 @@ public static class Dispatcher
             case Phase.CardSelect:
                 if (NOverlayStack.Instance?.Peek() is NChooseACardSelectionScreen chooseSel)
                 {
-                    if (Reflect.Field<MegaCrit.Sts2.Core.Nodes.GodotExtensions.NClickableControl>(
-                            chooseSel, "_skipButton") is not { IsEnabled: true })
+                    if (!Screens.ChooseSkipEnabled(chooseSel))
                         return DispatchResult.Reject("bad_request", "this selection cannot be skipped");
                     Reflect.Invoke(chooseSel, "OnSkipButtonReleased", new object?[] { null });
                     return DispatchResult.Success();
@@ -1148,7 +1129,7 @@ public static class Dispatcher
                 // Only the deck pickers have a close button, gated by
                 // prefs.Cancelable (shop removal is; rest-site upgrade isn't).
                 if (sel is NSimpleCardSelectScreen or NCombatPileCardSelectScreen
-                    || !((CardSelectorPrefs)Reflect.FieldValue(sel, "_prefs")!).Cancelable)
+                    || !Screens.Prefs(sel).Cancelable)
                     return DispatchResult.Reject("bad_request", "this selection cannot be skipped");
                 Reflect.Invoke(sel, "CloseSelection", new object?[] { null });
                 return DispatchResult.Success();
@@ -1192,12 +1173,7 @@ public static class Dispatcher
                 $"node {col},{row} not reachable; reachable col,row: [{legal}]");
         }
 
-        if (LocalQueueBlocked(rm, player))
-            return DispatchResult.Reject("not_ready", "action queue is paused — retry");
-        if (MapIntroBlocksTravel())
-            return DispatchResult.Reject("not_ready", "map intro animation — retry");
-        EnqueueMapVote(rm, rs, player, target.coord);
-        return DispatchResult.Success();
+        return TravelTo(rm, rs, player, target);
     }
 
     // ---- combat ----------------------------------------------------------
@@ -1224,7 +1200,10 @@ public static class Dispatcher
         {
             "play" => Play(args, state, player),
             "potion-use" => PotionUse(args, state, player),
-            _ => EndTurn(state, player),
+            "end-turn" => EndTurn(state, player),
+            // Unreachable via Dispatch's verb grouping — reject rather than
+            // silently ending the turn if the grouping ever grows.
+            _ => DispatchResult.Reject("bad_request", $"unknown combat verb '{action}'"),
         };
     }
 
@@ -1242,9 +1221,9 @@ public static class Dispatcher
         var (target, err) = ResolveTarget(potion.TargetType, args, state, player);
         if (err is not null) return err.Value;
         // Some potions (Attack Potion, …) open a card pick mid-effect.
-        if (RunMode.IsHeadless) HeadlessPicker.Push();
+        HeadlessPicker.Push();
         potion.EnqueueManualUse(target!);
-        if (RunMode.IsHeadless) HeadlessPicker.PopIfInactive();
+        HeadlessPicker.PopIfInactive();
         return DispatchResult.Success();
     }
 
@@ -1270,11 +1249,8 @@ public static class Dispatcher
 
     private static DispatchResult Play(JsonElement args, CombatState state, Player player)
     {
-        if (args.ValueKind != JsonValueKind.Object
-            || !args.TryGetProperty("model", out var modelEl)
-            || modelEl.ValueKind != JsonValueKind.String)
+        if (!TryGetString(args, "model", out var model))
             return DispatchResult.Reject("bad_request", "missing args.model");
-        var model = modelEl.GetString()!;
 
         var pcs = player.PlayerCombatState!;
         var card = pcs.Hand.Cards.FirstOrDefault(c =>
@@ -1299,9 +1275,9 @@ public static class Dispatcher
         // Headless: cards that ask for a hand/pile pick mid-resolution
         // await the deferred picker; the play action stays pending (phase
         // flips to hand_select) until pick-card resolves it.
-        if (RunMode.IsHeadless) HeadlessPicker.Push();
+        HeadlessPicker.Push();
         Enqueue(rm, new PlayCardAction(card, target!));
-        if (RunMode.IsHeadless) HeadlessPicker.PopIfInactive();
+        HeadlessPicker.PopIfInactive();
         return DispatchResult.Success();
     }
 

@@ -7,6 +7,7 @@ using MegaCrit.Sts2.Core.Nodes.Screens.Map;
 using MegaCrit.Sts2.Core.Nodes.Screens.Overlays;
 using MegaCrit.Sts2.Core.Rooms;
 using MegaCrit.Sts2.Core.Runs;
+using CrystalScreen = MegaCrit.Sts2.Core.Nodes.Events.Custom.CrystalSphere.NCrystalSphereScreen;
 
 namespace Spirescry.State;
 
@@ -97,8 +98,7 @@ public static class PhaseDetector
                 // separate type with the same pick-one semantics.
                 NCardGridSelectionScreen or NChooseACardSelectionScreen => Phase.CardSelect,
                 NChooseABundleSelectionScreen => Phase.BundleSelect,
-                MegaCrit.Sts2.Core.Nodes.Events.Custom.CrystalSphere.NCrystalSphereScreen
-                    => Phase.CrystalSphere,
+                CrystalScreen => Phase.CrystalSphere,
                 _ => Phase.Overlay,
             };
 

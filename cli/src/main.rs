@@ -2,7 +2,8 @@
 //
 // Read the board with `obs`, act with `play` / `end-turn`. Output is
 // pretty-printed JSON; bridge errors ({ok:false, err, msg}) go to stderr
-// with a non-zero exit.
+// with a non-zero exit — 75 (EX_TEMPFAIL) for the retryable `not_ready`,
+// 1 for everything else.
 
 use std::io::Write;
 use std::process::ExitCode;
@@ -129,82 +130,38 @@ fn main() -> ExitCode {
             }
             post(&base, "/step", json!({ "action": "new-run", "args": args }))
         }
-        Cmd::Abandon => post(&base, "/step", json!({ "action": "abandon", "args": {} })),
-        Cmd::EventOption { idx } => post(
-            &base,
-            "/step",
-            json!({ "action": "option", "args": { "idx": idx } }),
-        ),
-        Cmd::Proceed => post(&base, "/step", json!({ "action": "proceed", "args": {} })),
-        Cmd::PickReward { idx } => post(
-            &base,
-            "/step",
-            json!({ "action": "pick-reward", "args": { "idx": idx } }),
-        ),
-        Cmd::PickCard { idx } => post(
-            &base,
-            "/step",
-            json!({ "action": "pick-card", "args": { "idx": idx } }),
-        ),
-        Cmd::Confirm => post(&base, "/step", json!({ "action": "confirm", "args": {} })),
-        Cmd::Skip => post(&base, "/step", json!({ "action": "skip", "args": {} })),
-        Cmd::Buy { kind, idx } => post(
-            &base,
-            "/step",
-            json!({ "action": "buy", "args": { "kind": kind, "idx": idx } }),
-        ),
-        Cmd::Leave => post(&base, "/step", json!({ "action": "leave", "args": {} })),
-        Cmd::PickRelic { idx } => post(
-            &base,
-            "/step",
-            json!({ "action": "pick-relic", "args": { "idx": idx } }),
-        ),
-        Cmd::Cheat { name, values } => (|| {
-            let mut args = json!({ "name": name });
-            let num = |s: &String| {
-                s.parse::<i64>()
-                    .map_err(|_| format!("invalid number: {}", s))
-            };
-            match (name.as_str(), values.as_slice()) {
-                ("goto", [col, row]) => {
-                    args["col"] = json!(num(col)?);
-                    args["row"] = json!(num(row)?);
-                }
-                ("gold", [value]) | ("hp", [value]) => args["value"] = json!(num(value)?),
-                ("event", [id]) => args["id"] = json!(id),
-                _ => {}
-            }
-            post(&base, "/step", json!({ "action": "cheat", "args": args }))
-        })(),
-        Cmd::MapMove { col, row } => post(
-            &base,
-            "/step",
-            json!({ "action": "map-move", "args": { "col": col, "row": row } }),
-        ),
+        Cmd::Abandon => step(&base, "abandon", json!({})),
+        Cmd::EventOption { idx } => step(&base, "option", json!({ "idx": idx })),
+        Cmd::Proceed => step(&base, "proceed", json!({})),
+        Cmd::PickReward { idx } => step(&base, "pick-reward", json!({ "idx": idx })),
+        Cmd::PickCard { idx } => step(&base, "pick-card", json!({ "idx": idx })),
+        Cmd::Confirm => step(&base, "confirm", json!({})),
+        Cmd::Skip => step(&base, "skip", json!({})),
+        Cmd::Buy { kind, idx } => step(&base, "buy", json!({ "kind": kind, "idx": idx })),
+        Cmd::Leave => step(&base, "leave", json!({})),
+        Cmd::PickRelic { idx } => step(&base, "pick-relic", json!({ "idx": idx })),
+        Cmd::Cheat { name, values } => {
+            cheat_args(name, values).and_then(|args| step(&base, "cheat", args))
+        }
+        Cmd::MapMove { col, row } => {
+            step(&base, "map-move", json!({ "col": col, "row": row }))
+        }
         Cmd::Play { model, target } => {
             let mut args = json!({ "model": model });
             if let Some(t) = target {
                 args["target"] = json!(t);
             }
-            post(&base, "/step", json!({ "action": "play", "args": args }))
+            step(&base, "play", args)
         }
-        Cmd::EndTurn => post(&base, "/step", json!({ "action": "end-turn", "args": {} })),
+        Cmd::EndTurn => step(&base, "end-turn", json!({})),
         Cmd::PotionUse { slot, target } => {
             let mut args = json!({ "slot": slot });
             if let Some(t) = target {
                 args["target"] = json!(t);
             }
-            post(
-                &base,
-                "/step",
-                json!({ "action": "potion-use", "args": args }),
-            )
+            step(&base, "potion-use", args)
         }
-        Cmd::PotionDiscard { slot } => post(
-            &base,
-            "/step",
-            json!({ "action": "potion-discard", "args": { "slot": slot } }),
-        ),
+        Cmd::PotionDiscard { slot } => step(&base, "potion-discard", json!({ "slot": slot })),
     };
     match result {
         Ok(v) => {
@@ -222,9 +179,35 @@ fn main() -> ExitCode {
         }
         Err(e) => {
             eprintln!("spirescry: {}", e);
-            ExitCode::FAILURE
+            // EX_TEMPFAIL: callers can retry on the exit code instead of
+            // grepping stderr for the transient signal.
+            if e.starts_with("not_ready") {
+                ExitCode::from(75)
+            } else {
+                ExitCode::FAILURE
+            }
         }
     }
+}
+
+// Positional sugar for the known cheat arg shapes; the bridge's own
+// per-cheat validation is the source of truth.
+fn cheat_args(name: &str, values: &[String]) -> Result<Value, String> {
+    let mut args = json!({ "name": name });
+    let num = |s: &String| {
+        s.parse::<i64>()
+            .map_err(|_| format!("invalid number: {}", s))
+    };
+    match (name, values) {
+        ("goto", [col, row]) => {
+            args["col"] = json!(num(col)?);
+            args["row"] = json!(num(row)?);
+        }
+        ("gold", [value]) | ("hp", [value]) => args["value"] = json!(num(value)?),
+        ("event", [id]) => args["id"] = json!(id),
+        _ => {}
+    }
+    Ok(args)
 }
 
 fn get(base: &str, path: &str) -> Result<Value, String> {
@@ -233,6 +216,10 @@ fn get(base: &str, path: &str) -> Result<Value, String> {
 
 fn post(base: &str, path: &str, body: Value) -> Result<Value, String> {
     handle(ureq::post(&format!("{}{}", base, path)).send_json(body))
+}
+
+fn step(base: &str, action: &str, args: Value) -> Result<Value, String> {
+    post(base, "/step", json!({ "action": action, "args": args }))
 }
 
 fn handle(result: Result<ureq::Response, ureq::Error>) -> Result<Value, String> {
