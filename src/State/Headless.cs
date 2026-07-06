@@ -306,15 +306,6 @@ public static class HeadlessRewards
         return null;
     }
 
-    public static bool SkipActiveCardPick()
-    {
-        if (_activeCardPick is not { } cr) return false;
-        InvokeOnSkipped(cr);
-        NullSlotFor(cr);
-        _activeCardPick = null;
-        return true;
-    }
-
     // Leave the virtual rewards screen: skip whatever's unclaimed, mark
     // this room consumed.
     public static void SkipAllAndClear()

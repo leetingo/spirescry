@@ -8,6 +8,7 @@ cli/target/
 headless/build/
 headless/*/bin/
 headless/*/obj/
+__pycache__/
 
 # OS / editor cruft
 .DS_Store

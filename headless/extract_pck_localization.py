@@ -14,6 +14,7 @@ FILE_FLAG_ENCRYPTED = 1
 def main(pck_path: str, out_dir: str, prefix: str = "res://localization/"):
     out = pathlib.Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
+    out_resolved = out.resolve()
 
     with open(pck_path, "rb") as f:
         data = f.read()
@@ -79,7 +80,10 @@ def main(pck_path: str, out_dir: str, prefix: str = "res://localization/"):
             actual_offset = file_base + offset
         body = data[actual_offset:actual_offset + size]
         rel = path[len("res://"):] if path.startswith("res://") else path
-        out_path = out / rel
+        out_path = (out / rel).resolve()
+        if not out_path.is_relative_to(out_resolved):
+            print(f"skip (escapes out_dir): {path}", file=sys.stderr)
+            continue
         out_path.parent.mkdir(parents=True, exist_ok=True)
         with open(out_path, "wb") as g:
             g.write(body)

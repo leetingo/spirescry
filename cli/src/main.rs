@@ -4,6 +4,7 @@
 // pretty-printed JSON; bridge errors ({ok:false, err, msg}) go to stderr
 // with a non-zero exit.
 
+use std::io::Write;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
@@ -104,11 +105,15 @@ fn main() -> ExitCode {
     let result = match &cli.cmd {
         Cmd::Health => get(&base, "/health"),
         Cmd::Obs { since, wait } => {
-            let mut path = String::from("/obs");
-            if let Some(s) = since {
-                path = format!("{}?since={}&wait={}", path, s, wait.unwrap_or(5000));
+            if wait.is_some() && since.is_none() {
+                Err("--wait has no effect without --since".to_string())
+            } else {
+                let mut path = String::from("/obs");
+                if let Some(s) = since {
+                    path = format!("{}?since={}&wait={}", path, s, wait.unwrap_or(5000));
+                }
+                get(&base, &path)
             }
-            get(&base, &path)
         }
         Cmd::NewRun {
             character,
@@ -154,20 +159,23 @@ fn main() -> ExitCode {
             "/step",
             json!({ "action": "pick-relic", "args": { "idx": idx } }),
         ),
-        Cmd::Cheat { name, values } => {
+        Cmd::Cheat { name, values } => (|| {
             let mut args = json!({ "name": name });
-            let num = |s: &String| s.parse::<i64>().ok();
+            let num = |s: &String| {
+                s.parse::<i64>()
+                    .map_err(|_| format!("invalid number: {}", s))
+            };
             match (name.as_str(), values.as_slice()) {
                 ("goto", [col, row]) => {
-                    args["col"] = json!(num(col));
-                    args["row"] = json!(num(row));
+                    args["col"] = json!(num(col)?);
+                    args["row"] = json!(num(row)?);
                 }
-                ("gold", [value]) | ("hp", [value]) => args["value"] = json!(num(value)),
+                ("gold", [value]) | ("hp", [value]) => args["value"] = json!(num(value)?),
                 ("event", [id]) => args["id"] = json!(id),
                 _ => {}
             }
             post(&base, "/step", json!({ "action": "cheat", "args": args }))
-        }
+        })(),
         Cmd::MapMove { col, row } => post(
             &base,
             "/step",
@@ -200,8 +208,17 @@ fn main() -> ExitCode {
     };
     match result {
         Ok(v) => {
-            println!("{}", serde_json::to_string_pretty(&v).unwrap());
-            ExitCode::SUCCESS
+            let text = serde_json::to_string_pretty(&v).unwrap();
+            // A plain println! panics on a closed pipe (e.g. `| head -1`);
+            // write directly so that just exits quietly instead.
+            match writeln!(std::io::stdout(), "{}", text) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("spirescry: {}", e);
+                    ExitCode::FAILURE
+                }
+            }
         }
         Err(e) => {
             eprintln!("spirescry: {}", e);

@@ -500,7 +500,7 @@ public static class Dispatcher
         var uiCell = FindCrystalCell(container, col, row);
         if (uiCell is null)
             return DispatchResult.Reject("bad_target", $"no cell at {col},{row} (see obs.cells)");
-        Reflect.Invoke(screen, "OnCellClicked", uiCell);
+        if (Reflect.Invoke(screen, "OnCellClicked", uiCell) is Task cellTask) Fire(cellTask, "crystal-click");
         return DispatchResult.Success();
     }
 
@@ -1071,15 +1071,23 @@ public static class Dispatcher
         switch (PhaseDetector.Current())
         {
             case Phase.CardReward when RunMode.IsHeadless:
-                // skip with idx = take that alternative (trade offers, …);
-                // bare skip declines the reward.
-                if (TryGetInt(args, "idx", out var headlessAlt))
-                    return HeadlessRewards.PickCard(headlessAlt, alternative: true) is { } altMsg
-                        ? DispatchResult.Reject("bad_index", altMsg)
-                        : DispatchResult.Success();
-                return HeadlessRewards.SkipActiveCardPick()
-                    ? DispatchResult.Success()
-                    : DispatchResult.Reject("not_ready", "no card reward pending");
+                if (!HeadlessRewards.InCardPick)
+                    return DispatchResult.Reject("not_ready", "no card reward pending");
+                // Skip is one of the reward's own "alternative" choices —
+                // mirrors the GUI branch below (its _extraOptions gate),
+                // not a separate decline path.
+                var headlessAlts = HeadlessRewards.Alternatives();
+                if (headlessAlts.Count == 0)
+                    return DispatchResult.Reject("bad_request", "this card reward cannot be skipped");
+                var headlessAltIdx = TryGetInt(args, "idx", out var headlessAlt)
+                    ? headlessAlt
+                    : (headlessAlts.Count == 1 ? 0 : -1);
+                if (headlessAltIdx < 0 || headlessAltIdx >= headlessAlts.Count)
+                    return DispatchResult.Reject("bad_request",
+                        $"multiple alternatives — pass args.idx in [0,{headlessAlts.Count - 1}] (see obs.alternatives)");
+                return HeadlessRewards.PickCard(headlessAltIdx, alternative: true) is { } altMsg
+                    ? DispatchResult.Reject("bad_index", altMsg)
+                    : DispatchResult.Success();
 
             case Phase.CardSelect when RunMode.IsHeadless:
                 // Empty selection = the engine's own cancel path.

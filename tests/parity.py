@@ -2,7 +2,7 @@
 """Dual-mode conformance test for the spirescry bridge.
 
 Drives one act-1 loop (new-run, Neow, combat, rewards, rest-site smith,
-shop removal, treasure, abandon) against whichever bridge is up, polling
+shop removal, potions, treasure, abandon) against whichever bridge is up, polling
 after every action — so the same script passes on the in-game boot
 (actions resolve over frames) and the host boot (actions resolve inline).
 
@@ -80,7 +80,8 @@ def step(msg):
 
 
 def kill_current_combat():
-    """Cheat-kill whatever we're fighting; returns when combat is over."""
+    """Cheat-kill whatever we're fighting; use a potion once if one's on hand."""
+    used_potion = False
     for _ in range(30):
         d = obs()
         if d["phase"] != "combat":
@@ -88,6 +89,16 @@ def kill_current_combat():
         if d.get("side") != "player":
             time.sleep(1.5)
             continue
+        if not used_potion:
+            used_potion = True
+            pot = next(iter(d["you"].get("potions", [])), None)
+            if pot:
+                alive_now = [e for e in d["enemies"] if e["alive"]]
+                if pot["target"] == "anyenemy" and alive_now:
+                    run("potion-use", str(pot["slot"]), "--target",
+                        str(alive_now[0]["id"]), ok_fail=True)
+                else:
+                    run("potion-use", str(pot["slot"]), ok_fail=True)
         run("cheat", "heal", ok_fail=True)
         run("cheat", "wound-enemies", ok_fail=True)
         d = obs()
@@ -197,6 +208,22 @@ def drive():
         wait_phase("shop")
         gold = obs()["gold"]
         assert gold == 925, f"expected 925 gold after removal, got {gold}"
+
+        step("shop: potions (potion-use/potion-discard checks)")
+        for_sale = obs().get("potions", [])
+        bought = sum(
+            1 for idx in range(min(2, len(for_sale)))
+            if run("buy", "potion", "--idx", str(idx), ok_fail=True)
+        )
+        if bought == 0:
+            print("    no potions in the shop this run — skipped")
+        else:
+            print(f"    bought {bought} potion(s)")
+            slot = obs()["potions"][0]["slot"]
+            run("potion-discard", str(slot))
+            assert not any(p["slot"] == slot for p in obs()["potions"]), \
+                "potion-discard did not clear the slot"
+
         run("leave")
         wait_phase("map")
 

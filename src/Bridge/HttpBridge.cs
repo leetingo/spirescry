@@ -37,8 +37,16 @@ public sealed class HttpBridge
         {
             HttpListenerContext ctx;
             try { ctx = await _listener!.GetContextAsync(); }
-            catch (HttpListenerException) { break; }
-            catch (ObjectDisposedException) { break; }
+            catch (HttpListenerException ex)
+            {
+                SafeLog.Error("accept loop stopped", ex);
+                break;
+            }
+            catch (ObjectDisposedException ex)
+            {
+                SafeLog.Error("accept loop stopped", ex);
+                break;
+            }
             _ = Task.Run(() => HandleAsync(ctx));
         }
     }

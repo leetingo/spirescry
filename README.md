@@ -143,6 +143,7 @@ Environment:
 | `STS2_AGENT_HOST`   | `127.0.0.1`            | CLI only (also `--host`) — the bridge always binds 127.0.0.1    |
 | `STS2_AGENT_LANG`   | `eng`                  | host only — locale for the extracted text tables                |
 | `STS2_HEADLESS_LIB` | `headless/build/lib`   | host only — patched dll + deps + loc tables                     |
+| `STS2_HOST_DEBUG`   | unset                  | host only — `1` prints first-chance exception stacks to stderr  |
 
 ## Architecture
 
