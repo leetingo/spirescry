@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <AssemblyName>spirescry</AssemblyName>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <CopyLocalLockFileAssemblies>false</CopyLocalLockFileAssemblies>
+    <ProduceReferenceAssembly>false</ProduceReferenceAssembly>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+  </PropertyGroup>
+
+  <!-- Game/runtime references. Private=false: these live in the game
+       process; our dll loads into the same AssemblyLoadContext. -->
+  <ItemGroup>
+    <Reference Include="sts2">
+      <HintPath>..\lib\sts2.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="GodotSharp">
+      <HintPath>..\lib\GodotSharp.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+</Project>

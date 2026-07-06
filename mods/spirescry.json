@@ -1,0 +1,11 @@
+{
+  "id": "spirescry",
+  "name": "Spirescry",
+  "author": "leetingo",
+  "description": "Agent play interface: a localhost HTTP bridge exposing observations and actions \u2014 scry the board, fire one verb.",
+  "version": "0.1.0",
+  "has_pck": false,
+  "has_dll": true,
+  "dependencies": [],
+  "affects_gameplay": true
+}
