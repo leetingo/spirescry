@@ -13,21 +13,29 @@ import time
 def cli(*args):
     """Run one spirescry command. not_ready is the bridge's transient
     signal (queue paused, map intro window, ...) — by contract the agent
-    retries it (the CLI exits 75 for it)."""
+    retries it (the CLI exits 75, EX_TEMPFAIL, for exactly that)."""
     for _ in range(15):
         r = subprocess.run(["spirescry", *args], capture_output=True, text=True)
-        if r.returncode == 0 or (r.returncode != 75 and "not_ready" not in r.stderr):
+        if r.returncode != 75:
             break
         time.sleep(0.4)
     return r
 
 
-def obs(since=None, wait_ms=2000):
-    args = ["obs"] if since is None else ["obs", "--since", str(since), "--wait", str(wait_ms)]
+def run(*args, ok=False):
+    """One CLI call that must succeed. ok=True tolerates failure and
+    returns {"_err": stderr}; otherwise a failure ends the harness."""
     r = cli(*args)
     if r.returncode != 0:
+        if ok:
+            return {"_err": r.stderr.strip()}
         sys.exit(f"FAIL: spirescry {' '.join(args)} -> {r.stderr.strip()}")
-    return json.loads(r.stdout)
+    return json.loads(r.stdout) if r.stdout.strip() else {}
+
+
+def obs(since=None, wait_ms=2000):
+    args = ["obs"] if since is None else ["obs", "--since", str(since), "--wait", str(wait_ms)]
+    return run(*args)
 
 
 def wait_phase(*want, timeout=20, raise_on_timeout=True, on_obs=None):

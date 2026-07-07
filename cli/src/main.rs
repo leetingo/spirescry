@@ -128,7 +128,7 @@ fn main() -> ExitCode {
             if let Some(a) = ascension {
                 args["ascension"] = json!(a);
             }
-            post(&base, "/step", json!({ "action": "new-run", "args": args }))
+            step(&base, "new-run", args)
         }
         Cmd::Abandon => step(&base, "abandon", json!({})),
         Cmd::EventOption { idx } => step(&base, "option", json!({ "idx": idx })),

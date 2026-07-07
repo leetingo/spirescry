@@ -62,8 +62,8 @@ public static class Snapshotter
     {
         var bundles = RunMode.IsHeadless
             ? HeadlessBundle.Bundles
-            : NOverlayStack.Instance?.Peek() is NChooseABundleSelectionScreen screen
-                ? Reflect.Field<IReadOnlyList<IReadOnlyList<CardModel>>>(screen, "_bundles")
+            : Screens.Top<NChooseABundleSelectionScreen>() is { } screen
+                ? Screens.Bundles(screen)
                 : null;
         if (bundles is null || bundles.Count == 0) return new { phase, available = false };
         return new
@@ -86,7 +86,7 @@ public static class Snapshotter
         var entity = RunMode.IsHeadless
             ? HeadlessCrystal.Entity
             : Screens.Crystal() is { } screen
-                ? Reflect.FieldValue(screen, "_entity") as CrystalMinigame
+                ? Screens.CrystalEntity(screen)
                 : null;
         if (entity is null) return new { phase, available = false };
 
@@ -208,7 +208,7 @@ public static class Snapshotter
     private static object ShopSnapshot(string phase)
     {
         var rs = RunManager.Instance?.DebugOnlyGetState();
-        var inv = (rs?.CurrentRoom as MerchantRoom)?.GetLocalInventory();
+        var inv = Screens.ShopInventory(rs);
         if (rs is null || inv is null) return new { phase, available = false };
         var player = LocalContext.GetMe(rs);
 
@@ -250,12 +250,9 @@ public static class Snapshotter
         };
     }
 
-    // In the GUI the visual node owns the options and the room model's
-    // list stays empty; headless it's the other way around.
     private static object RestSiteSnapshot(string phase)
     {
-        var options = NRestSiteRoom.Instance?.Options
-            ?? (RunManager.Instance?.DebugOnlyGetState()?.CurrentRoom as RestSiteRoom)?.Options;
+        var options = Screens.RestOptions();
         if (options is null) return new { phase, available = false };
         return new
         {
@@ -341,7 +338,7 @@ public static class Snapshotter
                     .Select(s => RewardView(s.reward, s.idx)).ToList(),
             };
 
-        var screen = NOverlayStack.Instance?.Peek() as NRewardsScreen;
+        var screen = Screens.Top<NRewardsScreen>();
         var buttons = screen is null ? null : Screens.RewardButtons(screen);
         if (buttons is null) return new { phase, available = false };
 
@@ -441,19 +438,18 @@ public static class Snapshotter
         description = CardDescription(c),
     };
 
+    private static object HandCardView(string? model, bool upgraded, int i) => new
+    {
+        idx = i,
+        model,
+        upgraded,
+    };
+
     private static object MapSnapshot(string phase)
     {
         var rs = RunManager.Instance?.DebugOnlyGetState();
         if (rs is null) return new { phase, available = false };
 
-        var next = NextPoints(rs)
-            .Select(p => new
-            {
-                col = p.coord.col,
-                row = p.coord.row,
-                type = p.PointType.ToString().ToLowerInvariant(),
-            })
-            .ToArray();
         return new
         {
             phase,
@@ -461,17 +457,20 @@ public static class Snapshotter
             seed = rs.Rng?.StringSeed ?? "",
             player = FooterView(),
             current = rs.CurrentMapCoord is { } c ? new[] { c.col, c.row } : null,
-            next,
+            next = NextPoints(rs).Select(MapPointView).ToArray(),
             graph = rs.Map is { } map
-                ? AllMapPoints(map).Select(p => new
-                {
-                    col = p.coord.col,
-                    row = p.coord.row,
-                    type = p.PointType.ToString().ToLowerInvariant(),
-                }).ToArray()
+                ? AllMapPoints(map).Select(MapPointView).ToArray()
                 : [],
         };
     }
+
+    // Shared by obs.next and obs.graph so the two views can't drift.
+    private static object MapPointView(MegaCrit.Sts2.Core.Map.MapPoint p) => new
+    {
+        col = p.coord.col,
+        row = p.coord.row,
+        type = p.PointType.ToString().ToLowerInvariant(),
+    };
 
     // BFS over the act map from its start points. The final act's second
     // boss hangs off the map without a child edge — include it explicitly.
@@ -495,15 +494,19 @@ public static class Snapshotter
     {
         var children = rs.CurrentMapPoint?.Children ?? rs.Map?.startMapPoints;
         foreach (var p in children ?? []) if (p is not null) yield return p;
-        if (rs.Map is { SecondBossMapPoint: { } second } map
-            && rs.CurrentMapPoint is { } here && ReferenceEquals(here, map.BossMapPoint))
-            yield return second;
+        if (SecondBossPending(rs)) yield return rs.Map!.SecondBossMapPoint!;
     }
+
+    // Standing on the beaten first boss of a two-boss act: the run stays
+    // in the act and the second boss is the only next step. Shared with
+    // the rewards-proceed verb so map view and act exit can't disagree.
+    internal static bool SecondBossPending(RunState rs) =>
+        rs.Map is { SecondBossMapPoint: not null } map
+        && rs.CurrentMapPoint is { } here && ReferenceEquals(here, map.BossMapPoint);
 
     private static object EventSnapshot(string phase)
     {
-        var ev = (RunManager.Instance?.DebugOnlyGetState()?.CurrentRoom as EventRoom)
-            ?.LocalMutableEvent;
+        var ev = Screens.CurrentEvent();
         if (ev is null) return new { phase, available = false };
 
         // Fills per-event vars into option text. Neow-style events format
@@ -644,12 +647,8 @@ public static class Snapshotter
                 min = HeadlessPicker.MinSelect,
                 max = HeadlessPicker.MaxSelect,
                 selected = picked.Select(c => c.Id.Entry).ToArray(),
-                cards = HeadlessPicker.Candidates.Select((c, i) => new
-                {
-                    idx = i,
-                    model = c.Id.Entry,
-                    upgraded = c.IsUpgraded,
-                }).ToArray(),
+                cards = HeadlessPicker.Candidates
+                    .Select((c, i) => HandCardView(c.Id.Entry, c.IsUpgraded, i)).ToArray(),
             };
         return new
         {
@@ -670,7 +669,7 @@ public static class Snapshotter
 
         // Choose-a-card overlays (Discovery, event card offers): a card
         // row, pick one, done — no confirm step.
-        if (NOverlayStack.Instance?.Peek() is NChooseACardSelectionScreen choose)
+        if (Screens.Top<NChooseACardSelectionScreen>() is { } choose)
         {
             var chooseHolders = Screens.CardHolders(choose);
             if (chooseHolders is null || chooseHolders.Count == 0)
@@ -687,7 +686,7 @@ public static class Snapshotter
             };
         }
 
-        var screen = NOverlayStack.Instance?.Peek() as NCardGridSelectionScreen;
+        var screen = Screens.Top<NCardGridSelectionScreen>();
         var cards = screen is null ? null : Screens.GridCards(screen);
         if (screen is null || cards is null || cards.Count == 0)
             return new { phase, available = false };
@@ -726,12 +725,9 @@ public static class Snapshotter
             min = prefs.MinSelect,
             max = prefs.MaxSelect,
             selected = selected.Select(c => c.Id.Entry).ToArray(),
-            cards = hand.ActiveHolders.Select((h, i) => new
-            {
-                idx = i,
-                model = h.CardNode?.Model.Id.Entry,
-                upgraded = h.CardNode?.Model.IsUpgraded ?? false,
-            }).ToArray(),
+            cards = hand.ActiveHolders.Select((h, i) =>
+                HandCardView(h.CardNode?.Model.Id.Entry, h.CardNode?.Model.IsUpgraded ?? false, i))
+                .ToArray(),
         };
     }
 }

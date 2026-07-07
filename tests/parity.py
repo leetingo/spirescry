@@ -36,11 +36,7 @@ def record(d):
             slot.setdefault(k + "[]", sorted(v[0].keys()))
 
 
-def run(*args, ok_fail=False):
-    r = bridge.cli(*args)
-    if r.returncode != 0 and not ok_fail:
-        sys.exit(f"FAIL: spirescry {' '.join(args)} -> {r.stderr.strip()}")
-    return json.loads(r.stdout) if r.stdout.strip() else {}
+run = bridge.run
 
 
 def obs():
@@ -61,7 +57,7 @@ def launch_run():
     # A launch fired into a cold boot window can be dropped silently —
     # retry it if it didn't land.
     for attempt in range(3):
-        run("new-run", "IRONCLAD", ok_fail=attempt > 0)
+        run("new-run", "IRONCLAD", ok=attempt > 0)
         try:
             wait_phase("event", timeout=40)
             return
@@ -102,35 +98,35 @@ def kill_current_combat():
                 alive_now = [e for e in d["enemies"] if e["alive"]]
                 if pot["target"] == "anyenemy" and alive_now:
                     run("potion-use", str(pot["slot"]), "--target",
-                        str(alive_now[0]["id"]), ok_fail=True)
+                        str(alive_now[0]["id"]), ok=True)
                 else:
-                    run("potion-use", str(pot["slot"]), ok_fail=True)
-        run("cheat", "heal", ok_fail=True)
-        run("cheat", "wound-enemies", ok_fail=True)
+                    run("potion-use", str(pot["slot"]), ok=True)
+        run("cheat", "heal", ok=True)
+        run("cheat", "wound-enemies", ok=True)
         d = obs()
         if d["phase"] != "combat":
             return
         alive = [e for e in d["enemies"] if e["alive"]]
         if not alive:
             # transforming bosses revive on their own turn
-            run("end-turn", ok_fail=True)
+            run("end-turn", ok=True)
             time.sleep(1.5)
             continue
         energy = d["you"]["energy"][0]
         atk = next((c for c in d["hand"]
                     if c["target"] == "anyenemy" and c["cost"] <= energy), None)
         if atk:
-            run("play", atk["model"], "--target", str(alive[0]["id"]), ok_fail=True)
+            run("play", atk["model"], "--target", str(alive[0]["id"]), ok=True)
             time.sleep(1)
         else:
-            run("end-turn", ok_fail=True)
+            run("end-turn", ok=True)
             time.sleep(2)
     raise AssertionError("combat did not finish in 30 turns")
 
 
 def drive():
     step("new-run")
-    run("abandon", ok_fail=True)
+    run("abandon", ok=True)
     # The bridge comes up during mod init, before a cold engine boot's
     # menu is actually ready. Settle, then launch.
     time.sleep(5)
@@ -210,7 +206,7 @@ def drive():
         for_sale = obs().get("potions", [])
         bought = sum(
             1 for idx in range(min(2, len(for_sale)))
-            if run("buy", "potion", "--idx", str(idx), ok_fail=True)
+            if "_err" not in run("buy", "potion", "--idx", str(idx), ok=True)
         )
         if bought == 0:
             print("    no potions in the shop this run — skipped")
@@ -243,7 +239,7 @@ def drive():
     step("boss → act transition")
     d = obs()
     boss = next(p for p in d["graph"] if p["type"] == "boss")
-    run("cheat", "goto", str(boss["col"]), str(boss["row"]), ok_fail=True)
+    run("cheat", "goto", str(boss["col"]), str(boss["row"]), ok=True)
     wait_phase("combat", timeout=30)
     kill_current_combat()
     wait_phase("rewards")
@@ -271,8 +267,8 @@ def drive():
         if d["phase"] == "game_over":
             break
         if d["phase"] == "combat" and d.get("side") == "player":
-            run("cheat", "hp", "1", ok_fail=True)
-            run("end-turn", ok_fail=True)
+            run("cheat", "hp", "1", ok=True)
+            run("end-turn", ok=True)
         time.sleep(1.5)
     wait_phase("game_over", timeout=30)
     d = obs()

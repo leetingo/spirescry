@@ -49,13 +49,11 @@ public static class PhaseDetector
         // returns to the main menu, the terminal flags linger on
         // RunManager, so a visible main menu wins over game_over.
         var rm = RunManager.Instance;
-        if (rm is not null && (rm.IsGameOver || rm.IsAbandoned)
-            && NGame.Instance?.MainMenu is not { Visible: true })
-        {
+        var menuVisible = NGame.Instance?.MainMenu is { Visible: true };
+        if (rm is not null && (rm.IsGameOver || rm.IsAbandoned) && !menuVisible)
             return Phase.GameOver;
-        }
 
-        if (NGame.Instance?.MainMenu is { Visible: true })
+        if (menuVisible)
             return Phase.MainMenu;
 
         // Headless stand-ins for the screens that don't exist without a

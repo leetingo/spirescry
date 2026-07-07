@@ -135,23 +135,10 @@ public interface IAwaiter<out T> : INotifyCompletion
 // is "already finished" in headless mode.
 public class SignalAwaiter : IAwaiter<Variant[]>
 {
-    private bool _completed = true;
-    private Action? _continuation;
-
     public IAwaiter<Variant[]> GetAwaiter() => this;
-    public bool IsCompleted => _completed;
+    public bool IsCompleted => true;
     public Variant[] GetResult() => Array.Empty<Variant>();
-    public void OnCompleted(Action continuation)
-    {
-        if (_completed) continuation();
-        else _continuation = continuation;
-    }
-
-    internal void Complete()
-    {
-        _completed = true;
-        _continuation?.Invoke();
-    }
+    public void OnCompleted(Action continuation) => continuation();
 }
 
 public enum PropertyHint

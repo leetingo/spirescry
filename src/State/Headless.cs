@@ -21,8 +21,8 @@ namespace Spirescry.State;
 //
 // HeadlessPicker — one deferred ICardSelector for every card pick the
 // engine would normally route to a selection screen (rest-site upgrade,
-// shop removal, event transforms, mid-combat hand/pile picks). Push()
-// before the engine call that may ask for cards; if the engine does, its
+// shop removal, event transforms, mid-combat hand/pile picks). Around()
+// wraps the engine call that may ask for cards; if the engine does, its
 // await parks on a TCS, the phase flips to card_select/hand_select, and
 // the agent's pick-card/confirm resolves it inline.
 //
@@ -42,16 +42,25 @@ public static class HeadlessPicker
     public static int MinSelect { get; private set; }
     public static int MaxSelect { get; private set; }
 
-    // Push/PopIfInactive are no-ops in GUI boots — callers sandwich any
-    // engine call that may open a card pick without checking the mode.
-    public static void Push()
+    // Wrap any engine call that may open a card pick: pre-arm the deferred
+    // picker, drop it if the call never asked. Owning the pairing here
+    // (instead of at every call site) makes a leaked selector scope —
+    // a Push without its PopIfInactive — impossible. No-op in GUI boots.
+    public static void Around(Action engineCall)
+    {
+        Push();
+        engineCall();
+        PopIfInactive();
+    }
+
+    private static void Push()
     {
         if (!RunMode.IsHeadless) return;
         if (_scope is not null) return;
         _scope = CardSelectCmd.PushSelector(new Deferred());
     }
 
-    public static void PopIfInactive()
+    private static void PopIfInactive()
     {
         if (!RunMode.IsHeadless) return;
         if (_tcs is not null) return;

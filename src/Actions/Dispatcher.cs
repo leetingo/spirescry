@@ -233,6 +233,13 @@ public static class Dispatcher
                 $"requires phase {need.AsString()}, current is {current.AsString()}");
     }
 
+    // Single owner of the bad_index reject shape — the grammar agents parse.
+    private static DispatchResult? BadIdx(int idx, int count, string what) =>
+        idx < 0 || idx >= count
+            ? DispatchResult.Reject("bad_index",
+                $"{what} idx {idx} out of range [0,{count - 1}]")
+            : null;
+
     private static bool TryGetInt(JsonElement args, string name, out int value)
     {
         value = 0;
@@ -445,8 +452,7 @@ public static class Dispatcher
         }
         catch (Exception ex)
         {
-            var root = ex;
-            while (root.InnerException is not null) root = root.InnerException;
+            var root = ex.GetBaseException();
             return DispatchResult.Reject("internal",
                 $"headless new-run failed: {root.GetType().Name}: {root.Message}");
         }
@@ -488,8 +494,7 @@ public static class Dispatcher
 
         if (Screens.Crystal() is not { } screen)
             return DispatchResult.Reject("not_ready", "crystal sphere screen not mounted");
-        var container = Reflect.Field<Godot.Control>(screen, "_cellContainer");
-        var uiCell = FindCrystalCell(container, col, row);
+        var uiCell = FindCrystalCell(Screens.CrystalCellContainer(screen), col, row);
         if (uiCell is null)
             return DispatchResult.Reject("bad_target", $"no cell at {col},{row} (see obs.cells)");
         if (Reflect.Invoke(screen, "OnCellClicked", uiCell) is Task cellTask) Fire(cellTask, "crystal-click");
@@ -535,34 +540,29 @@ public static class Dispatcher
 
     private static DispatchResult EventOption(int idx)
     {
-        var ev = (RunManager.Instance?.DebugOnlyGetState()?.CurrentRoom as EventRoom)
-            ?.LocalMutableEvent;
+        var ev = Screens.CurrentEvent();
         var opts = ev?.CurrentOptions;
         if (ev is null || opts is null || opts.Count == 0 || ev.IsFinished)
             return DispatchResult.Reject("not_ready", "no options to choose (event finished? try proceed)");
-        if (idx < 0 || idx >= opts.Count)
-            return DispatchResult.Reject("bad_index", $"option idx {idx} out of range [0,{opts.Count - 1}]");
+        if (BadIdx(idx, opts.Count, "option") is { } err) return err;
         if (opts[idx].IsLocked)
             return DispatchResult.Reject("not_playable", $"option {idx} is locked");
 
         // Headless: an option that opens a deck picker (transform,
         // upgrade, …) awaits a card selection with no screen to serve it —
-        // pre-arm the deferred picker; drop it if the option never asked.
-        HeadlessPicker.Push();
-        RunManager.Instance!.EventSynchronizer.ChooseLocalOption(idx);
-        HeadlessPicker.PopIfInactive();
+        // Around pre-arms the deferred picker for that.
+        HeadlessPicker.Around(() =>
+            RunManager.Instance!.EventSynchronizer.ChooseLocalOption(idx));
         return DispatchResult.Success();
     }
 
     private static DispatchResult RestOption(int idx)
     {
         var room = NRestSiteRoom.Instance;
-        var opts = room?.Options
-            ?? (RunManager.Instance?.DebugOnlyGetState()?.CurrentRoom as RestSiteRoom)?.Options;
+        var opts = Screens.RestOptions();
         if (opts is null)
             return DispatchResult.Reject("not_ready", "rest site not mounted");
-        if (idx < 0 || idx >= opts.Count)
-            return DispatchResult.Reject("bad_index", $"option idx {idx} out of range [0,{opts.Count - 1}]");
+        if (BadIdx(idx, opts.Count, "option") is { } err) return err;
         if (!opts[idx].IsEnabled)
             return DispatchResult.Reject("not_playable", $"option {idx} is disabled");
 
@@ -579,9 +579,8 @@ public static class Dispatcher
         // picker — the pre-armed deferred picker serves it; the option's
         // Task stays pending until pick-card resolves the selection, so
         // fire it rather than block.
-        HeadlessPicker.Push();
-        Fire(RunManager.Instance!.RestSiteSynchronizer.ChooseLocalOption(idx), "rest-option");
-        HeadlessPicker.PopIfInactive();
+        HeadlessPicker.Around(() =>
+            Fire(RunManager.Instance!.RestSiteSynchronizer.ChooseLocalOption(idx), "rest-option"));
         return DispatchResult.Success();
     }
 
@@ -619,14 +618,13 @@ public static class Dispatcher
                         // First boss of a two-boss act exits back to the map
                         // — the agent walks to the second (obs.next carries
                         // it); only the act's last boss moves the run on.
-                        if (rs2.Map is { SecondBossMapPoint: { } } map2
-                            && ReferenceEquals(rs2.CurrentMapPoint, map2.BossMapPoint))
+                        if (Snapshotter.SecondBossPending(rs2))
                             return ExitRoomToMap("boss exit", exitRoom: false);
                         return EnterNextActHeadless();
                     }
                     return ExitRoomToMap("rewards proceed");
                 }
-                if (NOverlayStack.Instance?.Peek() is not NRewardsScreen screen)
+                if (Screens.Top<NRewardsScreen>() is not { } screen)
                     return DispatchResult.Reject("not_ready", "rewards screen not mounted");
                 // A debug override left set short-circuits the handler.
                 RunManager.Instance!.debugAfterCombatRewardsOverride = null;
@@ -730,7 +728,7 @@ public static class Dispatcher
         TryGetInt(args, "idx", out var idx);
 
         var rs = RunManager.Instance?.DebugOnlyGetState();
-        var inv = (rs?.CurrentRoom as MerchantRoom)?.GetLocalInventory();
+        var inv = Screens.ShopInventory(rs);
         if (rs is null || inv is null)
             return DispatchResult.Reject("not_ready", "shop inventory not available");
 
@@ -755,9 +753,7 @@ public static class Dispatcher
         // Card removal opens a deck-select sub-screen and the Task stays
         // pending until it's driven — poll /obs. Headless pre-arms the
         // deferred picker to stand in for that screen.
-        HeadlessPicker.Push();
-        Fire(entry.OnTryPurchaseWrapper(inv, false), "buy");
-        HeadlessPicker.PopIfInactive();
+        HeadlessPicker.Around(() => Fire(entry.OnTryPurchaseWrapper(inv, false), "buy"));
         return DispatchResult.Success();
     }
 
@@ -802,9 +798,7 @@ public static class Dispatcher
                     if (relics is null || relics.Count == 0)
                         return DispatchResult.Reject("not_ready",
                             "chest opening — poll /obs, then pick-relic again");
-                    if (idx < 0 || idx >= relics.Count)
-                        return DispatchResult.Reject("bad_index",
-                            $"relic idx {idx} out of range [0,{relics.Count - 1}]");
+                    if (BadIdx(idx, relics.Count, "relic") is { } err) return err;
                     sync.PickRelicLocally(idx);
                     return DispatchResult.Success();
                 }
@@ -815,9 +809,7 @@ public static class Dispatcher
                     var holders = screen is null ? null : Screens.RelicHolders(screen);
                     if (screen is null || holders is null || holders.Count == 0)
                         return DispatchResult.Reject("not_ready", "relic row not wired yet — retry");
-                    if (idx < 0 || idx >= holders.Count)
-                        return DispatchResult.Reject("bad_index",
-                            $"relic idx {idx} out of range [0,{holders.Count - 1}]");
+                    if (BadIdx(idx, holders.Count, "relic") is { } err) return err;
                     Reflect.Invoke(screen, "SelectHolder", holders[idx]);
                     return DispatchResult.Success();
                 }
@@ -841,12 +833,11 @@ public static class Dispatcher
                 ? DispatchResult.Reject("bad_index", msg)
                 : DispatchResult.Success();
 
-        var screen = NOverlayStack.Instance?.Peek() as NRewardsScreen;
+        var screen = Screens.Top<NRewardsScreen>();
         var buttons = screen is null ? null : Screens.RewardButtons(screen);
         if (buttons is null)
             return DispatchResult.Reject("not_ready", "rewards screen not mounted");
-        if (idx < 0 || idx >= buttons.Count)
-            return DispatchResult.Reject("bad_index", $"reward idx {idx} out of range [0,{buttons.Count - 1}]");
+        if (BadIdx(idx, buttons.Count, "reward") is { } idxErr) return idxErr;
         if (Screens.ClaimableReward(buttons[idx]) is not { } btn)
             return DispatchResult.Reject("bad_index", $"reward idx {idx} is not claimable (already taken?)");
 
@@ -880,15 +871,12 @@ public static class Dispatcher
                 ? DispatchResult.Reject("bad_index", msg)
                 : DispatchResult.Success();
 
-        if (NOverlayStack.Instance?.Peek() is not NChooseABundleSelectionScreen screen)
+        if (Screens.Top<NChooseABundleSelectionScreen>() is not { } screen)
             return DispatchResult.Reject("not_ready", "bundle screen not mounted");
-        var row = Reflect.Field<Godot.Control>(screen, "_bundleRow");
-        var nodes = row?.GetChildren()
-            .Where(n => n.GetType().Name == "NCardBundle").ToList();
+        var nodes = Screens.BundleNodes(screen);
         if (nodes is null || nodes.Count == 0)
             return DispatchResult.Reject("not_ready", "bundle row not wired yet — retry");
-        if (idx < 0 || idx >= nodes.Count)
-            return DispatchResult.Reject("bad_index", $"bundle idx {idx} out of range [0,{nodes.Count - 1}]");
+        if (BadIdx(idx, nodes.Count, "bundle") is { } err) return err;
         Reflect.Invoke(screen, "OnBundleClicked", nodes[idx]);
         return DispatchResult.Success();
     }
@@ -904,8 +892,7 @@ public static class Dispatcher
         var holders = screen is null ? null : Screens.CardHolders(screen);
         if (screen is null || holders is null || holders.Count == 0)
             return DispatchResult.Reject("not_ready", "card row not wired yet — retry");
-        if (idx < 0 || idx >= holders.Count)
-            return DispatchResult.Reject("bad_index", $"card idx {idx} out of range [0,{holders.Count - 1}]");
+        if (BadIdx(idx, holders.Count, "card") is { } err) return err;
 
         Reflect.Invoke(screen, "SelectCard", holders[idx]);
         return DispatchResult.Success();
@@ -923,24 +910,21 @@ public static class Dispatcher
                 : DispatchResult.Success();
 
         // Choose-a-card overlays resolve on the pick itself.
-        if (NOverlayStack.Instance?.Peek() is NChooseACardSelectionScreen choose)
+        if (Screens.Top<NChooseACardSelectionScreen>() is { } choose)
         {
             var chooseHolders = Screens.CardHolders(choose);
             if (chooseHolders is null || chooseHolders.Count == 0)
                 return DispatchResult.Reject("not_ready", "card row not wired yet — retry");
-            if (idx < 0 || idx >= chooseHolders.Count)
-                return DispatchResult.Reject("bad_index",
-                    $"card idx {idx} out of range [0,{chooseHolders.Count - 1}]");
+            if (BadIdx(idx, chooseHolders.Count, "card") is { } chooseErr) return chooseErr;
             Reflect.Invoke(choose, "SelectHolder", chooseHolders[idx]);
             return DispatchResult.Success();
         }
 
-        var screen = NOverlayStack.Instance?.Peek() as NCardGridSelectionScreen;
+        var screen = Screens.Top<NCardGridSelectionScreen>();
         var cards = screen is null ? null : Screens.GridCards(screen);
         if (screen is null || cards is null || cards.Count == 0)
             return DispatchResult.Reject("not_ready", "card grid not wired yet — retry");
-        if (idx < 0 || idx >= cards.Count)
-            return DispatchResult.Reject("bad_index", $"card idx {idx} out of range [0,{cards.Count - 1}]");
+        if (BadIdx(idx, cards.Count, "card") is { } err) return err;
 
         Reflect.Invoke(screen, "OnCardClicked", cards[idx]);
         return DispatchResult.Success();
@@ -959,8 +943,7 @@ public static class Dispatcher
         var holders = hand?.ActiveHolders;
         if (hand is null || holders is null || holders.Count == 0)
             return DispatchResult.Reject("not_ready", "no selectable cards in hand — retry");
-        if (idx < 0 || idx >= holders.Count)
-            return DispatchResult.Reject("bad_index", $"card idx {idx} out of range [0,{holders.Count - 1}]");
+        if (BadIdx(idx, holders.Count, "card") is { } err) return err;
 
         Reflect.Invoke(hand, "OnHolderPressed", holders[idx]);
         return DispatchResult.Success();
@@ -973,7 +956,7 @@ public static class Dispatcher
             case Phase.BundleSelect:
                 if (RunMode.IsHeadless)
                     return DispatchResult.Reject("not_ready", "host bundle picks resolve on pick-card");
-                if (NOverlayStack.Instance?.Peek() is not NChooseABundleSelectionScreen bundleScreen)
+                if (Screens.Top<NChooseABundleSelectionScreen>() is not { } bundleScreen)
                     return DispatchResult.Reject("not_ready", "bundle screen not mounted");
                 Reflect.Invoke(bundleScreen, "ConfirmSelection", new object?[] { null });
                 return DispatchResult.Success();
@@ -985,7 +968,7 @@ public static class Dispatcher
 
             case Phase.CardSelect:
             {
-                var screen = NOverlayStack.Instance?.Peek() as NCardGridSelectionScreen;
+                var screen = Screens.Top<NCardGridSelectionScreen>();
                 if (screen is null)
                     return DispatchResult.Reject("not_ready", "selection screen not mounted");
                 var prefs = Screens.Prefs(screen);
@@ -1040,7 +1023,7 @@ public static class Dispatcher
 
             case var p:
                 return DispatchResult.Reject("bad_phase",
-                    $"confirm is valid in card_select/hand_select, current is {p.AsString()}");
+                    $"confirm is valid in bundle_select/card_select/hand_select, current is {p.AsString()}");
         }
     }
 
@@ -1084,13 +1067,13 @@ public static class Dispatcher
                 return DispatchResult.Success();
 
             case Phase.BundleSelect:
-                if (NOverlayStack.Instance?.Peek() is not NChooseABundleSelectionScreen bundleScr)
+                if (Screens.Top<NChooseABundleSelectionScreen>() is not { } bundleScr)
                     return DispatchResult.Reject("not_ready", "bundle screen not mounted");
                 Reflect.Invoke(bundleScr, "CancelSelection", new object?[] { null });
                 return DispatchResult.Success();
 
             case Phase.CardReward:
-                if (NOverlayStack.Instance?.Peek() is not NCardRewardSelectionScreen cardScreen)
+                if (Screens.Top<NCardRewardSelectionScreen>() is not { } cardScreen)
                     return DispatchResult.Reject("not_ready", "card reward screen not mounted");
                 // Skip is one of the screen's "alternative" choices; picking
                 // alternative j resolves the screen's completion source just
@@ -1104,7 +1087,7 @@ public static class Dispatcher
                 return DispatchResult.Success();
 
             case Phase.RelicReward:
-                if (NOverlayStack.Instance?.Peek() is not NChooseARelicSelection relicScreen)
+                if (Screens.Top<NChooseARelicSelection>() is not { } relicScreen)
                     return DispatchResult.Reject("not_ready", "relic reward screen not mounted");
                 Reflect.Invoke(relicScreen, "OnSkipButtonReleased", new object?[] { null });
                 return DispatchResult.Success();
@@ -1117,14 +1100,14 @@ public static class Dispatcher
                 return DispatchResult.Success();
 
             case Phase.CardSelect:
-                if (NOverlayStack.Instance?.Peek() is NChooseACardSelectionScreen chooseSel)
+                if (Screens.Top<NChooseACardSelectionScreen>() is { } chooseSel)
                 {
                     if (!Screens.ChooseSkipEnabled(chooseSel))
                         return DispatchResult.Reject("bad_request", "this selection cannot be skipped");
                     Reflect.Invoke(chooseSel, "OnSkipButtonReleased", new object?[] { null });
                     return DispatchResult.Success();
                 }
-                if (NOverlayStack.Instance?.Peek() is not NCardGridSelectionScreen sel)
+                if (Screens.Top<NCardGridSelectionScreen>() is not { } sel)
                     return DispatchResult.Reject("not_ready", "selection screen not mounted");
                 // Only the deck pickers have a close button, gated by
                 // prefs.Cancelable (shop removal is; rest-site upgrade isn't).
@@ -1136,7 +1119,7 @@ public static class Dispatcher
 
             case var p:
                 return DispatchResult.Reject("bad_phase",
-                    $"skip is valid in card_reward/relic_reward/treasure/card_select, current is {p.AsString()}");
+                    $"skip is valid in card_reward/card_select/bundle_select/relic_reward/treasure, current is {p.AsString()}");
         }
     }
 
@@ -1221,9 +1204,7 @@ public static class Dispatcher
         var (target, err) = ResolveTarget(potion.TargetType, args, state, player);
         if (err is not null) return err.Value;
         // Some potions (Attack Potion, …) open a card pick mid-effect.
-        HeadlessPicker.Push();
-        potion.EnqueueManualUse(target!);
-        HeadlessPicker.PopIfInactive();
+        HeadlessPicker.Around(() => potion.EnqueueManualUse(target!));
         return DispatchResult.Success();
     }
 
@@ -1271,13 +1252,11 @@ public static class Dispatcher
         var (target, err) = ResolveTarget(card.TargetType, args, state, player);
         if (err is not null) return err.Value;
 
-        var rm = RunManager.Instance!;
         // Headless: cards that ask for a hand/pile pick mid-resolution
         // await the deferred picker; the play action stays pending (phase
         // flips to hand_select) until pick-card resolves it.
-        HeadlessPicker.Push();
-        Enqueue(rm, new PlayCardAction(card, target!));
-        HeadlessPicker.PopIfInactive();
+        HeadlessPicker.Around(() =>
+            Enqueue(RunManager.Instance!, new PlayCardAction(card, target!)));
         return DispatchResult.Success();
     }
 

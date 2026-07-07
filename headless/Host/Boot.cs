@@ -9,6 +9,7 @@
 //      that swallow display-only exceptions (loc vars, VFX).
 //   5. Headless pump + the same HTTP bridge GUI mode uses.
 
+using System.Reflection;
 using HarmonyLib;
 using MegaCrit.Sts2.Core.Modding;
 using MegaCrit.Sts2.Core.Models;
@@ -21,8 +22,16 @@ namespace Spirescry.Host;
 
 internal static class HeadlessBoot
 {
+    private const BindingFlags AllDeclared =
+        BindingFlags.Public | BindingFlags.NonPublic
+        | BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly;
+
     private static Harmony? _harmony;
     private static Timer? _signalTimer;
+
+    // Every patch method here is a private static on this class.
+    private static HarmonyMethod Local(string name) => new(
+        typeof(HeadlessBoot).GetMethod(name, BindingFlags.NonPublic | BindingFlags.Static));
 
     public static void Start()
     {
@@ -60,10 +69,7 @@ internal static class HeadlessBoot
         // ModManager initialization. No ModManager runs here — stamp the
         // engine's own "mod loading didn't run" state so the registry
         // resolves to no mod types instead of throwing.
-        typeof(ModManager)
-            .GetField("<State>k__BackingField",
-                System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)
-            ?.SetValue(null, ModManagerState.Skipped);
+        Reflect.SetStaticBackingField(typeof(ModManager), "State", ModManagerState.Skipped);
 
         var subtypes = AbstractModelSubtypes.All;
         int registered = 0, failed = 0;
@@ -103,7 +109,7 @@ internal static class HeadlessBoot
             var cacheT = asm.GetType("MegaCrit.Sts2.Core.Multiplayer.Serialization.ModelIdSerializationCache");
             if (cacheT is null) return;
 
-            var bf = System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static;
+            var bf = BindingFlags.NonPublic | BindingFlags.Static;
             var catMap = cacheT.GetField("_categoryNameToNetIdMap", bf)?.GetValue(null) as Dictionary<string, int>;
             var entryMap = cacheT.GetField("_entryNameToNetIdMap", bf)?.GetValue(null) as Dictionary<string, int>;
             var catList = cacheT.GetField("_netIdToCategoryNameMap", bf)?.GetValue(null) as List<string>;
@@ -151,7 +157,7 @@ internal static class HeadlessBoot
 
             int Bits(int n) => Math.Max(1, (int)Math.Ceiling(Math.Log2(Math.Max(2, n))));
             void SetBacking(string prop, object value) =>
-                cacheT.GetField($"<{prop}>k__BackingField", bf)?.SetValue(null, value);
+                Reflect.SetStaticBackingField(cacheT, prop, value);
             SetBacking("CategoryIdBitSize", Bits(catList.Count));
             SetBacking("EntryIdBitSize", Bits(entryList.Count));
             SetBacking("EpochIdBitSize", 1);
@@ -203,10 +209,9 @@ internal static class HeadlessBoot
     {
         var cmdType = typeof(AbstractModelSubtypes).Assembly.GetType("MegaCrit.Sts2.Core.Commands.Cmd")
             ?? throw new InvalidOperationException("Cmd type not found — combat actions would hang");
-        var prefix = new HarmonyMethod(typeof(HeadlessBoot).GetMethod(nameof(CmdWaitPrefix),
-            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static));
+        var prefix = Local(nameof(CmdWaitPrefix));
         var patched = 0;
-        foreach (var m in cmdType.GetMethods(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static))
+        foreach (var m in cmdType.GetMethods(BindingFlags.Public | BindingFlags.Static))
         {
             if (m.Name != "Wait") continue;
             _harmony!.Patch(m, prefix: prefix);
@@ -227,10 +232,7 @@ internal static class HeadlessBoot
     // silently didn't happen and combat would hang — abort instead.
     private static void VerifyQueueWaitIlPatch()
     {
-        var found = SafeTypes().Any(t => t.GetMethods(
-                System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic
-                | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Static
-                | System.Reflection.BindingFlags.DeclaredOnly)
+        var found = SafeTypes().Any(t => t.GetMethods(AllDeclared)
             .Any(m => m.Name == "WaitUntilQueueIsEmptyOrWaitingOnNonPlayerDrivenAction"));
         if (!found)
             throw new InvalidOperationException(
@@ -246,22 +248,18 @@ internal static class HeadlessBoot
     {
         if (_safeTypes is not null) return _safeTypes;
         try { _safeTypes = typeof(AbstractModelSubtypes).Assembly.GetTypes(); }
-        catch (System.Reflection.ReflectionTypeLoadException ex)
+        catch (ReflectionTypeLoadException ex)
         {
             _safeTypes = ex.Types.Where(t => t is not null).ToArray()!;
         }
         return _safeTypes;
     }
 
-    private static readonly HarmonyMethod Swallow = new(
-        typeof(HeadlessBoot).GetMethod(nameof(SwallowExceptionFinalizer),
-            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static));
+    private static readonly HarmonyMethod Swallow = Local(nameof(SwallowExceptionFinalizer));
 
     private static Exception? SwallowExceptionFinalizer(Exception __exception) => null;
 
-    private static readonly HarmonyMethod SwallowTask = new(
-        typeof(HeadlessBoot).GetMethod(nameof(SwallowExceptionTaskFinalizer),
-            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static));
+    private static readonly HarmonyMethod SwallowTask = Local(nameof(SwallowExceptionTaskFinalizer));
 
     private static Exception? SwallowExceptionTaskFinalizer(Exception? __exception, ref Task __result)
     {
@@ -274,8 +272,8 @@ internal static class HeadlessBoot
     {
         var t = typeof(AbstractModelSubtypes).Assembly.GetType(typeName);
         if (t is null) return;
-        var bf = System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic
-                 | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Static;
+        var bf = BindingFlags.Public | BindingFlags.NonPublic
+                 | BindingFlags.Instance | BindingFlags.Static;
         foreach (var m in t.GetMethods(bf))
         {
             if (!methods.Contains(m.Name) || m.IsAbstract || m.IsGenericMethodDefinition) continue;
@@ -290,12 +288,9 @@ internal static class HeadlessBoot
     private static void PatchLocStringFormattedText()
     {
         var t = typeof(AbstractModelSubtypes).Assembly.GetType("MegaCrit.Sts2.Core.Localization.LocString");
-        var m = t?.GetMethod("GetFormattedText",
-            System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+        var m = t?.GetMethod("GetFormattedText", BindingFlags.Public | BindingFlags.Instance);
         if (m is null) return;
-        _harmony!.Patch(m, finalizer: new HarmonyMethod(typeof(HeadlessBoot).GetMethod(
-            nameof(LocStringFinalizer),
-            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)));
+        _harmony!.Patch(m, finalizer: Local(nameof(LocStringFinalizer)));
     }
 
     private static Exception? LocStringFinalizer(
@@ -311,13 +306,10 @@ internal static class HeadlessBoot
     // missing tables; skipping it only degrades text.
     private static void PatchAddDetailsTo()
     {
-        var bf = System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic
-                 | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Static
-                 | System.Reflection.BindingFlags.DeclaredOnly;
         foreach (var t in SafeTypes())
         {
             if (!t.IsClass) continue;
-            foreach (var m in t.GetMethods(bf))
+            foreach (var m in t.GetMethods(AllDeclared))
             {
                 if (m.Name != "AddDetailsTo" && m.Name != "AddLocVars") continue;
                 if (m.IsAbstract || m.IsGenericMethodDefinition) continue;
@@ -331,15 +323,12 @@ internal static class HeadlessBoot
     private static void PatchVfxPlay()
     {
         var names = new[] { "Play", "PlayAnim", "Animate", "Stop", "Show", "Pulse", "Trigger" };
-        var bf = System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic
-                 | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Static
-                 | System.Reflection.BindingFlags.DeclaredOnly;
         foreach (var t in SafeTypes())
         {
             if (!t.IsClass) continue;
             var ns = t.Namespace ?? "";
             if (!ns.Contains(".Vfx") && !t.Name.EndsWith("Vfx")) continue;
-            foreach (var m in t.GetMethods(bf))
+            foreach (var m in t.GetMethods(AllDeclared))
             {
                 if (!names.Contains(m.Name) || m.IsAbstract || m.IsGenericMethodDefinition) continue;
                 try { _harmony!.Patch(m, finalizer: Swallow); }
@@ -354,16 +343,13 @@ internal static class HeadlessBoot
     private static void RerouteBundleScreen()
     {
         var m = typeof(MegaCrit.Sts2.Core.Commands.CardSelectCmd).GetMethod(
-            "FromChooseABundleScreen",
-            System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
+            "FromChooseABundleScreen", BindingFlags.Public | BindingFlags.Static);
         if (m is null)
         {
             HostLog.Info("FromChooseABundleScreen not found — bundle offers unsupported");
             return;
         }
-        _harmony!.Patch(m, prefix: new HarmonyMethod(typeof(HeadlessBoot).GetMethod(
-            nameof(BundlePrefix),
-            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)));
+        _harmony!.Patch(m, prefix: Local(nameof(BundlePrefix)));
         HostLog.Info("rerouted bundle offers to the headless stand-in");
     }
 
@@ -382,16 +368,13 @@ internal static class HeadlessBoot
     private static void RerouteCrystalSphere()
     {
         var m = typeof(MegaCrit.Sts2.Core.Nodes.Events.Custom.CrystalSphere.NCrystalSphereScreen)
-            .GetMethod("ShowScreen",
-                System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
+            .GetMethod("ShowScreen", BindingFlags.Public | BindingFlags.Static);
         if (m is null)
         {
             HostLog.Info("NCrystalSphereScreen.ShowScreen not found — crystal sphere unsupported");
             return;
         }
-        _harmony!.Patch(m, prefix: new HarmonyMethod(typeof(HeadlessBoot).GetMethod(
-            nameof(CrystalPrefix),
-            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)));
+        _harmony!.Patch(m, prefix: Local(nameof(CrystalPrefix)));
         HostLog.Info("rerouted crystal sphere to the headless stand-in");
     }
 
@@ -415,8 +398,8 @@ internal static class HeadlessBoot
             .GetType("MegaCrit.Sts2.Core.Saves.Managers.ProgressSaveManager");
         if (t is null) return;
         var patched = 0;
-        foreach (var m in t.GetMethods(System.Reflection.BindingFlags.Public
-            | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.DeclaredOnly))
+        foreach (var m in t.GetMethods(
+            BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly))
         {
             if (m.IsAbstract || m.IsGenericMethodDefinition || m.IsSpecialName) continue;
             var fin = typeof(Task).IsAssignableFrom(m.ReturnType) ? SwallowTask : Swallow;
@@ -432,8 +415,8 @@ internal static class HeadlessBoot
     // and the win condition never fires. Swallow: flavor only.
     private static void PatchMonsterFlavorHooks()
     {
-        var bf = System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic
-                 | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.DeclaredOnly;
+        var bf = BindingFlags.Public | BindingFlags.NonPublic
+                 | BindingFlags.Instance | BindingFlags.DeclaredOnly;
         var patched = 0;
         foreach (var t in SafeTypes())
         {
@@ -464,13 +447,13 @@ internal static class HeadlessBoot
         try
         {
             var inst = System.Runtime.CompilerServices.RuntimeHelpers.GetUninitializedObject(t);
-            var bf = System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic
-                     | System.Reflection.BindingFlags.Static;
-            (t.GetField("<Instance>k__BackingField", bf)
-                ?? t.GetField("_instance", bf))?.SetValue(null, inst);
+            if (!Reflect.SetStaticBackingField(t, "Instance", inst))
+                t.GetField("_instance",
+                    BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static)
+                    ?.SetValue(null, inst);
             var patched = 0;
-            foreach (var m in t.GetMethods(System.Reflection.BindingFlags.Public
-                | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.DeclaredOnly))
+            foreach (var m in t.GetMethods(
+                BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly))
             {
                 if (m.IsAbstract || m.IsGenericMethodDefinition || m.IsSpecialName) continue;
                 try { _harmony!.Patch(m, finalizer: Swallow); patched++; }
@@ -491,13 +474,11 @@ internal static class HeadlessBoot
         var t = typeof(AbstractModelSubtypes).Assembly
             .GetType("MegaCrit.Sts2.Core.Multiplayer.Serialization.ModelIdSerializationCache");
         if (t is null) return;
-        var bf = System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static;
+        var bf = BindingFlags.Public | BindingFlags.Static;
         if (t.GetMethod("GetNetIdForEpochId", bf) is { } getNet)
-            _harmony!.Patch(getNet, prefix: new HarmonyMethod(typeof(HeadlessBoot).GetMethod(
-                nameof(EpochNetIdPrefix), System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)));
+            _harmony!.Patch(getNet, prefix: Local(nameof(EpochNetIdPrefix)));
         if (t.GetMethod("GetEpochIdForNetId", bf) is { } getId)
-            _harmony!.Patch(getId, prefix: new HarmonyMethod(typeof(HeadlessBoot).GetMethod(
-                nameof(EpochIdPrefix), System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)));
+            _harmony!.Patch(getId, prefix: Local(nameof(EpochIdPrefix)));
     }
 
     private static bool EpochNetIdPrefix(ref int __result)

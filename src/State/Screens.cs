@@ -1,14 +1,19 @@
 using MegaCrit.Sts2.Core.CardSelection;
+using MegaCrit.Sts2.Core.Entities.Merchant;
+using MegaCrit.Sts2.Core.Entities.RestSite;
 using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Nodes.Cards;
 using MegaCrit.Sts2.Core.Nodes.Cards.Holders;
 using MegaCrit.Sts2.Core.Nodes.GodotExtensions;
 using MegaCrit.Sts2.Core.Nodes.Relics;
 using MegaCrit.Sts2.Core.Nodes.Rewards;
+using MegaCrit.Sts2.Core.Nodes.Rooms;
 using MegaCrit.Sts2.Core.Nodes.Screens;
 using MegaCrit.Sts2.Core.Nodes.Screens.CardSelection;
 using MegaCrit.Sts2.Core.Nodes.Screens.Overlays;
+using MegaCrit.Sts2.Core.Rooms;
 using MegaCrit.Sts2.Core.Runs;
+using CrystalMinigame = MegaCrit.Sts2.Core.Events.Custom.CrystalSphereEvent.CrystalSphereMinigame;
 using CrystalScreen = MegaCrit.Sts2.Core.Nodes.Events.Custom.CrystalSphere.NCrystalSphereScreen;
 
 namespace Spirescry.State;
@@ -69,6 +74,37 @@ internal static class Screens
     // Headless has no chest-flag node; the flag lives on the visual room.
     public static bool ChestOpened(object treasureRoomNode) =>
         Reflect.FieldValue(treasureRoomNode, "_hasChestBeenOpened") is true;
+
+    // Rest site: in the GUI the visual node owns the options and the room
+    // model's list stays empty; headless it's the other way around.
+    public static IReadOnlyList<RestSiteOption>? RestOptions() =>
+        NRestSiteRoom.Instance?.Options
+        ?? (RunManager.Instance?.DebugOnlyGetState()?.CurrentRoom as RestSiteRoom)?.Options;
+
+    // The event model both the snapshot and the option verb act on.
+    public static EventModel? CurrentEvent() =>
+        (RunManager.Instance?.DebugOnlyGetState()?.CurrentRoom as EventRoom)?.LocalMutableEvent;
+
+    public static MerchantInventory? ShopInventory(RunState? rs) =>
+        (rs?.CurrentRoom as MerchantRoom)?.GetLocalInventory();
+
+    // Bundle screen: _bundles carries the models (snapshot), _bundleRow's
+    // NCardBundle children are the click targets — the engine fills both
+    // in the same order, so idx maps 1:1 across observe and act.
+    public static IReadOnlyList<IReadOnlyList<CardModel>>? Bundles(NChooseABundleSelectionScreen screen) =>
+        Reflect.Field<IReadOnlyList<IReadOnlyList<CardModel>>>(screen, "_bundles");
+
+    public static List<Godot.Node>? BundleNodes(NChooseABundleSelectionScreen screen) =>
+        Reflect.Field<Godot.Control>(screen, "_bundleRow")?.GetChildren()
+            .Where(n => n.GetType().Name == "NCardBundle").ToList();
+
+    // Crystal sphere: the minigame model (snapshot) and the cell-node
+    // container (click targets) hang off the same screen.
+    public static CrystalMinigame? CrystalEntity(CrystalScreen screen) =>
+        Reflect.FieldValue(screen, "_entity") as CrystalMinigame;
+
+    public static Godot.Control? CrystalCellContainer(CrystalScreen screen) =>
+        Reflect.Field<Godot.Control>(screen, "_cellContainer");
 }
 
 // The multiplayer action-queue internals (private on ActionQueueSet),

@@ -30,6 +30,9 @@ if [ -z "${STS2_GAME_DIR:-}" ] && [ "$(uname -s)" = "Darwin" ]; then
     STS2_GAME_DIR="$HOME/Library/Application Support/Steam/steamapps/common/Slay the Spire 2/SlayTheSpire2.app/Contents/MacOS"
 fi
 : "${SPIRESCRY_CLI_BIN:=$HOME/.local/bin}"
+# Default must match the bridge's own fallback (HttpBridge.StartFromEnv)
+# and the CLI's clap default.
+: "${STS2_AGENT_PORT:=7777}"
 
 step() { printf '\033[1;34m▶\033[0m %s\n' "$*"; }
 ok()   { printf '\033[1;32m✓\033[0m %s\n' "$*"; }
@@ -39,9 +42,8 @@ need_game_dir() { [ -n "${STS2_GAME_DIR:-}" ] || die "STS2_GAME_DIR not set and 
 
 # wait_bridge <timeout_s> <log>: poll /health until the bridge answers.
 wait_bridge() {
-    port="${STS2_AGENT_PORT:-7777}"
     for _ in $(seq 1 "$1"); do
-        if curl -sf "http://127.0.0.1:$port/health" > /dev/null; then
+        if curl -sf "http://127.0.0.1:$STS2_AGENT_PORT/health" > /dev/null; then
             ok "bridge up — try: spirescry obs"
             return
         fi
@@ -121,9 +123,8 @@ headless_setup() {
 launch_host() {
     [ -f headless/Host/bin/Release/spirescry_host.dll ] || die "host not built — run: ./build.sh headless-setup"
     ! pgrep -qf spirescry_host || die "host already running — ./build.sh stop first"
-    port="${STS2_AGENT_PORT:-7777}"
     log="${TMPDIR:-/tmp}/spirescry-host.log"
-    step "launch host (bridge port $port, log $log)"
+    step "launch host (bridge port $STS2_AGENT_PORT, log $log)"
     # Through the dotnet CLI, not the apphost — the CLI resolves its own
     # runtime regardless of DOTNET_ROOT.
     nohup dotnet headless/Host/bin/Release/spirescry_host.dll > "$log" 2>&1 &
@@ -177,9 +178,8 @@ launch_headless() {
     [ -n "$game_bin" ] || die "no game binary found in $STS2_GAME_DIR"
     ! pgrep -qf "$STS2_GAME_DIR" || die "game already running — ./build.sh stop first"
 
-    port="${STS2_AGENT_PORT:-7777}"
     log="${TMPDIR:-/tmp}/spirescry-headless.log"
-    step "launch headless (bridge port $port, log $log)"
+    step "launch headless (bridge port $STS2_AGENT_PORT, log $log)"
     nohup "$game_bin" --headless > "$log" 2>&1 &
     wait_bridge 60 "$log"
 }

@@ -72,6 +72,17 @@ internal static class Reflect
     public static bool SetPropertyOrBackingField(object obj, string name, object? value) =>
         SetProperty(obj, name, value) || SetField(obj, $"<{name}>k__BackingField", value);
 
+    // Static twin for the host boot's engine-singleton/cache stamping.
+    // Field-only on purpose: those sites must not run engine setter logic.
+    public static bool SetStaticBackingField(Type type, string prop, object? value)
+    {
+        var f = type.GetField($"<{prop}>k__BackingField",
+            BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Static);
+        if (f is null) return false;
+        f.SetValue(null, value);
+        return true;
+    }
+
     public static object? Invoke(object obj, string name, params object?[] args)
     {
         var m = Methods.GetOrAdd((obj.GetType(), name, args.Length), static key =>

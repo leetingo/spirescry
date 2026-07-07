@@ -83,8 +83,7 @@ def main(pck_path: str, out_dir: str, prefix: str = "res://localization/"):
         if flags & PACK_FLAG_REL_FILEBASE:
             actual_offset = file_base + offset
         body = data[actual_offset:actual_offset + size]
-        rel = path[len("res://"):] if path.startswith("res://") else path
-        out_path = (out / rel).resolve()
+        out_path = (out / path).resolve()
         if not out_path.is_relative_to(out_resolved):
             print(f"skip (escapes out_dir): {path}", file=sys.stderr)
             continue

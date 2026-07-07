@@ -5,18 +5,12 @@ Run against either boot (host is fastest). Not part of ./build.sh verify —
 it takes minutes and mutates a throwaway run heavily; use it after engine
 updates or event-related changes.
 """
-import json, sys, time
+import sys, time
 from collections import Counter
 
 import bridge
 
-def run(*a, ok=False):
-    r = bridge.cli(*a)
-    if r.returncode != 0:
-        if ok:
-            return {"_err": r.stderr.strip()}
-        sys.exit(f"FAIL: spirescry {' '.join(a)} -> {r.stderr.strip()}")
-    return json.loads(r.stdout) if r.stdout.strip() else {}
+run = bridge.run
 
 obs = lambda: run("obs")
 

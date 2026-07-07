@@ -62,8 +62,12 @@ public sealed class HttpBridge
         try
         {
             var req = ctx.Request;
-            using var reader = new StreamReader(req.InputStream, req.ContentEncoding ?? Encoding.UTF8);
-            var body = await reader.ReadToEndAsync();
+            var body = "";
+            if (req.HttpMethod == "POST")
+            {
+                using var reader = new StreamReader(req.InputStream, req.ContentEncoding ?? Encoding.UTF8);
+                body = await reader.ReadToEndAsync();
+            }
             var path = req.Url?.AbsolutePath ?? "/";
             resp = (req.HttpMethod, path) switch
             {

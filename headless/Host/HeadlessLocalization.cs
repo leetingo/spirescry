@@ -42,17 +42,17 @@ internal static class HeadlessLocalization
             // LocManager's ctor walks res:// — build an empty instance and
             // wire its fields directly.
             var lm = System.Runtime.CompilerServices.RuntimeHelpers.GetUninitializedObject(locManagerType);
-            SetField(locManagerType, lm, "_tables", tables);
-            SetBackingField(locManagerType, lm, "Language", lang);
+            Reflect.SetField(lm, "_tables", tables);
+            Reflect.SetPropertyOrBackingField(lm, "Language", lang);
             var culture = CultureFor(lang);
-            SetBackingField(locManagerType, lm, "CultureInfo", culture);
-            try { SetBackingField(locManagerType, lm, "StringComparer", StringComparer.Create(culture, false)); }
+            Reflect.SetPropertyOrBackingField(lm, "CultureInfo", culture);
+            try { Reflect.SetPropertyOrBackingField(lm, "StringComparer", StringComparer.Create(culture, false)); }
             catch { }
             try
             {
                 var validationType = asm.GetType("MegaCrit.Sts2.Core.Localization.LocValidationError");
                 if (validationType is not null)
-                    SetBackingField(locManagerType, lm, "ValidationErrors", Array.CreateInstance(validationType, 0));
+                    Reflect.SetPropertyOrBackingField(lm, "ValidationErrors", Array.CreateInstance(validationType, 0));
             }
             catch { }
             try
@@ -132,17 +132,4 @@ internal static class HeadlessLocalization
         _ => System.Globalization.CultureInfo.InvariantCulture,
     };
 
-    private static void SetField(Type t, object instance, string name, object? value) =>
-        t.GetField(name, System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)
-            ?.SetValue(instance, value);
-
-    private static void SetBackingField(Type t, object instance, string prop, object? value)
-    {
-        var bf = System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance
-                 | System.Reflection.BindingFlags.Static;
-        var fi = t.GetField($"<{prop}>k__BackingField", bf);
-        if (fi is not null) { fi.SetValue(instance, value); return; }
-        var pi = t.GetProperty(prop, bf);
-        if (pi is { CanWrite: true }) pi.SetValue(instance, value);
-    }
 }

@@ -79,9 +79,9 @@ public static class Signals
             tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
             Waiters.Add(tcs);
         }
-        var winner = await Task.WhenAny(tcs.Task, Task.Delay(timeoutMs));
-        lock (Gate) Waiters.Remove(tcs);
-        return winner == tcs.Task;
+        try { return await tcs.Task.WaitAsync(TimeSpan.FromMilliseconds(timeoutMs)); }
+        catch (TimeoutException) { return false; }
+        finally { lock (Gate) Waiters.Remove(tcs); }
     }
 
     public static object[] EventsSince(long since)
