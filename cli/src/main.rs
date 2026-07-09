@@ -242,3 +242,91 @@ fn handle(result: Result<ureq::Response, ureq::Error>) -> Result<Value, String> 
     }
     Ok(value)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    fn strings(values: &[&str]) -> Vec<String> {
+        values.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn parses_obs_long_poll_options() {
+        let cli = Cli::try_parse_from([
+            "spirescry",
+            "--host",
+            "localhost",
+            "--port",
+            "8888",
+            "obs",
+            "--since",
+            "42",
+            "--wait",
+            "250",
+        ])
+        .unwrap();
+
+        assert_eq!(cli.host, "localhost");
+        assert_eq!(cli.port, 8888);
+        match cli.cmd {
+            Cmd::Obs { since, wait } => {
+                assert_eq!(since, Some(42));
+                assert_eq!(wait, Some(250));
+            }
+            _ => panic!("expected obs command"),
+        }
+    }
+
+    #[test]
+    fn parses_play_target_as_optional() {
+        let cli =
+            Cli::try_parse_from(["spirescry", "play", "StrikeIronclad", "--target", "7"]).unwrap();
+
+        match cli.cmd {
+            Cmd::Play { model, target } => {
+                assert_eq!(model, "StrikeIronclad");
+                assert_eq!(target, Some(7));
+            }
+            _ => panic!("expected play command"),
+        }
+    }
+
+    #[test]
+    fn cheat_goto_maps_position_args() {
+        let args = cheat_args("goto", &strings(&["3", "5"])).unwrap();
+
+        assert_eq!(args, json!({ "name": "goto", "col": 3, "row": 5 }));
+    }
+
+    #[test]
+    fn cheat_scalar_values_map_to_value() {
+        let gold = cheat_args("gold", &strings(&["100"])).unwrap();
+        let hp = cheat_args("hp", &strings(&["12"])).unwrap();
+
+        assert_eq!(gold, json!({ "name": "gold", "value": 100 }));
+        assert_eq!(hp, json!({ "name": "hp", "value": 12 }));
+    }
+
+    #[test]
+    fn cheat_event_maps_id() {
+        let args = cheat_args("event", &strings(&["ForgottenAltar"])).unwrap();
+
+        assert_eq!(args, json!({ "name": "event", "id": "ForgottenAltar" }));
+    }
+
+    #[test]
+    fn cheat_rejects_invalid_numbers() {
+        let err = cheat_args("goto", &strings(&["x", "5"])).unwrap_err();
+
+        assert_eq!(err, "invalid number: x");
+    }
+
+    #[test]
+    fn unknown_cheat_passes_name_for_bridge_validation() {
+        let args = cheat_args("heal", &[]).unwrap();
+
+        assert_eq!(args, json!({ "name": "heal" }));
+    }
+}

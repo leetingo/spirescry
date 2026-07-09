@@ -4,6 +4,8 @@
 # Build outputs
 src/bin/
 src/obj/
+tests/*/bin/
+tests/*/obj/
 cli/target/
 headless/build/
 headless/*/bin/
