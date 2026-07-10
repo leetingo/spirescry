@@ -1,0 +1,32 @@
+name: Unit tests
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+
+jobs:
+  unit-tests:
+    name: Unit tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 9.0.x
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run C# unit tests
+        run: dotnet run --project tests/UnitTests/UnitTests.csproj
+
+      - name: Run CLI unit tests
+        run: cargo test --manifest-path cli/Cargo.toml
