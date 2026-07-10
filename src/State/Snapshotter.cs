@@ -433,10 +433,30 @@ public static class Snapshotter
         idx = i,
         model = c.Id.Entry,
         title = c.Title,
+        cost = c.EnergyCost.Canonical,
         upgraded = c.IsUpgraded,
         selected,
         description = CardDescription(c),
+        upgradedPreview = UpgradePreview(c),
     };
+
+    // What the card text becomes if upgraded — the rest-site smith's
+    // preview pane. null when the card can't upgrade further. Upgrades
+    // mutate a card's dynamic vars in place, so the upgraded numbers only
+    // exist on an upgraded instance: build a throwaway twin from the
+    // canonical model and replay the upgrades one level past the card.
+    private static string? UpgradePreview(CardModel c)
+    {
+        if (!c.IsUpgradable) return null;
+        try
+        {
+            var twin = ModelDb.GetById<CardModel>(c.Id).ToMutable();
+            for (var lvl = 0; lvl <= c.CurrentUpgradeLevel; lvl++)
+                twin.UpgradeInternal();
+            return CardDescription(twin);
+        }
+        catch { return null; }
+    }
 
     private static object HandCardView(string? model, bool upgraded, int i) => new
     {
@@ -513,6 +533,20 @@ public static class Snapshotter
         // through a separate dialogue table and can throw here — their
         // options still read fine with default vars.
         try { ev.CalculateVars(); } catch { }
+        // The GUI's event nodes copy the event's DynamicVars into each
+        // text's LocString before rendering; headless has no nodes, so do
+        // it here or var-bearing descriptions ({SoloGold}, …) fail to
+        // format and degrade to raw text.
+        try
+        {
+            if (ev.Description is { } pageDesc) ev.DynamicVars.AddTo(pageDesc);
+            foreach (var o in ev.CurrentOptions ?? [])
+            {
+                if (o?.Title is { } t) ev.DynamicVars.AddTo(t);
+                if (o?.Description is { } d) ev.DynamicVars.AddTo(d);
+            }
+        }
+        catch { }
         return new
         {
             phase,
@@ -533,6 +567,34 @@ public static class Snapshotter
         };
     }
 
+    // The UI's own composed card text: dynamic vars refreshed first
+    // (strength/weak applied through the engine's preview hooks — the GUI
+    // card node does the same each frame), then the same description path
+    // the card renders with, enchant/affliction lines included.
+    private static string CardText(CardModel c, PileType pile)
+    {
+        try
+        {
+            c.UpdateDynamicVarPreview(CardPreviewMode.Normal, null, c.DynamicVars);
+            return RichText.NormalizeIcons(c.GetDescriptionForPile(pile));
+        }
+        catch { return ""; }
+    }
+
+    // The numbers behind the text — lets an agent do arithmetic without
+    // parsing bbcode. PreviewValue is what the card face shows.
+    private static Dictionary<string, decimal>? CardVars(CardModel c)
+    {
+        try
+        {
+            var vars = new Dictionary<string, decimal>();
+            foreach (var v in c.DynamicVars.Values)
+                vars[v.Name] = v.PreviewValue;
+            return vars.Count == 0 ? null : vars;
+        }
+        catch { return null; }
+    }
+
     // Missing locale keys throw from GetFormattedText (Neow-style events
     // store their body elsewhere) — fall back to the raw entry key.
     private static string SafeText(LocString? s)
@@ -541,11 +603,15 @@ public static class Snapshotter
         try
         {
             if (s.IsEmpty) return "";
-            return RichText.NormalizeIcons(s.GetFormattedText());
+            var text = s.GetFormattedText();
+            // The host's GetFormattedText finalizer degrades hard failures
+            // to the entry key; a key echo means the entry doesn't exist —
+            // the GUI renders nothing there, so neither do we.
+            return text == s.LocEntryKey ? "" : RichText.NormalizeIcons(text);
         }
         catch
         {
-            try { return RichText.NormalizeIcons(s.GetRawText()); } catch { return ""; }
+            try { return RichText.NormalizeIcons(s.GetRawText() ?? ""); } catch { return ""; }
         }
     }
 
@@ -584,13 +650,15 @@ public static class Snapshotter
             },
             hand = pcs.Hand.Cards
                 .Where(c => c != null)
-                .Select(c => new
+                .Select(c => (object)new
                 {
                     model = c.Id.Entry,
                     cost = c.EnergyCost.GetAmountToSpend(),
                     target = c.TargetType.ToString().ToLowerInvariant(),
                     upgraded = c.IsUpgraded,
                     unplayable = c.Keywords.Contains(CardKeyword.Unplayable),
+                    description = CardText(c, PileType.Hand),
+                    vars = CardVars(c),
                 })
                 .ToArray(),
             enemies = state.Enemies

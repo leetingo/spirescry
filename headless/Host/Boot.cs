@@ -93,6 +93,13 @@ internal static class HeadlessBoot
         catch (Exception ex) { HostLog.Error("InitProfileId", ex); }
         try { SaveManager.Instance.InitProgressData(); }
         catch (Exception ex) { HostLog.Error("InitProgressData", ex); }
+        // Gameplay code dereferences prefs/settings (VFX timing reads
+        // PrefsSave.FastMode on every X-cost card); the ForTest inits stamp
+        // in-memory defaults without touching the player's real files.
+        try { SaveManager.Instance.InitPrefsDataForTest(); }
+        catch (Exception ex) { HostLog.Error("InitPrefsDataForTest", ex); }
+        try { SaveManager.Instance.InitSettingsDataForTest(); }
+        catch (Exception ex) { HostLog.Error("InitSettingsDataForTest", ex); }
 
         RebuildModelIdSerializationCache();
     }
@@ -297,6 +304,18 @@ internal static class HeadlessBoot
         Exception? __exception, MegaCrit.Sts2.Core.Localization.LocString __instance, ref string __result)
     {
         if (__exception is null) return null;
+        // Raw table text (any unformatted {vars} included) beats the bare
+        // key; the key stays the identifier of last resort. GetRawText is
+        // itself swallow-finalized, so a missing entry comes back null.
+        try
+        {
+            if (__instance.GetRawText() is { Length: > 0 } raw)
+            {
+                __result = raw;
+                return null;
+            }
+        }
+        catch { }
         try { __result = __instance.LocEntryKey ?? ""; }
         catch { __result = ""; }
         return null;
