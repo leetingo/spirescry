@@ -232,10 +232,19 @@ public static class Snapshotter
         var models = (pile?.Cards ?? Enumerable.Empty<CardModel>())
             .Where(c => c != null)
             .Select(c => c.Id.Entry);
+        // Compact: counts-by-model — pile order is either hidden (draw is
+        // shown sorted anyway) or rarely decision-relevant.
+        if (_compact)
+        {
+            var counts = models.GroupBy(m => m)
+                .OrderBy(g => g.Key, StringComparer.Ordinal)
+                .ToDictionary(g => g.Key, g => g.Count());
+            return new { count = counts.Values.Sum(), cards = (object)counts };
+        }
         var cards = sorted
             ? models.OrderBy(m => m, StringComparer.Ordinal).ToArray()
             : models.ToArray();
-        return new { count = cards.Length, cards };
+        return new { count = cards.Length, cards = (object)cards };
     }
 
     private static object ShopSnapshot(string phase)
@@ -632,11 +641,19 @@ public static class Snapshotter
     // (strength/weak applied through the engine's preview hooks — the GUI
     // card node does the same each frame), then the same description path
     // the card renders with, enchant/affliction lines included.
+    // The same per-frame refresh the GUI card node does — bakes strength/
+    // weak/etc. into PreviewValue, which both the text and vars read.
+    private static void RefreshCardPreview(CardModel c)
+    {
+        try { c.UpdateDynamicVarPreview(CardPreviewMode.Normal, null, c.DynamicVars); }
+        catch { }
+    }
+
     private static string CardText(CardModel c, PileType pile)
     {
         try
         {
-            c.UpdateDynamicVarPreview(CardPreviewMode.Normal, null, c.DynamicVars);
+            RefreshCardPreview(c);
             return RichText.NormalizeIcons(c.GetDescriptionForPile(pile));
         }
         catch { return ""; }
@@ -712,16 +729,22 @@ public static class Snapshotter
             },
             hand = pcs.Hand.Cards
                 .Where(c => c != null)
-                .Select(c => (object)new
+                .Select(c =>
                 {
-                    model = c.Id.Entry,
-                    cost = c.EnergyCost.GetAmountToSpend(),
-                    starCost = StarCost(c),
-                    target = c.TargetType.ToString().ToLowerInvariant(),
-                    upgraded = c.IsUpgraded,
-                    unplayable = c.Keywords.Contains(CardKeyword.Unplayable),
-                    description = CardText(c, PileType.Hand),
-                    vars = CardVars(c),
+                    // Compact keeps the numbers (vars) and drops the prose —
+                    // the refresh still runs so vars carry modified values.
+                    if (_compact) RefreshCardPreview(c);
+                    return (object)new
+                    {
+                        model = c.Id.Entry,
+                        cost = c.EnergyCost.GetAmountToSpend(),
+                        starCost = StarCost(c),
+                        target = c.TargetType.ToString().ToLowerInvariant(),
+                        upgraded = c.IsUpgraded,
+                        unplayable = c.Keywords.Contains(CardKeyword.Unplayable),
+                        description = _compact ? null : CardText(c, PileType.Hand),
+                        vars = CardVars(c),
+                    };
                 })
                 .ToArray(),
             enemies = state.Enemies

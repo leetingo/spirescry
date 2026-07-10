@@ -46,8 +46,9 @@ reachable nodes, the whole act graph, and the run seed; `game_over`
 reports outcome / floor / act / seed.
 
 `?compact=1` (CLI: `obs --compact`) elides the big repeats — no act
-graph, deck as counts-by-model (`"STRIKE_IRONCLAD+": 2` = two upgraded
-copies) — for agents that poll often.
+graph, deck and combat piles as counts-by-model (`"STRIKE_IRONCLAD+": 2`
+= two upgraded copies), hand cards keep their numbers (`vars`) but drop
+the description prose — for agents that poll often.
 
 Phases: `main_menu`, `map`, `combat`, `event`, `shop`, `rest_site`,
 `treasure`, `rewards`, `card_reward`, `relic_reward`, `card_select`,
