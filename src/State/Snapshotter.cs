@@ -433,10 +433,30 @@ public static class Snapshotter
         idx = i,
         model = c.Id.Entry,
         title = c.Title,
+        cost = c.EnergyCost.Canonical,
         upgraded = c.IsUpgraded,
         selected,
         description = CardDescription(c),
+        upgradedPreview = UpgradePreview(c),
     };
+
+    // What the card text becomes if upgraded — the rest-site smith's
+    // preview pane. null when the card can't upgrade further. Upgrades
+    // mutate a card's dynamic vars in place, so the upgraded numbers only
+    // exist on an upgraded instance: build a throwaway twin from the
+    // canonical model and replay the upgrades one level past the card.
+    private static string? UpgradePreview(CardModel c)
+    {
+        if (!c.IsUpgradable) return null;
+        try
+        {
+            var twin = ModelDb.GetById<CardModel>(c.Id).ToMutable();
+            for (var lvl = 0; lvl <= c.CurrentUpgradeLevel; lvl++)
+                twin.UpgradeInternal();
+            return CardDescription(twin);
+        }
+        catch { return null; }
+    }
 
     private static object HandCardView(string? model, bool upgraded, int i) => new
     {
