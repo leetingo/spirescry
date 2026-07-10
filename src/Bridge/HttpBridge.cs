@@ -72,7 +72,8 @@ public sealed class HttpBridge
             resp = (req.HttpMethod, path) switch
             {
                 ("GET", "/health") => await Handlers.Health(),
-                ("GET", "/obs") => await Handlers.Obs(req.QueryString["since"], req.QueryString["wait"]),
+                ("GET", "/obs") => await Handlers.Obs(
+                    req.QueryString["since"], req.QueryString["wait"], req.QueryString["compact"]),
                 ("POST", "/step") => await Handlers.Step(body),
                 _ => Response.Error("not_found", $"no route {req.HttpMethod} {path}", 404),
             };
