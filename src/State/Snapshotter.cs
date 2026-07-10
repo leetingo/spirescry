@@ -410,7 +410,7 @@ public static class Snapshotter
     // the raw Description LocString throws without its variables filled.
     private static string CardDescription(CardModel card)
     {
-        try { return card.GetDescriptionForPile(PileType.None, null); }
+        try { return RichText.NormalizeIcons(card.GetDescriptionForPile(PileType.None, null)); }
         catch { return SafeText(card.Description); }
     }
 
@@ -541,11 +541,11 @@ public static class Snapshotter
         try
         {
             if (s.IsEmpty) return "";
-            return s.GetFormattedText();
+            return RichText.NormalizeIcons(s.GetFormattedText());
         }
         catch
         {
-            try { return s.GetRawText(); } catch { return ""; }
+            try { return RichText.NormalizeIcons(s.GetRawText()); } catch { return ""; }
         }
     }
 
