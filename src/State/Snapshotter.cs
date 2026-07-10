@@ -26,9 +26,17 @@ namespace Spirescry.State;
 
 public static class Snapshotter
 {
+    // Compact mode elides the big repeats (map graph, per-card deck) for
+    // agents that poll often. Set per snapshot; safe as a static because
+    // the pump runs one job at a time on the main thread.
+    private static bool _compact;
+
     // Must be called on the main thread.
-    public static object ForCurrentPhase()
+    public static object ForCurrentPhase() => ForCurrentPhase(false);
+
+    public static object ForCurrentPhase(bool compact)
     {
+        _compact = compact;
         var phase = PhaseDetector.Current();
         return phase switch
         {
@@ -152,11 +160,24 @@ public static class Snapshotter
             gold = player.Gold,
             potions = PotionViews(player),
             relics = player.Relics.Select(r => r.Id.Entry).ToArray(),
-            deck = (player.Deck?.Cards ?? Enumerable.Empty<CardModel>())
-                .Where(c => c != null)
-                .Select(c => new { model = c.Id.Entry, upgraded = c.IsUpgraded })
-                .ToArray(),
+            deck = DeckView(player),
         };
+    }
+
+    // Compact: counts by model, "+" marking upgraded copies — a 30-card
+    // deck collapses to a dozen keys instead of 30 objects per snapshot.
+    private static object DeckView(Player player)
+    {
+        var cards = (player.Deck?.Cards ?? Enumerable.Empty<CardModel>())
+            .Where(c => c != null);
+        if (!_compact)
+            return cards
+                .Select(c => new { model = c.Id.Entry, upgraded = c.IsUpgraded })
+                .ToArray();
+        return cards
+            .GroupBy(c => c.Id.Entry + (c.IsUpgraded ? "+" : ""))
+            .OrderBy(g => g.Key)
+            .ToDictionary(g => g.Key, g => g.Count());
     }
 
     // Empty slots and queued/consumed potions are omitted; `slot` is what
@@ -458,9 +479,12 @@ public static class Snapshotter
             player = FooterView(),
             current = rs.CurrentMapCoord is { } c ? new[] { c.col, c.row } : null,
             next = NextPoints(rs).Select(MapPointView).ToArray(),
-            graph = rs.Map is { } map
-                ? AllMapPoints(map).Select(MapPointView).ToArray()
-                : [],
+            // The act graph is the biggest repeat in the protocol — compact
+            // callers keep `next` and re-request the full view when routing.
+            graph = _compact ? null
+                : rs.Map is { } map
+                    ? AllMapPoints(map).Select(MapPointView).ToArray()
+                    : [],
         };
     }
 

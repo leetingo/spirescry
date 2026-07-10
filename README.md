@@ -45,6 +45,10 @@ carries a `player` footer (hp, gold, potions, relics, deck); the map gets
 reachable nodes, the whole act graph, and the run seed; `game_over`
 reports outcome / floor / act / seed.
 
+`?compact=1` (CLI: `obs --compact`) elides the big repeats — no act
+graph, deck as counts-by-model (`"STRIKE_IRONCLAD+": 2` = two upgraded
+copies) — for agents that poll often.
+
 Phases: `main_menu`, `map`, `combat`, `event`, `shop`, `rest_site`,
 `treasure`, `rewards`, `card_reward`, `relic_reward`, `card_select`,
 `hand_select`, `bundle_select`, `crystal_sphere`, `game_over` — plus
