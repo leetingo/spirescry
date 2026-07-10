@@ -533,6 +533,34 @@ public static class Snapshotter
         };
     }
 
+    // The UI's own composed card text: dynamic vars refreshed first
+    // (strength/weak applied through the engine's preview hooks — the GUI
+    // card node does the same each frame), then the same description path
+    // the card renders with, enchant/affliction lines included.
+    private static string CardText(CardModel c, PileType pile)
+    {
+        try
+        {
+            c.UpdateDynamicVarPreview(CardPreviewMode.Normal, null, c.DynamicVars);
+            return c.GetDescriptionForPile(pile);
+        }
+        catch { return ""; }
+    }
+
+    // The numbers behind the text — lets an agent do arithmetic without
+    // parsing bbcode. PreviewValue is what the card face shows.
+    private static Dictionary<string, decimal>? CardVars(CardModel c)
+    {
+        try
+        {
+            var vars = new Dictionary<string, decimal>();
+            foreach (var v in c.DynamicVars.Values)
+                vars[v.Name] = v.PreviewValue;
+            return vars.Count == 0 ? null : vars;
+        }
+        catch { return null; }
+    }
+
     // Missing locale keys throw from GetFormattedText (Neow-style events
     // store their body elsewhere) — fall back to the raw entry key.
     private static string SafeText(LocString? s)
@@ -584,13 +612,15 @@ public static class Snapshotter
             },
             hand = pcs.Hand.Cards
                 .Where(c => c != null)
-                .Select(c => new
+                .Select(c => (object)new
                 {
                     model = c.Id.Entry,
                     cost = c.EnergyCost.GetAmountToSpend(),
                     target = c.TargetType.ToString().ToLowerInvariant(),
                     upgraded = c.IsUpgraded,
                     unplayable = c.Keywords.Contains(CardKeyword.Unplayable),
+                    description = CardText(c, PileType.Hand),
+                    vars = CardVars(c),
                 })
                 .ToArray(),
             enemies = state.Enemies
