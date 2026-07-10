@@ -47,13 +47,14 @@ public static class Handlers
     // (engine events / phase changes bump it) or the wait expires — the
     // event-driven replacement for sleep-polling. The response carries the
     // current revision and, when `since` was given, the events behind it.
-    public static async Task<Response> Obs(string? sinceStr, string? waitStr)
+    public static async Task<Response> Obs(string? sinceStr, string? waitStr, string? compactStr = null)
     {
         var since = long.TryParse(sinceStr, out var s) ? s : -1;
         var wait = int.TryParse(waitStr, out var w) ? Math.Clamp(w, 0, 60_000) : 0;
+        var compact = compactStr is "1" or "true";
         var changed = since < 0 || wait == 0 || await Signals.WaitForChange(since, wait);
 
-        var snapshot = await MainThreadPump.Instance!.Run(Snapshotter.ForCurrentPhase);
+        var snapshot = await MainThreadPump.Instance!.Run(() => Snapshotter.ForCurrentPhase(compact));
         var node = JsonSerializer.SerializeToNode(snapshot)!.AsObject();
         node["rev"] = Signals.Revision;
         if (since >= 0)
@@ -84,7 +85,18 @@ public static class Handlers
             return Response.Error("bad_request", $"invalid json body: {ex.Message}");
         }
 
-        var result = await MainThreadPump.Instance!.Run(() => Dispatcher.Dispatch(action, args));
+        var result = await MainThreadPump.Instance!.Run(() =>
+        {
+            var before = Signals.Revision;
+            var r = Dispatcher.Dispatch(action, args);
+            // Verbs that resolve inline within one phase (host-mode Neow
+            // claims, shop buys, reward gold, …) ride no engine event and
+            // no phase diff, so nothing else bumps the revision. Every
+            // accepted step must be visible to --since waiters.
+            if (r.Ok && Signals.Revision == before)
+                Signals.Bump($"step:{action}");
+            return r;
+        });
         return result.Ok
             // The action is enqueued on the engine's action queue and
             // resolves over the following frames — follow with

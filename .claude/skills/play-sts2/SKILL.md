@@ -30,21 +30,25 @@ your PATH (or set `SPIRESCRY_CLI_BIN` to somewhere that is).
 
 ## Boot
 
-From the repo root:
+From the repo root, run the host as a long-lived task you own (a
+background task or persistent terminal — not a fire-and-forget shell:
+sandboxed executors reap orphaned background children):
 
 ```sh
-./build.sh host        # boots the windowless game; prints "bridge up"
-spirescry health       # → {"ok": true, ...} confirms it's alive
-./build.sh stop        # shut it down when you're done
+./build.sh host --foreground   # blocks while the game runs — own it as a background task
+spirescry health               # → {"ok": true, ...} confirms it's alive
+./build.sh stop                # shut it down when you're done
 ```
 
 - "host not built" → run the first-time setup above, then retry.
 - "host already running" → it's live; just play (or `stop` first to restart).
+- Plain `./build.sh host` self-backgrounds with nohup — fine in a real
+  terminal, unreliable under sandboxed executors.
 
 Host quirks: runs never save (each boot starts clean), and card pickers
 auto-confirm the moment you've picked the maximum — use `confirm` only to
-accept fewer picks. `STS2_AGENT_LANG=zhs ./build.sh host` switches card and
-event text to another language.
+accept fewer picks. `STS2_AGENT_LANG=zhs ./build.sh host --foreground`
+switches card and event text to another language.
 
 ## The loop
 
@@ -58,11 +62,26 @@ Rules:
 
 - One decision per command. Never sleep-poll — `--since`/`--wait` does the
   waiting for you.
+- Wait on the `rev` you read from `obs` **before** acting. Verb responses
+  print a `rev` too — ignore it: it marks acceptance, not the outcome.
 - Exit code 75 (`not_ready`) is transient by contract: retry the same command.
 - Any other rejection names what to fix: `bad_phase` (re-read `obs`),
   `not_enough_energy`, `bad_target`, `bad_index`, …
-- If `obs` stops changing and every verb rejects, `spirescry abandon` and
-  start a fresh run.
+- In a sandboxed executor, the first `spirescry` call may fail with
+  "Operation not permitted" — approve loopback access to `127.0.0.1:7777`
+  and retry; the bridge never leaves localhost.
+- On a `wedge:*` event, follow the recovery ladder below — don't jump to
+  abandon.
+
+## Recovering from a wedge
+
+A `wedge:<Action>` event means an engine action died mid-resolution — its
+effects may be lost (e.g. energy spent, no damage dealt). In order:
+
+1. Re-read `obs`: the game usually keeps accepting verbs.
+2. Try a legal verb — `end-turn` typically still works.
+3. If the run advances, note what was lost and keep playing.
+4. `spirescry abandon` only when every verb keeps rejecting.
 
 ## Starting a run
 
@@ -83,8 +102,8 @@ carries a `player` footer (hp, gold, potions, relics, deck).
 | `main_menu` | — | `new-run <CHARACTER>` |
 | `map` | `next`: reachable nodes (col/row/type) | `map-move <col> <row>` |
 | `combat` | `you`, `hand`, `enemies`, `potions`, `piles`, `turn` | `play <MODEL> [--target <id>]`, `end-turn`, `potion-use <slot> [--target <id>]` |
-| `event` | `options[]` (idx/title/description/locked) | `option <idx>`; `proceed` to page dialogue / leave a finished event |
-| `rest_site` | `options[]` | `option <idx>` (upgrade opens a deck picker) |
+| `event` | `options[]` (idx/title/description/locked) | `option <idx>` — some options only mark `chosen: true` and need a `proceed` after; `proceed` also pages dialogue and leaves once `finished`. Rule: after `option`, re-read — still in the event with nothing new to pick? `proceed`. |
+| `rest_site` | `options[]` | `option <idx>` (upgrade opens a deck picker); when you're done (`options` empty), `proceed` → map |
 | `shop` | goods with idx + prices | `buy <kind> --idx <n>` (kind: `card`/`colorless`/`relic`/`potion`/`card_removal`), `leave` |
 | `treasure`, `relic_reward` | relics on offer | `pick-relic <idx>`, `skip` |
 | `rewards` | reward tiles | `pick-reward <idx>`; `proceed` leaves, skipping the rest |
@@ -104,6 +123,9 @@ carries a `player` footer (hp, gold, potions, relics, deck).
   and `intents[]` (`type`, `damage` × `hits` — nulls mean a non-attack).
 - Pass `--target` only when the card targets an enemy; a lone enemy
   auto-targets.
+- X-cost cards (`WHIRLWIND`) show `cost` = your current remaining energy
+  while in combat (and 0 on reward pages): playing one spends everything
+  and does the effect X times.
 
 Example turn:
 

@@ -39,6 +39,9 @@ enum Cmd {
         /// Max milliseconds to wait for a change (with --since)
         #[arg(long)]
         wait: Option<u32>,
+        /// Elide the big repeats: no map graph, deck as counts-by-model
+        #[arg(long)]
+        compact: bool,
     },
     /// Start a singleplayer run from the main menu
     NewRun {
@@ -78,7 +81,7 @@ enum Cmd {
     Skip,
     /// Travel to a map node (col/row from obs.next)
     MapMove { col: u32, row: u32 },
-    /// Dev/verification cheats: goto <col> <row> | gold <n> | hp <n> | heal | wound-enemies | event <ID>
+    /// Dev/verification cheats: goto <col> <row> | gold <n> | hp <n> | heal | wound-enemies | event <ID> | card <ID>
     Cheat { name: String, values: Vec<String> },
     /// Play a hand card by model entry (e.g. StrikeIronclad)
     Play {
@@ -105,13 +108,22 @@ fn main() -> ExitCode {
     let base = format!("http://{}:{}", cli.host, cli.port);
     let result = match &cli.cmd {
         Cmd::Health => get(&base, "/health"),
-        Cmd::Obs { since, wait } => {
+        Cmd::Obs {
+            since,
+            wait,
+            compact,
+        } => {
             if wait.is_some() && since.is_none() {
                 Err("--wait has no effect without --since".to_string())
             } else {
                 let mut path = String::from("/obs");
+                let mut sep = '?';
                 if let Some(s) = since {
-                    path = format!("{}?since={}&wait={}", path, s, wait.unwrap_or(5000));
+                    path = format!("{}{}since={}&wait={}", path, sep, s, wait.unwrap_or(5000));
+                    sep = '&';
+                }
+                if *compact {
+                    path = format!("{}{}compact=1", path, sep);
                 }
                 get(&base, &path)
             }
@@ -204,7 +216,7 @@ fn cheat_args(name: &str, values: &[String]) -> Result<Value, String> {
             args["row"] = json!(num(row)?);
         }
         ("gold", [value]) | ("hp", [value]) => args["value"] = json!(num(value)?),
-        ("event", [id]) => args["id"] = json!(id),
+        ("event", [id]) | ("card", [id]) => args["id"] = json!(id),
         _ => {}
     }
     Ok(args)
@@ -271,10 +283,25 @@ mod tests {
         assert_eq!(cli.host, "localhost");
         assert_eq!(cli.port, 8888);
         match cli.cmd {
-            Cmd::Obs { since, wait } => {
+            Cmd::Obs {
+                since,
+                wait,
+                compact,
+            } => {
                 assert_eq!(since, Some(42));
                 assert_eq!(wait, Some(250));
+                assert!(!compact);
             }
+            _ => panic!("expected obs command"),
+        }
+    }
+
+    #[test]
+    fn parses_obs_compact_flag() {
+        let cli = Cli::try_parse_from(["spirescry", "obs", "--compact"]).unwrap();
+
+        match cli.cmd {
+            Cmd::Obs { compact, .. } => assert!(compact),
             _ => panic!("expected obs command"),
         }
     }
@@ -314,6 +341,13 @@ mod tests {
         let args = cheat_args("event", &strings(&["ForgottenAltar"])).unwrap();
 
         assert_eq!(args, json!({ "name": "event", "id": "ForgottenAltar" }));
+    }
+
+    #[test]
+    fn cheat_card_maps_id() {
+        let args = cheat_args("card", &strings(&["WHIRLWIND"])).unwrap();
+
+        assert_eq!(args, json!({ "name": "card", "id": "WHIRLWIND" }));
     }
 
     #[test]

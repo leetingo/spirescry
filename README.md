@@ -45,6 +45,10 @@ carries a `player` footer (hp, gold, potions, relics, deck); the map gets
 reachable nodes, the whole act graph, and the run seed; `game_over`
 reports outcome / floor / act / seed.
 
+`?compact=1` (CLI: `obs --compact`) elides the big repeats — no act
+graph, deck as counts-by-model (`"STRIKE_IRONCLAD+": 2` = two upgraded
+copies) — for agents that poll often.
+
 Phases: `main_menu`, `map`, `combat`, `event`, `shop`, `rest_site`,
 `treasure`, `rewards`, `card_reward`, `relic_reward`, `card_select`,
 `hand_select`, `bundle_select`, `crystal_sphere`, `game_over` — plus
@@ -61,10 +65,11 @@ with codes that say what to change (`bad_phase`, `not_enough_energy`,
 
 **Event-driven waits.** Every snapshot carries a monotonic `rev`. Changes
 bump it from the engine's own C# events (action executor, combat manager,
-overlay stack) plus a per-tick phase diff as the safety net, and
-`obs?since=` responses name the events behind the bump
-(`phase:map->combat`, `action:PlayCardAction`, `enqueued:...`,
-`wedge:...`). No sleep-polling anywhere.
+overlay stack) plus a per-tick phase diff as the safety net; a `/step`
+accepted without either (in-phase inline mutations — reward claims, shop
+buys) bumps it itself. `obs?since=` responses name the events behind the
+bump (`phase:map->combat`, `action:PlayCardAction`, `enqueued:...`,
+`step:buy`, `wedge:...`). No sleep-polling anywhere.
 
 **`GET /health`** adds live introspection: the currently executing engine
 action and its state, `executorStuckMs`, and per-queue depth/paused flags.

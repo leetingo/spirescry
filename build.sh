@@ -12,6 +12,8 @@
 #   headless     launch the game with no window; waits until the bridge is up
 #   headless-setup  one-time: copy deps, IL-patch sts2.dll, extract loc, build host
 #   host         run the pure .NET host — no game binary, no Steam
+#                (--foreground: exec in this process; for sandboxed
+#                executors that reap background children)
 #   verify       conformance: tests/parity.py on both boots + key-set diff
 #   stop         stop a running game or host
 #
@@ -120,13 +122,21 @@ headless_setup() {
 
 # Run the host: game logic from the IL-patched sts2.dll inside a plain
 # .NET process — no game binary, no Godot engine, no Steam.
+#
+# --foreground execs the host in this process. Sandboxed executors (CI,
+# agent runners) reap nohup'd children with their parent shell; a
+# foreground host lives exactly as long as its own terminal/task.
 launch_host() {
     [ -f headless/Host/bin/Release/spirescry_host.dll ] || die "host not built — run: ./build.sh headless-setup"
     ! pgrep -qf spirescry_host || die "host already running — ./build.sh stop first"
-    log="${TMPDIR:-/tmp}/spirescry-host.log"
-    step "launch host (bridge port $STS2_AGENT_PORT, log $log)"
     # Through the dotnet CLI, not the apphost — the CLI resolves its own
     # runtime regardless of DOTNET_ROOT.
+    if [ "${1:-}" = "--foreground" ]; then
+        step "launch host, foreground (bridge port $STS2_AGENT_PORT)"
+        exec dotnet headless/Host/bin/Release/spirescry_host.dll
+    fi
+    log="${TMPDIR:-/tmp}/spirescry-host.log"
+    step "launch host (bridge port $STS2_AGENT_PORT, log $log)"
     nohup dotnet headless/Host/bin/Release/spirescry_host.dll > "$log" 2>&1 &
     wait_bridge 30 "$log"
 }
@@ -229,7 +239,13 @@ while [ "$#" -gt 0 ]; do
         deploy)     deploy_mod; deploy_cli ;;
         headless)   launch_headless ;;
         headless-setup) headless_setup ;;
-        host)       launch_host ;;
+        host)
+            if [ "${2:-}" = "--foreground" ]; then
+                shift
+                launch_host --foreground
+            else
+                launch_host
+            fi ;;
         verify)     verify ;;
         stop)       stop_game ;;
         -h|--help|help) usage ;;

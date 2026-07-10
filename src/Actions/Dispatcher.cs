@@ -1,6 +1,7 @@
 using System.Text.Json;
 using MegaCrit.Sts2.Core.CardSelection;
 using MegaCrit.Sts2.Core.Combat;
+using MegaCrit.Sts2.Core.Commands;
 using MegaCrit.Sts2.Core.Context;
 using MegaCrit.Sts2.Core.Entities.Cards;
 using MegaCrit.Sts2.Core.Entities.Creatures;
@@ -74,8 +75,9 @@ public static class Dispatcher
             "hp" => CheatHp(args),
             "wound-enemies" => CheatWoundEnemies(),
             "event" => CheatEvent(args),
+            "card" => CheatCard(args),
             var n => DispatchResult.Reject("bad_request",
-                $"unknown cheat '{n}' (supported: goto, gold, heal, hp, wound-enemies, event)"),
+                $"unknown cheat '{n}' (supported: goto, gold, heal, hp, wound-enemies, event, card)"),
         };
     }
 
@@ -161,6 +163,32 @@ public static class Dispatcher
     }
 
     private static DispatchResult CheatHeal() => SetLocalHp(c => c.MaxHp);
+
+    // Spawn a card into the hand (in combat) or the deck (outside) — lets a
+    // test exercise one card without replaying runs until one offers it.
+    // Mirrors the game's own CardConsoleCmd.
+    private static DispatchResult CheatCard(JsonElement args)
+    {
+        if (!TryGetString(args, "id", out var id))
+            return DispatchResult.Reject("bad_request", "missing args.id");
+        var rs = RunManager.Instance?.DebugOnlyGetState();
+        var player = rs is null ? null : LocalContext.GetMe(rs);
+        if (player is null)
+            return DispatchResult.Reject("not_ready", "no run in progress");
+
+        var entry = id.ToUpperInvariant();
+        var proto = ModelDb.AllCards.FirstOrDefault(c => c.Id.Entry == entry);
+        if (proto is null)
+            return DispatchResult.Reject("bad_request", $"no card model '{entry}'");
+
+        var inCombat = CombatManager.Instance is { IsInProgress: true };
+        ICardScope scope = inCombat ? CombatManager.Instance!.DebugOnlyGetState()! : rs;
+        var card = scope.CreateCard(proto, player);
+        var add = CardPileCmd.Add(card, inCombat ? PileType.Hand : PileType.Deck);
+        if (RunMode.IsHeadless) add.GetAwaiter().GetResult();
+        else Fire(add, "cheat-card");
+        return DispatchResult.Success();
+    }
 
     // Leaves every enemy at 1 HP with no block, so one normal play ends the
     // fight through the engine's real death pipeline. (Writing 0 directly
