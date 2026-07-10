@@ -38,14 +38,33 @@ internal static class HeadlessBoot
     {
         // STS2_HOST_DEBUG=1: print first-chance exception stacks — the
         // engine's own logger swallows them down to one message line.
-        if (Environment.GetEnvironmentVariable("STS2_HOST_DEBUG") == "1")
+        // Known GodotSharp stub misses (type/method loads the stub doesn't
+        // cover; SafeTypes() handles the partial results) collapse into
+        // one summary so they can't bury real signal; =2 prints them all.
+        var debug = Environment.GetEnvironmentVariable("STS2_HOST_DEBUG");
+        if (debug is "1" or "2")
+        {
+            var stubMisses = 0;
             AppDomain.CurrentDomain.FirstChanceException += (_, e) =>
             {
-                var frames = (e.Exception.StackTrace ?? "").Split('\n');
+                var ex = e.Exception;
+                var known = debug != "2"
+                    && ex is TypeLoadException or ReflectionTypeLoadException
+                            or MissingMethodException
+                    && (ex.Message.Contains("GodotSharp") || ex.Message.Contains("Godot."));
+                if (known)
+                {
+                    if (Interlocked.Increment(ref stubMisses) == 1)
+                        Console.Error.WriteLine(
+                            "[fce] suppressing known GodotSharp stub misses (STS2_HOST_DEBUG=2 shows them)");
+                    return;
+                }
+                var frames = (ex.StackTrace ?? "").Split('\n');
                 Console.Error.WriteLine(
-                    $"[fce] {e.Exception.GetType().Name}: {e.Exception.Message}\n"
+                    $"[fce] {ex.GetType().Name}: {ex.Message}\n"
                     + string.Join('\n', frames.Take(6)));
             };
+        }
 
         SynchronizationContext.SetSynchronizationContext(new InlineSynchronizationContext());
         InitModelDb();
