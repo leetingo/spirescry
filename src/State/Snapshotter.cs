@@ -166,16 +166,28 @@ public static class Snapshotter
 
     // Compact: counts by model, "+" marking upgraded copies — a 30-card
     // deck collapses to a dozen keys instead of 30 objects per snapshot.
+    // Enchantments/afflictions are the run's invisible card modifiers
+    // (event rewards like SELF_HELP_BOOK enchant a card and change nothing
+    // else observable); compact keys carry them as @ENCHANT / !AFFLICTION.
     private static object DeckView(Player player)
     {
         var cards = (player.Deck?.Cards ?? Enumerable.Empty<CardModel>())
             .Where(c => c != null);
         if (!_compact)
             return cards
-                .Select(c => new { model = c.Id.Entry, upgraded = c.IsUpgraded })
+                .Select(c => new
+                {
+                    model = c.Id.Entry,
+                    upgraded = c.IsUpgraded,
+                    enchant = c.Enchantment?.Id.Entry,
+                    affliction = c.Affliction?.Id.Entry,
+                })
                 .ToArray();
         return cards
-            .GroupBy(c => c.Id.Entry + (c.IsUpgraded ? "+" : ""))
+            .GroupBy(c => c.Id.Entry
+                + (c.IsUpgraded ? "+" : "")
+                + (c.Enchantment is { } e ? "@" + e.Id.Entry : "")
+                + (c.Affliction is { } a ? "!" + a.Id.Entry : ""))
             .OrderBy(g => g.Key)
             .ToDictionary(g => g.Key, g => g.Count());
     }
