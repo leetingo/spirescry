@@ -303,6 +303,11 @@ public static class Snapshotter
     }
 
     // relics[] stays empty until the chest is opened (pick-relic opens it).
+    // One chest per room instance: DoNormalRewards grants the chest's
+    // gold, so re-running it on later reads (the relic offer empties once
+    // picking ends) would mint gold on every obs.
+    private static TreasureRoom? _openedChest;
+
     private static object TreasureSnapshot(string phase)
     {
         var room = NRun.Instance?.TreasureRoom;
@@ -311,16 +316,21 @@ public static class Snapshotter
 
         // Headless: no chest button to click — open the chest through the
         // room model the first time the agent looks at it.
-        if (RunMode.IsHeadless && sync is { CurrentRelics: null or { Count: 0 } }
+        if (RunMode.IsHeadless
             && RunManager.Instance?.DebugOnlyGetState()?.CurrentRoom is TreasureRoom tr)
         {
-            try
+            if (!ReferenceEquals(_openedChest, tr)
+                && sync is { CurrentRelics: null or { Count: 0 } })
             {
-                tr.DoNormalRewards().GetAwaiter().GetResult();
-                tr.DoExtraRewardsIfNeeded().GetAwaiter().GetResult();
-                opened = true;
+                try
+                {
+                    tr.DoNormalRewards().GetAwaiter().GetResult();
+                    tr.DoExtraRewardsIfNeeded().GetAwaiter().GetResult();
+                    _openedChest = tr;
+                }
+                catch (Exception ex) { SafeLog.Error("headless treasure open", ex); }
             }
-            catch (Exception ex) { SafeLog.Error("headless treasure open", ex); }
+            opened = opened || ReferenceEquals(_openedChest, tr);
         }
 
         var relics = sync?.CurrentRelics;
