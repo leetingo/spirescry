@@ -175,7 +175,7 @@ public static class Snapshotter
             hp = creature is null ? null : new[] { creature.CurrentHp, creature.MaxHp },
             gold = player.Gold,
             potions = PotionViews(player),
-            relics = player.Relics.Select(r => r.Id.Entry).ToArray(),
+            relics = player.Relics.Select(RelicStateView).ToArray(),
             deck = DeckView(player),
         };
     }
@@ -207,6 +207,25 @@ public static class Snapshotter
             .OrderBy(g => g.Key)
             .ToDictionary(g => g.Key, g => g.Count());
     }
+
+    // The GUI inventory badge's number: DisplayAmount, shown only for
+    // relics that opt in. null = this relic keeps no visible count.
+    private static int? RelicCounter(MegaCrit.Sts2.Core.Models.RelicModel r)
+    {
+        try { return r.ShowCounter ? r.DisplayAmount : null; }
+        catch { return null; }
+    }
+
+    // A relic's whole observable story: its count, whether a one-shot
+    // already fired, and the text — the pickup offer was the only place
+    // an agent could ever read it.
+    private static object RelicStateView(MegaCrit.Sts2.Core.Models.RelicModel r) => new
+    {
+        model = r.Id.Entry,
+        counter = RelicCounter(r),
+        usedUp = r.IsUsedUp,
+        description = _compact ? null : SafeText(r.DynamicDescription),
+    };
 
     // Empty slots and queued/consumed potions are omitted; `slot` is what
     // potion-use / potion-discard take.
@@ -735,6 +754,11 @@ public static class Snapshotter
                 energy = new[] { pcs.Energy, pcs.MaxEnergy },
                 stars = pcs.Stars,
                 powers = PowerViews(creature),
+                // Counters tick mid-combat (every-N relics); the full
+                // relic story lives in the out-of-combat footer.
+                relics = player!.Relics
+                    .Select(r => (object)new { model = r.Id.Entry, counter = RelicCounter(r) })
+                    .ToArray(),
             },
             potions = PotionViews(player!),
             piles = new
