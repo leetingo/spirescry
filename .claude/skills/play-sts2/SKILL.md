@@ -30,21 +30,25 @@ your PATH (or set `SPIRESCRY_CLI_BIN` to somewhere that is).
 
 ## Boot
 
-From the repo root:
+From the repo root, run the host as a long-lived task you own (a
+background task or persistent terminal — not a fire-and-forget shell:
+sandboxed executors reap orphaned background children):
 
 ```sh
-./build.sh host        # boots the windowless game; prints "bridge up"
-spirescry health       # → {"ok": true, ...} confirms it's alive
-./build.sh stop        # shut it down when you're done
+./build.sh host --foreground   # blocks while the game runs — own it as a background task
+spirescry health               # → {"ok": true, ...} confirms it's alive
+./build.sh stop                # shut it down when you're done
 ```
 
 - "host not built" → run the first-time setup above, then retry.
 - "host already running" → it's live; just play (or `stop` first to restart).
+- Plain `./build.sh host` self-backgrounds with nohup — fine in a real
+  terminal, unreliable under sandboxed executors.
 
 Host quirks: runs never save (each boot starts clean), and card pickers
 auto-confirm the moment you've picked the maximum — use `confirm` only to
-accept fewer picks. `STS2_AGENT_LANG=zhs ./build.sh host` switches card and
-event text to another language.
+accept fewer picks. `STS2_AGENT_LANG=zhs ./build.sh host --foreground`
+switches card and event text to another language.
 
 ## The loop
 
