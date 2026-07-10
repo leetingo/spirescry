@@ -154,7 +154,16 @@ public static class Snapshotter
             relics = player.Relics.Select(r => r.Id.Entry).ToArray(),
             deck = (player.Deck?.Cards ?? Enumerable.Empty<CardModel>())
                 .Where(c => c != null)
-                .Select(c => new { model = c.Id.Entry, upgraded = c.IsUpgraded })
+                // Enchantments/afflictions are the run's invisible card
+                // modifiers (event rewards like SELF_HELP_BOOK enchant a
+                // card and change nothing else observable).
+                .Select(c => new
+                {
+                    model = c.Id.Entry,
+                    upgraded = c.IsUpgraded,
+                    enchant = c.Enchantment?.Id.Entry,
+                    affliction = c.Affliction?.Id.Entry,
+                })
                 .ToArray(),
         };
     }
