@@ -513,6 +513,20 @@ public static class Snapshotter
         // through a separate dialogue table and can throw here — their
         // options still read fine with default vars.
         try { ev.CalculateVars(); } catch { }
+        // The GUI's event nodes copy the event's DynamicVars into each
+        // text's LocString before rendering; headless has no nodes, so do
+        // it here or var-bearing descriptions ({SoloGold}, …) fail to
+        // format and degrade to raw text.
+        try
+        {
+            if (ev.Description is { } pageDesc) ev.DynamicVars.AddTo(pageDesc);
+            foreach (var o in ev.CurrentOptions ?? [])
+            {
+                if (o?.Title is { } t) ev.DynamicVars.AddTo(t);
+                if (o?.Description is { } d) ev.DynamicVars.AddTo(d);
+            }
+        }
+        catch { }
         return new
         {
             phase,
@@ -541,11 +555,15 @@ public static class Snapshotter
         try
         {
             if (s.IsEmpty) return "";
-            return s.GetFormattedText();
+            var text = s.GetFormattedText();
+            // The host's GetFormattedText finalizer degrades hard failures
+            // to the entry key; a key echo means the entry doesn't exist —
+            // the GUI renders nothing there, so neither do we.
+            return text == s.LocEntryKey ? "" : text;
         }
         catch
         {
-            try { return s.GetRawText(); } catch { return ""; }
+            try { return s.GetRawText() ?? ""; } catch { return ""; }
         }
     }
 
