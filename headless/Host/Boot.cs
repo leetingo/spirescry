@@ -297,6 +297,18 @@ internal static class HeadlessBoot
         Exception? __exception, MegaCrit.Sts2.Core.Localization.LocString __instance, ref string __result)
     {
         if (__exception is null) return null;
+        // Raw table text (any unformatted {vars} included) beats the bare
+        // key; the key stays the identifier of last resort. GetRawText is
+        // itself swallow-finalized, so a missing entry comes back null.
+        try
+        {
+            if (__instance.GetRawText() is { Length: > 0 } raw)
+            {
+                __result = raw;
+                return null;
+            }
+        }
+        catch { }
         try { __result = __instance.LocEntryKey ?? ""; }
         catch { __result = ""; }
         return null;
