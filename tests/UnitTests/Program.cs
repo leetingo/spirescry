@@ -1,102 +1,110 @@
+using System.Reflection;
 using Spirescry;
 
-var tests = new (string Name, Action Run)[]
+// Every public static parameterless method on Tests is a test — discovered
+// here by reflection so a new test can't be silently left unregistered.
+var tests = typeof(Tests)
+    .GetMethods(BindingFlags.Public | BindingFlags.Static | BindingFlags.DeclaredOnly)
+    .Where(m => m.GetParameters().Length == 0 && !m.IsGenericMethod)
+    .ToArray();
+
+if (tests.Length == 0)
 {
-    ("FieldValue finds private fields declared on base types", FieldValueFindsBasePrivateField),
-    ("PropertyValue invokes private getters declared on base types", PropertyValueFindsBasePrivateGetter),
-    ("SetProperty invokes private setters", SetPropertyInvokesPrivateSetter),
-    ("SetPropertyOrBackingField sets get-only auto-properties", SetPropertyOrBackingFieldSetsGetOnlyProperty),
-    ("Invoke finds private methods declared on base types", InvokeFindsBasePrivateMethod),
-    ("Invoke reports missing methods", InvokeReportsMissingMethods),
-};
+    Console.Error.WriteLine("not ok - no tests discovered");
+    return 1;
+}
 
 var failures = 0;
 foreach (var test in tests)
 {
     try
     {
-        test.Run();
+        test.Invoke(null, null);
         Console.WriteLine($"ok - {test.Name}");
     }
     catch (Exception ex)
     {
         failures++;
-        Console.Error.WriteLine($"not ok - {test.Name}: {ex.Message}");
+        var cause = ex is TargetInvocationException { InnerException: { } inner } ? inner : ex;
+        Console.Error.WriteLine($"not ok - {test.Name}: {cause.Message}");
     }
 }
 
 return failures == 0 ? 0 : 1;
 
-static void FieldValueFindsBasePrivateField()
+internal static class Tests
 {
-    var target = new DerivedProbe();
-
-    Equal("base-secret", Reflect.FieldValue(target, "_secret"));
-}
-
-static void PropertyValueFindsBasePrivateGetter()
-{
-    var target = new DerivedProbe();
-
-    Equal("computed-value", Reflect.PropertyValue(target, "Computed"));
-}
-
-static void SetPropertyInvokesPrivateSetter()
-{
-    var target = new DerivedProbe();
-
-    True(Reflect.SetProperty(target, "Mutable", "changed"));
-
-    Equal("changed", target.ReadMutable());
-}
-
-static void SetPropertyOrBackingFieldSetsGetOnlyProperty()
-{
-    var target = new DerivedProbe();
-
-    True(Reflect.SetPropertyOrBackingField(target, "GetOnly", "patched"));
-
-    Equal("patched", target.GetOnly);
-}
-
-static void InvokeFindsBasePrivateMethod()
-{
-    var target = new DerivedProbe();
-
-    Equal("left:right", Reflect.Invoke(target, "Join", "left", "right"));
-}
-
-static void InvokeReportsMissingMethods()
-{
-    var target = new DerivedProbe();
-
-    Throws<MissingMethodException>(() => Reflect.Invoke(target, "Missing"));
-}
-
-static void Equal(object? expected, object? actual)
-{
-    if (!Equals(expected, actual))
-        throw new InvalidOperationException($"expected {expected ?? "<null>"}, got {actual ?? "<null>"}");
-}
-
-static void True(bool actual)
-{
-    if (!actual)
-        throw new InvalidOperationException("expected true");
-}
-
-static void Throws<T>(Action action) where T : Exception
-{
-    try
+    public static void FieldValueFindsPrivateFieldsDeclaredOnBaseTypes()
     {
-        action();
-    }
-    catch (T)
-    {
-        return;
+        var target = new DerivedProbe();
+
+        Equal("base-secret", Reflect.FieldValue(target, "_secret"));
     }
 
-    throw new InvalidOperationException($"expected {typeof(T).Name}");
+    public static void PropertyValueInvokesPrivateGettersDeclaredOnBaseTypes()
+    {
+        var target = new DerivedProbe();
+
+        Equal("computed-value", Reflect.PropertyValue(target, "Computed"));
+    }
+
+    public static void SetPropertyInvokesPrivateSetters()
+    {
+        var target = new DerivedProbe();
+
+        True(Reflect.SetProperty(target, "Mutable", "changed"));
+
+        Equal("changed", target.ReadMutable());
+    }
+
+    public static void SetPropertyOrBackingFieldSetsGetOnlyAutoProperties()
+    {
+        var target = new DerivedProbe();
+
+        True(Reflect.SetPropertyOrBackingField(target, "GetOnly", "patched"));
+
+        Equal("patched", target.GetOnly);
+    }
+
+    public static void InvokeFindsPrivateMethodsDeclaredOnBaseTypes()
+    {
+        var target = new DerivedProbe();
+
+        Equal("left:right", Reflect.Invoke(target, "Join", "left", "right"));
+    }
+
+    public static void InvokeReportsMissingMethods()
+    {
+        var target = new DerivedProbe();
+
+        Throws<MissingMethodException>(() => Reflect.Invoke(target, "Missing"));
+    }
+
+    private static void Equal(object? expected, object? actual)
+    {
+        if (!Equals(expected, actual))
+            throw new InvalidOperationException($"expected {expected ?? "<null>"}, got {actual ?? "<null>"}");
+    }
+
+    private static void True(bool actual)
+    {
+        if (!actual)
+            throw new InvalidOperationException("expected true");
+    }
+
+    private static void Throws<T>(Action action) where T : Exception
+    {
+        try
+        {
+            action();
+        }
+        catch (T)
+        {
+            return;
+        }
+
+        throw new InvalidOperationException($"expected {typeof(T).Name}");
+    }
 }
 
 internal class BaseProbe
