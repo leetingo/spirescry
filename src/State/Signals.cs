@@ -103,6 +103,16 @@ public static class Signals
             _wedgeAnnounced = false;
             return;
         }
+        // A deferred pick parks the executing action on purpose — the
+        // engine is waiting on the agent's pick-card/confirm, not stuck.
+        // Hold the clock at zero so a slow decision can't fire a spurious
+        // wedge (a potion pick pondered past 8s used to).
+        if (HeadlessPicker.IsActive)
+        {
+            _watchedSinceUtc = DateTime.UtcNow;
+            ExecutorStuckMs = 0;
+            return;
+        }
         ExecutorStuckMs = (long)(DateTime.UtcNow - _watchedSinceUtc).TotalMilliseconds;
         if (ExecutorStuckMs > 8000 && !_wedgeAnnounced)
         {
