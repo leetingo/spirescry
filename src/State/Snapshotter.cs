@@ -137,13 +137,32 @@ public static class Snapshotter
             // WinTime is only stamped on a won run; abandon wins the tie
             // so a mid-run bail never reads as a defeat.
             outcome = rm.IsAbandoned ? "abandoned" : rm.WinTime > 0 ? "victory" : "defeat",
+            // Kept for compatibility: floor is the run-cumulative count,
+            // act the ZERO-based index. The fields below say it plainly.
             floor = rs.TotalFloor,
             act = rs.CurrentActIndex,
+            actNumber = rs.CurrentActIndex + 1,
+            actFloor = rs.ActFloor,
+            mapCoord = rs.CurrentMapCoord is { } mc ? new[] { mc.col, mc.row } : null,
+            encounter = EncounterView(rs),
             ascension = rs.AscensionLevel,
             seed = rs.Rng?.StringSeed ?? "",
             hp = creature is null ? null : new[] { creature.CurrentHp, creature.MaxHp },
             gold = player?.Gold,
         };
+    }
+
+    // Where the run ended, when it ended in a fight: the encounter's id
+    // and its localized name — "who killed you" without a lookup.
+    private static object? EncounterView(RunState rs)
+    {
+        try
+        {
+            if (rs.CurrentRoom is not CombatRoom cr || cr.Encounter is not { } enc)
+                return null;
+            return new { model = enc.Id.Entry, title = SafeText(enc.Title) };
+        }
+        catch { return null; }
     }
 
     // Out-of-combat decisions need run context: HEAL vs SMITH reads hp,
@@ -753,6 +772,7 @@ public static class Snapshotter
                 {
                     id = c.CombatId ?? 0u,
                     model = c.Monster?.Id.Entry,
+                    title = SafeText(c.Monster?.Title),
                     hp = new[] { c.CurrentHp, c.MaxHp },
                     block = c.Block,
                     alive = c.IsAlive,
