@@ -48,10 +48,30 @@ auto-confirm at max picks — `confirm` accepts a partial pick.
 5. Repeat 2–4 until `game_over`; report outcome / floor / seed, then
    `abandon` to return to the menu.
 
+One verb, then its wait — the wait's `events` naming your action is the
+confirmation, and the world changing (a card leaving your hand, hp
+moving) is the resolution. Batching verbs skips both checks and builds
+the next decision on a state you never confirmed.
+
 Rejections name their fix: exit 75 (`not_ready`) → retry the same verb;
-`bad_phase` → rescry; `not_enough_energy` / `bad_target` / `bad_index` →
-decide differently. On long runs, `obs --compact` keeps snapshots small
-(deck as counts, no act graph).
+`bad_phase` → rescry; `not_enough_energy` / `not_enough_stars` /
+`bad_target` / `bad_index` → decide differently. On long runs,
+`obs --compact` keeps snapshots small (piles and deck as counts, card
+prose dropped, `vars` kept).
+
+## The ledger
+
+Keep a three-line ledger in your head across the turn, updated after
+every wait, instead of re-deriving from full JSON each read:
+
+```
+you:    hp / block / energy / stars
+threat: enemy hp / incoming damage × hits / stacks that gate damage
+turn:   cards played so far, potions left
+```
+
+Arithmetic mistakes at the final turn kill runs; the ledger is where
+you catch them.
 
 ## Wedge recovery
 
@@ -63,6 +83,15 @@ ladder; abandon is the last rung:
 2. Fire a legal verb; `end-turn` usually works.
 3. The run advances → note the loss and keep playing.
 4. Every verb rejecting repeatedly → `spirescry abandon`, start fresh.
+
+## Impossible observations
+
+Resources moving at a frozen `rev`, a claim that never lands, an effect
+whose promise doesn't match the world — that's a bridge fault, not a
+puzzle to poll at. One rescry → `spirescry health` → `proceed` out of
+the phase → **mark the run polluted**: keep playing if you can, but say
+so in your report and treat conclusions drawn from the polluted state
+as suspect. File what you saw.
 
 ## Verbs by phase
 
@@ -99,3 +128,17 @@ potions, relics, deck — enchanted cards show `enchant`).
   auto-targets.
 - X-cost cards (`WHIRLWIND`) display `cost` = your current energy: they
   spend all of it and repeat the effect X times.
+
+## Stars
+
+Some characters run a second combat currency: `you.stars`, spent by
+cards carrying a `starCost` (energy-only cards show `starCost: null`).
+A star-starved play is rejected with `not_enough_stars` — the fix is
+sequencing, not retrying:
+
+- Generators before spenders: bank stars first, then fire the
+  `starCost` cards the same turn or later.
+- Star-starved decks upgrade their *generators* (more stars per play),
+  not their spenders — supply is usually the bottleneck.
+- X-star cards mirror X-energy: `starCost` = your current stars, spend
+  everything.
