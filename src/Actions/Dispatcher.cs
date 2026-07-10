@@ -6,6 +6,7 @@ using MegaCrit.Sts2.Core.Context;
 using MegaCrit.Sts2.Core.Entities.Cards;
 using MegaCrit.Sts2.Core.Entities.Creatures;
 using MegaCrit.Sts2.Core.Entities.Players;
+using MegaCrit.Sts2.Core.Entities.TreasureRelicPicking;
 using MegaCrit.Sts2.Core.GameActions;
 using MegaCrit.Sts2.Core.Map;
 using MegaCrit.Sts2.Core.Models;
@@ -827,6 +828,26 @@ public static class Dispatcher
                         return DispatchResult.Reject("not_ready",
                             "chest opening — poll /obs, then pick-relic again");
                     if (BadIdx(idx, relics.Count, "relic") is { } err) return err;
+                    // The award itself lives in the GUI's collection node
+                    // (RelicsAwarded → RelicCmd.Obtain); headless has no
+                    // node, so grant here. One-shot: the event fires inside
+                    // the PickRelicAction this pick enqueues.
+                    if (RunMode.IsHeadless)
+                    {
+                        Action<List<RelicPickingResult>>? award = null;
+                        award = results =>
+                        {
+                            sync.RelicsAwarded -= award;
+                            foreach (var r in results)
+                            {
+                                if (r.type == RelicPickingResultType.Skipped
+                                    || r.player is null || r.relic is null) continue;
+                                Fire(RelicCmd.Obtain(r.relic.ToMutable(), r.player),
+                                    "treasure-relic");
+                            }
+                        };
+                        sync.RelicsAwarded += award;
+                    }
                     sync.PickRelicLocally(idx);
                     return DispatchResult.Success();
                 }
