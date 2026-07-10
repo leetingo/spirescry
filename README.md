@@ -43,7 +43,10 @@ in the event stream, or rejected with a reason.
 damage × hits), potions, and pile contents; every out-of-combat phase
 carries a `player` footer (hp, gold, potions, relics, deck); the map gets
 reachable nodes, the whole act graph, and the run seed; `game_over`
-reports outcome / floor / act / seed.
+reports outcome / seed / hp / gold plus where the run ended: `actNumber`
+(1-based), `actFloor` (within the act), `mapCoord` (`{col, row}`), and
+the final `encounter` (model + localized title) — `act` (zero-based
+index) and `floor` (run-cumulative) stay for compatibility.
 
 `?compact=1` (CLI: `obs --compact`) elides the big repeats — no act
 graph, deck and combat piles as counts-by-model (`"STRIKE_IRONCLAD+": 2`

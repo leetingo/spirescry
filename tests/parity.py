@@ -148,6 +148,7 @@ def drive():
         en = obs()["enemies"][0]
     print("   ", en["model"], en["hp"], en["intents"])
     assert en["intents"], "no intents"
+    assert en.get("title"), f"enemy {en['model']} has no readable title"
 
     step("combat: kill")
     kill_current_combat()
@@ -279,7 +280,18 @@ def drive():
     wait_phase("game_over", timeout=30)
     d = obs()
     assert d.get("outcome") == "defeat", f"expected defeat, got {d.get('outcome')}"
-    print("    defeat recorded, floor", d.get("floor"))
+    # Death position in act-local terms: a fresh run that died on the
+    # first monster node it walked to.
+    assert d.get("actNumber") == d.get("act", -1) + 1, \
+        f"actNumber {d.get('actNumber')} is not act {d.get('act')} + 1"
+    assert d.get("actFloor") == node["row"] + 1, \
+        f"actFloor {d.get('actFloor')} != row {node['row']} + 1"
+    assert d.get("mapCoord") == {"col": node["col"], "row": node["row"]}, \
+        f"mapCoord {d.get('mapCoord')} != {node}"
+    enc = d.get("encounter") or {}
+    assert enc.get("model"), "game_over is missing the encounter"
+    print("    defeat recorded, floor", d.get("floor"),
+          "encounter", enc.get("model"))
 
     step("abandon → main menu")
     run("abandon")

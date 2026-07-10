@@ -137,8 +137,24 @@ public static class Snapshotter
             // WinTime is only stamped on a won run; abandon wins the tie
             // so a mid-run bail never reads as a defeat.
             outcome = rm.IsAbandoned ? "abandoned" : rm.WinTime > 0 ? "victory" : "defeat",
+            // Compat pair: floor is the run-cumulative TotalFloor, act the
+            // zero-based CurrentActIndex. actNumber/actFloor/mapCoord say
+            // the same position in the 1-based, act-local terms a run
+            // report wants.
             floor = rs.TotalFloor,
             act = rs.CurrentActIndex,
+            actNumber = rs.CurrentActIndex + 1,
+            actFloor = rs.ActFloor,
+            mapCoord = rs.CurrentMapCoord is { } c ? new { c.col, c.row } : null,
+            // The room the run ended in — null when it wasn't a combat
+            // (abandon from an event, shop, or the map).
+            encounter = rs.CurrentRoom is CombatRoom room
+                ? new
+                {
+                    model = room.Encounter.Id.Entry,
+                    title = SafeText(room.Encounter.Title),
+                }
+                : null,
             ascension = rs.AscensionLevel,
             seed = rs.Rng?.StringSeed ?? "",
             hp = creature is null ? null : new[] { creature.CurrentHp, creature.MaxHp },
@@ -753,6 +769,7 @@ public static class Snapshotter
                 {
                     id = c.CombatId ?? 0u,
                     model = c.Monster?.Id.Entry,
+                    title = SafeText(c.Monster?.Title),
                     hp = new[] { c.CurrentHp, c.MaxHp },
                     block = c.Block,
                     alive = c.IsAlive,
