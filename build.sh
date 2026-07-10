@@ -148,8 +148,10 @@ launch_host() {
         exec dotnet headless/Host/bin/Release/spirescry_host.dll \
             > >(tee -a "$log") 2> >(tee -a "$log" >&2)
     fi
+    pidfile="${TMPDIR:-/tmp}/spirescry-host.pid"
     step "launch host (bridge port $STS2_AGENT_PORT, log $log)"
     nohup dotnet headless/Host/bin/Release/spirescry_host.dll > "$log" 2>&1 &
+    echo $! > "$pidfile"
     wait_bridge 30 "$log"
 }
 
@@ -207,11 +209,33 @@ launch_headless() {
     wait_bridge 60 "$log"
 }
 
+# Kill by PID file first (works where sandboxes hide other processes
+# from pgrep/pkill), then the pattern sweeps. Exit non-zero when a host
+# still answers /health afterwards — "nothing running" must be true.
 stop_game() {
     need_game_dir
+    pidfile="${TMPDIR:-/tmp}/spirescry-host.pid"
     stopped=0
-    pkill -f "$STS2_GAME_DIR" && stopped=1
-    pkill -f spirescry_host && stopped=1
+    if [ -f "$pidfile" ]; then
+        if kill "$(cat "$pidfile")" 2>/dev/null; then stopped=1; fi
+        rm -f "$pidfile"
+    fi
+    pkill -f "$STS2_GAME_DIR" 2>/dev/null && stopped=1
+    pkill -f spirescry_host 2>/dev/null && stopped=1
+    sleep 1
+    # A game wedged pre-init (a failed engine-headless boot) ignores
+    # SIGTERM — escalate rather than report a stop that didn't happen.
+    if pgrep -qf "$STS2_GAME_DIR" || pgrep -qf spirescry_host; then
+        pkill -9 -f "$STS2_GAME_DIR" 2>/dev/null
+        pkill -9 -f spirescry_host 2>/dev/null
+        sleep 1
+    fi
+    if pgrep -qf "$STS2_GAME_DIR" || pgrep -qf spirescry_host; then
+        die "processes survived SIGKILL — permissions? (pgrep -fl spirescry_host / the game dir)"
+    fi
+    if curl -sf "http://127.0.0.1:$STS2_AGENT_PORT/health" > /dev/null 2>&1; then
+        die "a bridge still answers on port $STS2_AGENT_PORT — kill it manually (permissions?)"
+    fi
     if [ "$stopped" = 1 ]; then ok "stopped"; else ok "nothing running"; fi
 }
 
