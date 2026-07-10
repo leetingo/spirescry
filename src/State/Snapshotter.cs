@@ -410,7 +410,7 @@ public static class Snapshotter
     // the raw Description LocString throws without its variables filled.
     private static string CardDescription(CardModel card)
     {
-        try { return card.GetDescriptionForPile(PileType.None, null); }
+        try { return RichText.NormalizeIcons(card.GetDescriptionForPile(PileType.None, null)); }
         catch { return SafeText(card.Description); }
     }
 
@@ -576,7 +576,7 @@ public static class Snapshotter
         try
         {
             c.UpdateDynamicVarPreview(CardPreviewMode.Normal, null, c.DynamicVars);
-            return c.GetDescriptionForPile(pile);
+            return RichText.NormalizeIcons(c.GetDescriptionForPile(pile));
         }
         catch { return ""; }
     }
@@ -607,11 +607,11 @@ public static class Snapshotter
             // The host's GetFormattedText finalizer degrades hard failures
             // to the entry key; a key echo means the entry doesn't exist —
             // the GUI renders nothing there, so neither do we.
-            return text == s.LocEntryKey ? "" : text;
+            return text == s.LocEntryKey ? "" : RichText.NormalizeIcons(text);
         }
         catch
         {
-            try { return s.GetRawText() ?? ""; } catch { return ""; }
+            try { return RichText.NormalizeIcons(s.GetRawText() ?? ""); } catch { return ""; }
         }
     }
 

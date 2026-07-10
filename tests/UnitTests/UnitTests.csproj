@@ -9,6 +9,7 @@
 
   <ItemGroup>
     <Compile Include="../../src/Reflect.cs" Link="Reflect.cs" />
+    <Compile Include="../../src/State/RichText.cs" Link="RichText.cs" />
   </ItemGroup>
 
 </Project>

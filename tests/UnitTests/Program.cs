@@ -1,5 +1,6 @@
 using System.Reflection;
 using Spirescry;
+using Spirescry.State;
 
 // Every public static parameterless method on Tests is a test — discovered
 // here by reflection so a new test can't be silently left unregistered.
@@ -78,6 +79,30 @@ internal static class Tests
         var target = new DerivedProbe();
 
         Throws<MissingMethodException>(() => Reflect.Invoke(target, "Missing"));
+    }
+
+    public static void NormalizeIconsCollapsesEnergyIconsToOneToken()
+    {
+        Equal("Gain 2[energy].", RichText.NormalizeIcons(
+            "Gain 2[img]res://images/packed/sprite_fonts/ironclad_energy_icon.png[/img]."));
+    }
+
+    public static void NormalizeIconsTokenizesEveryIconByBasename()
+    {
+        Equal("[star] beats [block]", RichText.NormalizeIcons(
+            "[img]res://a/star_icon.png[/img] beats [img]res://b/block_icon.png[/img]"));
+    }
+
+    public static void NormalizeIconsToleratesImgAttributes()
+    {
+        Equal("[energy]", RichText.NormalizeIcons(
+            "[img width=24]res://x/silent_energy_icon.png[/img]"));
+    }
+
+    public static void NormalizeIconsLeavesPlainRichTextAlone()
+    {
+        Equal("Deal [green]9[/green] damage.",
+            RichText.NormalizeIcons("Deal [green]9[/green] damage."));
     }
 
     private static void Equal(object? expected, object? actual)
