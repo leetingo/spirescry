@@ -61,10 +61,11 @@ with codes that say what to change (`bad_phase`, `not_enough_energy`,
 
 **Event-driven waits.** Every snapshot carries a monotonic `rev`. Changes
 bump it from the engine's own C# events (action executor, combat manager,
-overlay stack) plus a per-tick phase diff as the safety net, and
-`obs?since=` responses name the events behind the bump
-(`phase:map->combat`, `action:PlayCardAction`, `enqueued:...`,
-`wedge:...`). No sleep-polling anywhere.
+overlay stack) plus a per-tick phase diff as the safety net; a `/step`
+accepted without either (in-phase inline mutations — reward claims, shop
+buys) bumps it itself. `obs?since=` responses name the events behind the
+bump (`phase:map->combat`, `action:PlayCardAction`, `enqueued:...`,
+`step:buy`, `wedge:...`). No sleep-polling anywhere.
 
 **`GET /health`** adds live introspection: the currently executing engine
 action and its state, `executorStuckMs`, and per-queue depth/paused flags.

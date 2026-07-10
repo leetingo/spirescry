@@ -164,7 +164,13 @@ def drive():
         rewards = d.get("rewards", [])
         if not rewards:
             break
+        pre = d["rev"]
         run("pick-reward", str(rewards[0]["idx"]))
+        # In-phase mutations must advance the revision so --since waiters
+        # wake — gold/potion claims change no phase and ride no engine
+        # event, so the accepted step itself has to bump.
+        d = obs()
+        assert d["rev"] > pre, f"rev stuck at {pre} after pick-reward"
         time.sleep(1.5)
     wait_phase("rewards")
     run("proceed")

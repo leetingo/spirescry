@@ -84,7 +84,18 @@ public static class Handlers
             return Response.Error("bad_request", $"invalid json body: {ex.Message}");
         }
 
-        var result = await MainThreadPump.Instance!.Run(() => Dispatcher.Dispatch(action, args));
+        var result = await MainThreadPump.Instance!.Run(() =>
+        {
+            var before = Signals.Revision;
+            var r = Dispatcher.Dispatch(action, args);
+            // Verbs that resolve inline within one phase (host-mode Neow
+            // claims, shop buys, reward gold, …) ride no engine event and
+            // no phase diff, so nothing else bumps the revision. Every
+            // accepted step must be visible to --since waiters.
+            if (r.Ok && Signals.Revision == before)
+                Signals.Bump($"step:{action}");
+            return r;
+        });
         return result.Ok
             // The action is enqueued on the engine's action queue and
             // resolves over the following frames — follow with
