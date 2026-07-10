@@ -203,11 +203,52 @@ internal static class HeadlessBoot
             PatchProgressTracking();
             RerouteBundleScreen();
             RerouteCrystalSphere();
+            RerouteCustomRewards();
         }
         catch (Exception ex)
         {
             HostLog.Error("cosmetic patch failed", ex);
         }
+    }
+
+    // Custom reward offers (event trades like THE_FUTURE_OF_POTIONS) run
+    // RewardsCmd.OfferCustom → RewardsSet.Offer, which shows the GUI
+    // rewards screen and validates completion against it — headless that
+    // throws and the offer evaporates while the trade's cost sticks.
+    // Reroute the whole OfferCustom: generate the set, park it in
+    // HeadlessRewards, and return; the agent claims from the rewards
+    // phase like any post-combat offer. Scoped to OfferCustom so the
+    // combat/treasure Offer() paths stay untouched.
+    private static void RerouteCustomRewards()
+    {
+        var m = typeof(MegaCrit.Sts2.Core.Commands.RewardsCmd)
+            .GetMethod("OfferCustom", BindingFlags.Public | BindingFlags.Static);
+        if (m is null)
+        {
+            HostLog.Info("RewardsCmd.OfferCustom not found — custom reward offers unsupported");
+            return;
+        }
+        _harmony!.Patch(m, prefix: Local(nameof(OfferCustomPrefix)));
+        HostLog.Info("rerouted custom reward offers to the headless stand-in");
+    }
+
+    private static bool OfferCustomPrefix(
+        MegaCrit.Sts2.Core.Entities.Players.Player player,
+        List<MegaCrit.Sts2.Core.Rewards.Reward> rewards,
+        ref Task __result)
+    {
+        __result = CaptureCustomOffer(player, rewards);
+        return false;
+    }
+
+    private static async Task CaptureCustomOffer(
+        MegaCrit.Sts2.Core.Entities.Players.Player player,
+        List<MegaCrit.Sts2.Core.Rewards.Reward> rewards)
+    {
+        var set = new MegaCrit.Sts2.Core.Rewards.RewardsSet(player)
+            .WithCustomRewards(rewards);
+        await set.GenerateWithoutOffering();
+        Spirescry.State.HeadlessRewards.CaptureFromSet(set);
     }
 
     // Cmd.Wait gates card-play pacing on UI animation time; headless has no
