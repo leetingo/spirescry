@@ -238,12 +238,21 @@ public static class Dispatcher
         // would leave is just State == null and IsAbandoned == false; wipe
         // both so PhaseDetector reads main_menu, and drop any parked
         // headless stand-ins referencing the dead run. A combat abandoned
-        // mid-fight also leaves CombatManager live — clear it or the phase
-        // sticks on combat.
-        if (CombatManager.Instance is { IsInProgress: true } cm)
+        // mid-fight must go through the engine's own Reset — poking fields
+        // behind an IsInProgress guard let parked states (a pending hand
+        // select) slip through with _state still set, and the NEXT run's
+        // first SetUpCombat then throws "reset the combat before setting
+        // up a new one".
+        if (CombatManager.Instance is { } cm && cm.DebugOnlyGetState() is not null)
         {
-            Reflect.SetPropertyOrBackingField(cm, "IsInProgress", false);
-            Reflect.SetField(cm, "_state", null);
+            try { cm.Reset(graceful: true); }
+            catch (Exception ex)
+            {
+                SafeLog.Error("combat reset on abandon", ex);
+                // Last resort so the phase can't stick on combat.
+                Reflect.SetPropertyOrBackingField(cm, "IsInProgress", false);
+                Reflect.SetField(cm, "_state", null);
+            }
         }
         // Stale queued actions must not leak into the next run.
         try { rm.ActionQueueSet?.Reset(); } catch { }
