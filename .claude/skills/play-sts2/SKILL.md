@@ -45,7 +45,8 @@ auto-confirm at max picks — `confirm` accepts a partial pick.
    `events` name what happened. `changed: false` means nothing did:
    rescry and reassess. (A verb response prints a `rev` of its own — that
    marks acceptance; keep waiting on the scried one.)
-5. Repeat 2–4 until `game_over`; report outcome / floor / seed, then
+5. Repeat 2–4 until `game_over`; report outcome, where it ended
+   (`actNumber` / `actFloor` / `encounter.title`), and the seed, then
    `abandon` to return to the menu.
 
 One verb, then its wait — the wait's `events` naming your action is the
@@ -112,7 +113,7 @@ potions, relics, deck — enchanted cards show `enchant`).
 | `card_select`, `hand_select` | picker cards with `cost` and `upgradedPreview` | `pick-card <idx>` (toggles), `confirm`, `skip` (if cancelable) |
 | `bundle_select` | card packs (e.g. Neow) | `pick-card <idx>` |
 | `crystal_sphere` | divination minigame | `map-move <col> <row>` picks a cell, `option 0`/`1` picks the tool |
-| `game_over` | outcome, floor, act, seed | `abandon` → main menu |
+| `game_over` | `outcome`, `seed`, where the run ended: `actNumber`/`actFloor` (1-based), `mapCoord`, `encounter` (model + title). Legacy pair: `act` is the zero-based act index, `floor` the run-cumulative floor — prefer the 1-based fields in reports. | `abandon` → main menu |
 | any (in a run) | — | `potion-discard <slot>`, `abandon` |
 
 ## Reading combat
@@ -122,8 +123,8 @@ potions, relics, deck — enchanted cards show `enchant`).
   the numbers behind it with Strength/Weak already applied
   (`{"Damage": 8}`) — plus `model` (the exact string `play` wants),
   `cost`, `target`, `unplayable`.
-- `enemies[]`: `id` is the `--target` value; `intents[]` show `damage` ×
-  `hits` (nulls mean a non-attack).
+- `enemies[]`: `id` is the `--target` value, `title` the readable name;
+  `intents[]` show `damage` × `hits` (nulls mean a non-attack).
 - `--target` only when the card targets an enemy; a lone enemy
   auto-targets.
 - X-cost cards (`WHIRLWIND`) display `cost` = your current energy: they
