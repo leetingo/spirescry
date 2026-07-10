@@ -78,7 +78,7 @@ enum Cmd {
     Skip,
     /// Travel to a map node (col/row from obs.next)
     MapMove { col: u32, row: u32 },
-    /// Dev/verification cheats: goto <col> <row> | gold <n> | hp <n> | heal | wound-enemies | event <ID>
+    /// Dev/verification cheats: goto <col> <row> | gold <n> | hp <n> | heal | wound-enemies | event <ID> | card <ID>
     Cheat { name: String, values: Vec<String> },
     /// Play a hand card by model entry (e.g. StrikeIronclad)
     Play {
@@ -204,7 +204,7 @@ fn cheat_args(name: &str, values: &[String]) -> Result<Value, String> {
             args["row"] = json!(num(row)?);
         }
         ("gold", [value]) | ("hp", [value]) => args["value"] = json!(num(value)?),
-        ("event", [id]) => args["id"] = json!(id),
+        ("event", [id]) | ("card", [id]) => args["id"] = json!(id),
         _ => {}
     }
     Ok(args)
@@ -314,6 +314,13 @@ mod tests {
         let args = cheat_args("event", &strings(&["ForgottenAltar"])).unwrap();
 
         assert_eq!(args, json!({ "name": "event", "id": "ForgottenAltar" }));
+    }
+
+    #[test]
+    fn cheat_card_maps_id() {
+        let args = cheat_args("card", &strings(&["WHIRLWIND"])).unwrap();
+
+        assert_eq!(args, json!({ "name": "card", "id": "WHIRLWIND" }));
     }
 
     #[test]

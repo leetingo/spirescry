@@ -93,6 +93,13 @@ internal static class HeadlessBoot
         catch (Exception ex) { HostLog.Error("InitProfileId", ex); }
         try { SaveManager.Instance.InitProgressData(); }
         catch (Exception ex) { HostLog.Error("InitProgressData", ex); }
+        // Gameplay code dereferences prefs/settings (VFX timing reads
+        // PrefsSave.FastMode on every X-cost card); the ForTest inits stamp
+        // in-memory defaults without touching the player's real files.
+        try { SaveManager.Instance.InitPrefsDataForTest(); }
+        catch (Exception ex) { HostLog.Error("InitPrefsDataForTest", ex); }
+        try { SaveManager.Instance.InitSettingsDataForTest(); }
+        catch (Exception ex) { HostLog.Error("InitSettingsDataForTest", ex); }
 
         RebuildModelIdSerializationCache();
     }
