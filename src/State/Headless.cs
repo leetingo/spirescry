@@ -265,6 +265,19 @@ public static class HeadlessRewards
         }
     }
 
+    // Custom reward offers (event trades) arrive through the host's
+    // NRewardsScreen.ShowScreen reroute already generated — park them in
+    // the same slot list so pick-reward/proceed claim them like any other
+    // rewards. Appends when a set is already live: two offers can't
+    // overwrite each other.
+    public static void CaptureFromSet(RewardsSet set)
+    {
+        var slots = Flatten(set.Rewards).Select(r => (Reward?)r).ToList();
+        if (_pending is null) _pending = slots;
+        else _pending.AddRange(slots);
+        _completedFor = null;
+    }
+
     // LinkedRewardSet is a no-op wrapper — surface its children flat.
     private static IEnumerable<Reward> Flatten(IEnumerable<Reward> rewards)
     {
