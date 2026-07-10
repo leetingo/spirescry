@@ -1291,12 +1291,22 @@ public static class Dispatcher
             return DispatchResult.Reject("bad_index", $"no '{model}' in hand [{hand}]");
         }
 
-        if (card.Keywords.Contains(CardKeyword.Unplayable))
-            return DispatchResult.Reject("not_playable", $"{card.Id.Entry} is unplayable");
-        var cost = card.EnergyCost.GetAmountToSpend();
-        if (cost > pcs.Energy)
-            return DispatchResult.Reject("not_enough_energy",
-                $"{card.Id.Entry} needs {cost}, have {pcs.Energy}");
+        // The engine's own playability gate — Unplayable keyword, energy
+        // AND stars, ally requirements, hooks, card logic. Without it a
+        // star-starved play is accepted, then PlayCardAction silently
+        // cancels: card stays, nothing spends, no error.
+        if (!card.CanPlay(out var reason, out var preventer))
+        {
+            var code = reason.HasFlag(UnplayableReason.StarCostTooHigh) ? "not_enough_stars"
+                : reason.HasFlag(UnplayableReason.EnergyCostTooHigh) ? "not_enough_energy"
+                : "not_playable";
+            var detail = reason.HasFlag(UnplayableReason.StarCostTooHigh)
+                    ? $" (needs {card.GetStarCostWithModifiers()} stars, have {pcs.Stars})"
+                : reason.HasFlag(UnplayableReason.EnergyCostTooHigh)
+                    ? $" (needs {card.EnergyCost.GetAmountToSpend()} energy, have {pcs.Energy})"
+                : preventer is null ? "" : $" (blocked by {preventer.Id.Entry})";
+            return DispatchResult.Reject(code, $"{card.Id.Entry}: {reason}{detail}");
+        }
 
         var (target, err) = ResolveTarget(card.TargetType, args, state, player);
         if (err is not null) return err.Value;

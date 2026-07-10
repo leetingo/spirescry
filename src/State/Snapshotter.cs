@@ -466,6 +466,7 @@ public static class Snapshotter
         model = c.Id.Entry,
         title = c.Title,
         cost = c.EnergyCost.Canonical,
+        starCost = StarCost(c),
         type = c.Type.ToString().ToLowerInvariant(),
         rarity = c.Rarity.ToString().ToLowerInvariant(),
         description = CardDescription(c),
@@ -477,11 +478,25 @@ public static class Snapshotter
         model = c.Id.Entry,
         title = c.Title,
         cost = c.EnergyCost.Canonical,
+        starCost = StarCost(c),
         upgraded = c.IsUpgraded,
         selected,
         description = CardDescription(c),
         upgradedPreview = UpgradePreview(c),
     };
+
+    // -1 = the card has no star cost (the second combat currency);
+    // surface null so energy-only cards stay clean. X-star cards report
+    // the current star count, mirroring X-energy's cost display.
+    private static int? StarCost(CardModel c)
+    {
+        try
+        {
+            var s = c.GetStarCostWithModifiers();
+            return s >= 0 ? s : null;
+        }
+        catch { return null; }
+    }
 
     // What the card text becomes if upgraded — the rest-site smith's
     // preview pane. null when the card can't upgrade further. Upgrades
@@ -685,6 +700,7 @@ public static class Snapshotter
                 hp = new[] { creature.CurrentHp, creature.MaxHp },
                 block = creature.Block,
                 energy = new[] { pcs.Energy, pcs.MaxEnergy },
+                stars = pcs.Stars,
                 powers = PowerViews(creature),
             },
             potions = PotionViews(player!),
@@ -700,6 +716,7 @@ public static class Snapshotter
                 {
                     model = c.Id.Entry,
                     cost = c.EnergyCost.GetAmountToSpend(),
+                    starCost = StarCost(c),
                     target = c.TargetType.ToString().ToLowerInvariant(),
                     upgraded = c.IsUpgraded,
                     unplayable = c.Keywords.Contains(CardKeyword.Unplayable),
