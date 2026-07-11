@@ -138,8 +138,16 @@ picks), and text comes from tables extracted out of your local install's
 ./build.sh verify        # drives one act-1 loop against BOTH boots, then
                          # diffs the recorded snapshot key sets — same
                          # phase must expose the same keys in each
+python3 tests/e2e.py --boot   # the pre-merge suite against a self-booted
+                              # host (port 7779): boot/protocol/lifecycle/
+                              # combat/cheat cases + the act-1 loop
 python3 tests/eventsweep.py   # force + exercise all 57 events (minutes)
 ```
+
+CI runs only the pure unit tests (`unit-tests.yml`, GitHub-hosted): the
+host is built from the game's non-distributable dlls, so the end-to-end
+suite stays local — **run `python3 tests/e2e.py --boot` before merging**
+(add `--sweep` after engine updates or event-related changes).
 
 ## Build
 

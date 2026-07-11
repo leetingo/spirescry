@@ -53,11 +53,12 @@ def wait_phase(*want, timeout=20):
     bridge.wait_phase(*want, timeout=timeout, on_obs=record)
 
 
-def launch_run():
+def launch_run(seed=None):
     # A launch fired into a cold boot window can be dropped silently —
     # retry it if it didn't land.
+    extra = ["--seed", seed] if seed else []
     for attempt in range(3):
-        run("new-run", "IRONCLAD", ok=attempt > 0)
+        run("new-run", "IRONCLAD", *extra, ok=attempt > 0)
         try:
             wait_phase("event", timeout=40)
             return
@@ -86,6 +87,16 @@ def kill_current_combat():
     used_potion = False
     for _ in range(30):
         d = obs()
+        # A potion or card can open a mid-combat picker (a discard choice,
+        # a gamble). Resolve it minimally, or the loop parks forever on a
+        # phase it never plays from.
+        if d["phase"] in ("hand_select", "card_select"):
+            run("pick-card", "0", ok=True)
+            time.sleep(1)
+            if phase() in ("hand_select", "card_select"):
+                run("confirm", ok=True)
+                time.sleep(1)
+            continue
         if d["phase"] != "combat":
             return
         if d.get("side") != "player":
@@ -104,6 +115,8 @@ def kill_current_combat():
         run("cheat", "heal", ok=True)
         run("cheat", "wound-enemies", ok=True)
         d = obs()
+        if d["phase"] in ("hand_select", "card_select"):
+            continue  # the top of the loop resolves the picker
         if d["phase"] != "combat":
             return
         alive = [e for e in d["enemies"] if e["alive"]]
@@ -124,13 +137,13 @@ def kill_current_combat():
     raise AssertionError("combat did not finish in 30 turns")
 
 
-def drive():
+def drive(seed=None):
     step("new-run")
     run("abandon", ok=True)
     # The bridge comes up during mod init, before a cold engine boot's
     # menu is actually ready. Settle, then launch.
     time.sleep(5)
-    launch_run()
+    launch_run(seed)
 
     step("neow: proceed past")
     run("proceed")
@@ -263,7 +276,7 @@ def drive():
     run("abandon")
     wait_phase("main_menu")
     time.sleep(3)
-    launch_run()
+    launch_run(seed)
     run("proceed")
     wait_phase("map")
     node = next(p for p in obs()["next"] if p["type"] == "monster")
@@ -324,11 +337,12 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--keys-out")
     ap.add_argument("--compare", nargs=2, metavar=("A", "B"))
+    ap.add_argument("--seed", help="pin the run seed (CI wants determinism)")
     args = ap.parse_args()
     if args.compare:
         compare(*args.compare)
     else:
-        drive()
+        drive(args.seed)
         if args.keys_out:
             json.dump(KEYS, open(args.keys_out, "w"), indent=1, sort_keys=True)
             print(f"key sets → {args.keys_out}")

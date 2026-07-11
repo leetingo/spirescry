@@ -5,9 +5,13 @@ and phase waiting — wait_phase parks on the bridge's own long-poll
 (obs --since --wait) instead of sleep-polling.
 """
 import json
+import os
 import subprocess
 import sys
 import time
+
+# CI points this at the freshly built binary; default is the deployed one.
+BIN = os.environ.get("SPIRESCRY_BIN", "spirescry")
 
 
 def cli(*args):
@@ -15,7 +19,7 @@ def cli(*args):
     signal (queue paused, map intro window, ...) — by contract the agent
     retries it (the CLI exits 75, EX_TEMPFAIL, for exactly that)."""
     for _ in range(15):
-        r = subprocess.run(["spirescry", *args], capture_output=True, text=True)
+        r = subprocess.run([BIN, *args], capture_output=True, text=True)
         if r.returncode != 75:
             break
         time.sleep(0.4)
