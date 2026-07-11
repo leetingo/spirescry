@@ -78,6 +78,15 @@ bump (`phase:map->combat`, `action:PlayCardAction`, `enqueued:...`,
 **`GET /health`** adds live introspection: the currently executing engine
 action and its state, `executorStuckMs`, and per-queue depth/paused flags.
 
+**Tracing a session.** `STS2_AGENT_HTTP_LOG=1` on the host makes the
+bridge log one line per request — verb, status, `rev` movement, wall
+time — the audit trail for reconstructing what an agent fired when a run
+wedged. `spirescry --verbose` traces the same round-trips from the CLI
+side on stderr; both stamp the same UTC clock, so the two logs line up.
+`build.sh` boots keep their output in `$TMPDIR/spirescry-host.log`
+(engine-headless: `spirescry-headless.log`), foreground included; the
+previous boot's log survives at `.log.1`.
+
 ## Three ways to run, one bridge
 
 ```sh
@@ -153,6 +162,7 @@ Environment:
 | `STS2_AGENT_LANG`   | `eng`                  | host only — locale for the extracted text tables                |
 | `STS2_HEADLESS_LIB` | `headless/build/lib`   | host only — patched dll + deps + loc tables                     |
 | `STS2_HOST_DEBUG`   | unset                  | host only — `1` prints first-chance exception stacks to stderr  |
+| `STS2_AGENT_HTTP_LOG` | unset                | mod/host — `1` logs each bridge request: verb, status, rev movement, wall time |
 
 ## Architecture
 
