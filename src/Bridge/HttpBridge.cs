@@ -1,6 +1,8 @@
+using System.Diagnostics;
 using System.Net;
 using System.Text;
 using System.Text.Json;
+using Spirescry.State;
 
 namespace Spirescry.Bridge;
 
@@ -20,6 +22,13 @@ public sealed class Response
 // exclusively.
 public sealed class HttpBridge
 {
+    // STS2_AGENT_HTTP_LOG=1: one log line per request — verb, status,
+    // revision movement, wall time. The audit trail for reconstructing
+    // what an agent fired when a run wedges; off by default because obs
+    // long-polls would dominate the log.
+    private static readonly bool LogRequests =
+        Environment.GetEnvironmentVariable("STS2_AGENT_HTTP_LOG") == "1";
+
     private HttpListener? _listener;
 
     // The shared startup for both boots: STS2_AGENT_PORT (default 7777),
@@ -58,6 +67,9 @@ public sealed class HttpBridge
 
     private async Task HandleAsync(HttpListenerContext ctx)
     {
+        var timer = LogRequests ? Stopwatch.StartNew() : null;
+        var revBefore = LogRequests ? Signals.Revision : 0;
+        var trace = "?";
         Response resp;
         try
         {
@@ -69,6 +81,11 @@ public sealed class HttpBridge
                 body = await reader.ReadToEndAsync();
             }
             var path = req.Url?.AbsolutePath ?? "/";
+            if (timer is not null)
+            {
+                trace = $"{req.HttpMethod} {req.Url?.PathAndQuery ?? path}";
+                if (path == "/step") trace += $" {StepAction(body)}";
+            }
             resp = (req.HttpMethod, path) switch
             {
                 ("GET", "/health") => await Handlers.Health(),
@@ -83,6 +100,9 @@ public sealed class HttpBridge
             SafeLog.Error("http handler error", ex);
             resp = Response.Error("internal", ex.Message, 500);
         }
+        if (timer is not null)
+            SafeLog.Info(
+                $"http {trace} → {resp.Status} rev {revBefore}→{Signals.Revision} {timer.ElapsedMilliseconds}ms");
         try
         {
             ctx.Response.StatusCode = resp.Status;
@@ -96,5 +116,19 @@ public sealed class HttpBridge
         {
             SafeLog.Error("http write error", ex);
         }
+    }
+
+    // The dispatcher re-parses the body anyway; a second parse here only
+    // runs when request logging is on.
+    private static string StepAction(string body)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(body);
+            return doc.RootElement.TryGetProperty("action", out var a)
+                ? a.GetString() ?? "?"
+                : "?";
+        }
+        catch { return "?"; }
     }
 }

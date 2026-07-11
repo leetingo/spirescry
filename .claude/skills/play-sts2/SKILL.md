@@ -29,6 +29,10 @@ spirescry health               # booted when it prints {"ok": true, …}
 - "Operation not permitted" on connect (sandboxed executors) → approve
   loopback access to `127.0.0.1:7777`; the bridge never leaves localhost.
 - `STS2_AGENT_LANG=zhs` before the host command switches text language.
+- Host output lands in `$TMPDIR/spirescry-host.log` (foreground too;
+  previous boot at `.log.1`). `STS2_AGENT_HTTP_LOG=1` before the host
+  command logs every bridge request — turn it on before filing a bridge
+  fault, and pair it with `spirescry --verbose` on the CLI side.
 
 Host quirks: runs never save (each boot starts clean), and card pickers
 auto-confirm at max picks — `confirm` accepts a partial pick.

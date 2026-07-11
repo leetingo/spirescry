@@ -23,6 +23,9 @@ struct Cli {
     host: String,
     #[arg(long, global = true, env = "STS2_AGENT_PORT", default_value_t = 7777)]
     port: u16,
+    /// Trace each HTTP round-trip (request, status, wall time) on stderr
+    #[arg(long, short = 'v', global = true)]
+    verbose: bool,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -105,9 +108,12 @@ enum Cmd {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    let base = format!("http://{}:{}", cli.host, cli.port);
+    let client = Client {
+        base: format!("http://{}:{}", cli.host, cli.port),
+        verbose: cli.verbose,
+    };
     let result = match &cli.cmd {
-        Cmd::Health => get(&base, "/health"),
+        Cmd::Health => client.get("/health"),
         Cmd::Obs {
             since,
             wait,
@@ -125,7 +131,7 @@ fn main() -> ExitCode {
                 if *compact {
                     path = format!("{}{}compact=1", path, sep);
                 }
-                get(&base, &path)
+                client.get(&path)
             }
         }
         Cmd::NewRun {
@@ -140,40 +146,40 @@ fn main() -> ExitCode {
             if let Some(a) = ascension {
                 args["ascension"] = json!(a);
             }
-            step(&base, "new-run", args)
+            client.step("new-run", args)
         }
-        Cmd::Abandon => step(&base, "abandon", json!({})),
-        Cmd::EventOption { idx } => step(&base, "option", json!({ "idx": idx })),
-        Cmd::Proceed => step(&base, "proceed", json!({})),
-        Cmd::PickReward { idx } => step(&base, "pick-reward", json!({ "idx": idx })),
-        Cmd::PickCard { idx } => step(&base, "pick-card", json!({ "idx": idx })),
-        Cmd::Confirm => step(&base, "confirm", json!({})),
-        Cmd::Skip => step(&base, "skip", json!({})),
-        Cmd::Buy { kind, idx } => step(&base, "buy", json!({ "kind": kind, "idx": idx })),
-        Cmd::Leave => step(&base, "leave", json!({})),
-        Cmd::PickRelic { idx } => step(&base, "pick-relic", json!({ "idx": idx })),
+        Cmd::Abandon => client.step("abandon", json!({})),
+        Cmd::EventOption { idx } => client.step("option", json!({ "idx": idx })),
+        Cmd::Proceed => client.step("proceed", json!({})),
+        Cmd::PickReward { idx } => client.step("pick-reward", json!({ "idx": idx })),
+        Cmd::PickCard { idx } => client.step("pick-card", json!({ "idx": idx })),
+        Cmd::Confirm => client.step("confirm", json!({})),
+        Cmd::Skip => client.step("skip", json!({})),
+        Cmd::Buy { kind, idx } => client.step("buy", json!({ "kind": kind, "idx": idx })),
+        Cmd::Leave => client.step("leave", json!({})),
+        Cmd::PickRelic { idx } => client.step("pick-relic", json!({ "idx": idx })),
         Cmd::Cheat { name, values } => {
-            cheat_args(name, values).and_then(|args| step(&base, "cheat", args))
+            cheat_args(name, values).and_then(|args| client.step("cheat", args))
         }
         Cmd::MapMove { col, row } => {
-            step(&base, "map-move", json!({ "col": col, "row": row }))
+            client.step("map-move", json!({ "col": col, "row": row }))
         }
         Cmd::Play { model, target } => {
             let mut args = json!({ "model": model });
             if let Some(t) = target {
                 args["target"] = json!(t);
             }
-            step(&base, "play", args)
+            client.step("play", args)
         }
-        Cmd::EndTurn => step(&base, "end-turn", json!({})),
+        Cmd::EndTurn => client.step("end-turn", json!({})),
         Cmd::PotionUse { slot, target } => {
             let mut args = json!({ "slot": slot });
             if let Some(t) = target {
                 args["target"] = json!(t);
             }
-            step(&base, "potion-use", args)
+            client.step("potion-use", args)
         }
-        Cmd::PotionDiscard { slot } => step(&base, "potion-discard", json!({ "slot": slot })),
+        Cmd::PotionDiscard { slot } => client.step("potion-discard", json!({ "slot": slot })),
     };
     match result {
         Ok(v) => {
@@ -222,16 +228,71 @@ fn cheat_args(name: &str, values: &[String]) -> Result<Value, String> {
     Ok(args)
 }
 
-fn get(base: &str, path: &str) -> Result<Value, String> {
-    handle(ureq::get(&format!("{}{}", base, path)).call())
+// The HTTP side of every subcommand. --verbose traces round-trips on
+// stderr (stdout stays JSON-only for pipes), stamped with the same UTC
+// clock the host log uses so the two sides line up.
+struct Client {
+    base: String,
+    verbose: bool,
 }
 
-fn post(base: &str, path: &str, body: Value) -> Result<Value, String> {
-    handle(ureq::post(&format!("{}{}", base, path)).send_json(body))
+impl Client {
+    fn get(&self, path: &str) -> Result<Value, String> {
+        let url = format!("{}{}", self.base, path);
+        self.exchange(format!("GET {}", url), || ureq::get(&url).call())
+    }
+
+    fn post(&self, path: &str, body: Value) -> Result<Value, String> {
+        let url = format!("{}{}", self.base, path);
+        let request_line = format!("POST {} {}", url, body);
+        self.exchange(request_line, || ureq::post(&url).send_json(body))
+    }
+
+    fn step(&self, action: &str, args: Value) -> Result<Value, String> {
+        self.post("/step", json!({ "action": action, "args": args }))
+    }
+
+    fn exchange(
+        &self,
+        request_line: String,
+        send: impl FnOnce() -> Result<ureq::Response, ureq::Error>,
+    ) -> Result<Value, String> {
+        if self.verbose {
+            eprintln!("spirescry: [{}] > {}", utc_clock(), request_line);
+        }
+        let start = std::time::Instant::now();
+        let result = send();
+        if self.verbose {
+            let status = match &result {
+                Ok(resp) => resp.status().to_string(),
+                Err(ureq::Error::Status(code, _)) => code.to_string(),
+                Err(ureq::Error::Transport(_)) => "transport error".to_string(),
+            };
+            eprintln!(
+                "spirescry: [{}] < {} {}ms",
+                utc_clock(),
+                status,
+                start.elapsed().as_millis()
+            );
+        }
+        handle(result)
+    }
 }
 
-fn step(base: &str, action: &str, args: Value) -> Result<Value, String> {
-    post(base, "/step", json!({ "action": action, "args": args }))
+// HH:MM:SS.mmm UTC — hand-rolled from the epoch to keep the CLI
+// dependency-free.
+fn utc_clock() -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let secs = now.as_secs() % 86_400;
+    format!(
+        "{:02}:{:02}:{:02}.{:03}",
+        secs / 3600,
+        (secs % 3600) / 60,
+        secs % 60,
+        now.subsec_millis()
+    )
 }
 
 fn handle(result: Result<ureq::Response, ureq::Error>) -> Result<Value, String> {
@@ -304,6 +365,18 @@ mod tests {
             Cmd::Obs { compact, .. } => assert!(compact),
             _ => panic!("expected obs command"),
         }
+    }
+
+    #[test]
+    fn parses_global_verbose_flag() {
+        let cli = Cli::try_parse_from(["spirescry", "obs", "--verbose"]).unwrap();
+        assert!(cli.verbose);
+
+        let cli = Cli::try_parse_from(["spirescry", "-v", "health"]).unwrap();
+        assert!(cli.verbose);
+
+        let cli = Cli::try_parse_from(["spirescry", "health"]).unwrap();
+        assert!(!cli.verbose);
     }
 
     #[test]
