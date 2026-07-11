@@ -201,6 +201,7 @@ internal static class HeadlessBoot
             ImmunizeAudioSingletons();
             PatchMonsterFlavorHooks();
             PatchProgressTracking();
+            PatchReattachFadeOut();
             RerouteBundleScreen();
             RerouteCrystalSphere();
             RerouteCustomRewards();
@@ -210,6 +211,37 @@ internal static class HeadlessBoot
             HostLog.Error("cosmetic patch failed", ex);
         }
     }
+
+    // ReattachPower's death fade calls Godot.Node.GetIndex(bool), an API
+    // absent from the lightweight Godot stubs used by the headless host.
+    // The fade is visual-only; skipping it preserves the kill and lets the
+    // combat win/reward flow complete.
+    private static void PatchReattachFadeOut()
+    {
+        var t = typeof(AbstractModelSubtypes).Assembly.GetType(
+            "MegaCrit.Sts2.Core.Models.Powers.ReattachPower");
+        var m = t?.GetMethod("DoFadeOutOnAllSegments",
+            BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+        if (m is null)
+        {
+            HostLog.Info("ReattachPower.DoFadeOutOnAllSegments not found");
+            return;
+        }
+
+        var prefix = m.ReturnType == typeof(Task)
+            ? Local(nameof(SkipReattachFadeOutTask))
+            : Local(nameof(SkipReattachFadeOutVoid));
+        _harmony!.Patch(m, prefix: prefix);
+        HostLog.Info("skipping ReattachPower death fade in headless mode");
+    }
+
+    private static bool SkipReattachFadeOutTask(ref Task __result)
+    {
+        __result = Task.CompletedTask;
+        return false;
+    }
+
+    private static bool SkipReattachFadeOutVoid() => false;
 
     // Custom reward offers (event trades like THE_FUTURE_OF_POTIONS) run
     // RewardsCmd.OfferCustom → RewardsSet.Offer, which shows the GUI

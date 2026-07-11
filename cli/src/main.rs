@@ -84,7 +84,7 @@ enum Cmd {
     Skip,
     /// Travel to a map node (col/row from obs.next)
     MapMove { col: u32, row: u32 },
-    /// Dev/verification cheats: goto <col> <row> | gold <n> | hp <n> | heal | wound-enemies | event <ID> | card <ID>
+    /// Dev/verification cheats: goto <col> <row> | gold <n> | hp <n> | heal | wound-enemies | event <ID> | card <ID> | card-upgraded <ID> | relic <ID>
     Cheat { name: String, values: Vec<String> },
     /// Play a hand card by model entry (e.g. StrikeIronclad)
     Play {
@@ -222,7 +222,9 @@ fn cheat_args(name: &str, values: &[String]) -> Result<Value, String> {
             args["row"] = json!(num(row)?);
         }
         ("gold", [value]) | ("hp", [value]) => args["value"] = json!(num(value)?),
-        ("event", [id]) | ("card", [id]) => args["id"] = json!(id),
+        ("event", [id]) | ("card", [id]) | ("card-upgraded", [id]) | ("relic", [id]) => {
+            args["id"] = json!(id)
+        }
         _ => {}
     }
     Ok(args)
@@ -421,6 +423,15 @@ mod tests {
         let args = cheat_args("card", &strings(&["WHIRLWIND"])).unwrap();
 
         assert_eq!(args, json!({ "name": "card", "id": "WHIRLWIND" }));
+    }
+
+    #[test]
+    fn cheat_card_upgraded_and_relic_map_id() {
+        let upgraded = cheat_args("card-upgraded", &strings(&["WHIRLWIND"])).unwrap();
+        let relic = cheat_args("relic", &strings(&["KUNAI"])).unwrap();
+
+        assert_eq!(upgraded, json!({ "name": "card-upgraded", "id": "WHIRLWIND" }));
+        assert_eq!(relic, json!({ "name": "relic", "id": "KUNAI" }));
     }
 
     #[test]
