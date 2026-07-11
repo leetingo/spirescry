@@ -42,6 +42,24 @@ public readonly record struct DispatchResult(bool Ok, string? Err = null, string
 // entry points the UI uses. Must be called on the main thread.
 public static class Dispatcher
 {
+    // The complete verb and cheat surfaces, in dispatch order. /health
+    // advertises them as capabilities so a CLI newer or older than the
+    // host detects the skew up front instead of mid-run; the rejection
+    // messages below quote the same lists.
+    public static readonly string[] Verbs =
+    {
+        "new-run", "abandon", "option", "proceed", "map-move",
+        "pick-reward", "pick-card", "pick-relic", "confirm", "skip",
+        "buy", "leave", "cheat", "play", "end-turn", "potion-use",
+        "potion-discard",
+    };
+
+    public static readonly string[] Cheats =
+    {
+        "goto", "gold", "heal", "hp", "wound-enemies", "event", "combat",
+        "card", "card-upgraded", "relic", "potion", "stars", "energy",
+    };
+
     public static DispatchResult Dispatch(string action, JsonElement args) => action switch
     {
         "new-run" => NewRun(args),
@@ -60,7 +78,7 @@ public static class Dispatcher
         "potion-discard" => PotionDiscard(args),
         "play" or "end-turn" or "potion-use" => CombatVerb(action, args),
         _ => DispatchResult.Reject("bad_request",
-            $"unknown action '{action}' (supported: new-run, abandon, option, proceed, map-move, pick-reward, pick-card, pick-relic, confirm, skip, buy, leave, cheat, play, end-turn, potion-use, potion-discard)"),
+            $"unknown action '{action}' (supported: {string.Join(", ", Verbs)})"),
     };
 
     // ---- cheats — dev/verification only, not part of the play surface ----
@@ -85,7 +103,7 @@ public static class Dispatcher
             "stars" => SetCombatResource("Stars", args),
             "energy" => SetCombatResource("Energy", args),
             var n => DispatchResult.Reject("bad_request",
-                $"unknown cheat '{n}' (supported: goto, gold, heal, hp, wound-enemies, event, combat, card, card-upgraded, relic, potion, stars, energy)"),
+                $"unknown cheat '{n}' (supported: {string.Join(", ", Cheats)})"),
         };
     }
 

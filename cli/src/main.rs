@@ -88,8 +88,8 @@ enum Cmd {
     Models { kind: String },
     /// Dev/verification cheats.
     ///
-    /// goto <col> <row> | gold/hp/stars/energy <n> | heal | wound-enemies |
-    /// event/combat/card/card-upgraded/relic/potion <ID>
+    /// Run `cheat --help` for examples. The connected host's `health`
+    /// capabilities list is the source of truth for available cheats.
     Cheat { name: String, values: Vec<String> },
     /// Play a hand card by model entry (e.g. StrikeIronclad)
     Play {

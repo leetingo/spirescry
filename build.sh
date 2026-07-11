@@ -39,6 +39,11 @@ fi
 
 HOST_DLL="$REPO/headless/Host/bin/Release/spirescry_host.dll"
 
+# Stamped into both builds; /health reports it as buildHash so a running
+# host can be matched to a source revision.
+GIT_HASH="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+git diff --quiet HEAD 2>/dev/null || GIT_HASH="$GIT_HASH-dirty"
+
 step() { printf '\033[1;34m▶\033[0m %s\n' "$*"; }
 ok()   { printf '\033[1;32m✓\033[0m %s\n' "$*"; }
 die()  { printf '\033[1;31m✗\033[0m %s\n' "$*" >&2; exit 1; }
@@ -118,7 +123,7 @@ headless_setup() {
     fi
 
     step "build host"
-    dotnet build -c Release headless/Host/Host.csproj | tail -3
+    dotnet build -c Release -p:SourceRevisionId="$GIT_HASH" headless/Host/Host.csproj | tail -3
     [ -x headless/Host/bin/Release/spirescry_host ] || die "host build produced no binary"
     ok "headless/Host/bin/Release/spirescry_host"
 }
@@ -220,7 +225,7 @@ launch_host() {
 build_mod() {
     [ -f lib/sts2.dll ] || die "lib/sts2.dll missing — run: ./build.sh libs"
     step "build mod (Release)"
-    dotnet build -c Release src/Spirescry.csproj | tail -3
+    dotnet build -c Release -p:SourceRevisionId="$GIT_HASH" src/Spirescry.csproj | tail -3
     [ -f src/bin/Release/spirescry.dll ] || die "mod build did not produce spirescry.dll"
     ok "src/bin/Release/spirescry.dll"
 }

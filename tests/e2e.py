@@ -159,8 +159,13 @@ def alive_enemy(d):
 def b1():
     status, d = http("GET", "/health")
     assert status == 200 and d["ok"] is True, d
-    for k in ("mod", "version", "phase", "rev", "executorStuckMs", "queues"):
+    for k in ("mod", "version", "buildHash", "protocolVersion",
+              "capabilities", "phase", "rev", "executorStuckMs", "queues"):
         assert k in d, f"health missing {k}: {sorted(d)}"
+    caps = d["capabilities"]
+    assert "end-turn" in caps["verbs"], caps
+    assert "relic" in caps["cheats"], caps
+    assert isinstance(d["protocolVersion"], int), d["protocolVersion"]
 
 
 @case("B2 boot log: patches landed, models clean", boot_only=True)

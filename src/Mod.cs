@@ -1,3 +1,4 @@
+using System.Reflection;
 using Godot;
 using MegaCrit.Sts2.Core.Logging;
 using MegaCrit.Sts2.Core.Modding;
@@ -14,6 +15,24 @@ public static class Mod
 {
     public const string Id = "spirescry";
     public const string Version = "0.1.0";
+
+    // Bumped whenever the bridge's request/response contract changes
+    // shape — the CLI's detector for a host it doesn't understand.
+    public const int ProtocolVersion = 1;
+
+    // The short git hash build.sh stamps via -p:SourceRevisionId (the
+    // SDK appends it to InformationalVersion after a '+'). "unknown"
+    // means the build skipped the stamp.
+    public static string BuildHash { get; } = ReadBuildHash();
+
+    private static string ReadBuildHash()
+    {
+        var info = typeof(Mod).Assembly
+            .GetCustomAttribute<AssemblyInformationalVersionAttribute>()
+            ?.InformationalVersion;
+        var plus = info?.IndexOf('+') ?? -1;
+        return plus >= 0 ? info![(plus + 1)..] : "unknown";
+    }
 
     public static void Initialize()
     {
