@@ -55,66 +55,74 @@ def ensure_map():
     if obs()["phase"] != "map":
         fresh_run()
 
-# event list from the cheat's known-list error (needs map phase)
-fresh_run()
-err = run("cheat", "event", "__LIST__", ok=True).get("_err", "")
-ids = sorted(set(err.split("known: ", 1)[1].rstrip(")").split(","))) if "known: " in err else []
-if not ids:
-    sys.exit(f"could not enumerate events: {err[:200]}")
-print(f"{len(ids)} events to sweep")
+def sweep():
+    """Force every event, interact with each, return the problem dict
+    (empty == all 57 rendered and responded). Importable — tests/e2e.py
+    runs this as its event-coverage case."""
+    # event list from the cheat's known-list error (needs map phase)
+    fresh_run()
+    err = run("cheat", "event", "__LIST__", ok=True).get("_err", "")
+    ids = sorted(set(err.split("known: ", 1)[1].rstrip(")").split(","))) if "known: " in err else []
+    if not ids:
+        sys.exit(f"could not enumerate events: {err[:200]}")
+    print(f"{len(ids)} events to sweep")
 
-special_ok = {"bundle_select", "crystal_sphere", "card_select", "shop", "combat", "treasure", "rest_site"}
-results = {}
-for i, ev in enumerate(ids):
-    ensure_map()
-    r = run("cheat", "event", ev, ok=True)
-    if "_err" in r:
-        results[ev] = f"FORCE-FAIL: {r['_err'][:80]}"
-        continue
-    # engine boots mount the room over a few frames
-    d = obs()
-    for _ in range(10):
-        if d.get("phase") != "map":
-            break
-        time.sleep(0.5)
+    special_ok = {"bundle_select", "crystal_sphere", "card_select", "shop", "combat", "treasure", "rest_site"}
+    results = {}
+    for i, ev in enumerate(ids):
+        ensure_map()
+        r = run("cheat", "event", ev, ok=True)
+        if "_err" in r:
+            results[ev] = f"FORCE-FAIL: {r['_err'][:80]}"
+            continue
+        # engine boots mount the room over a few frames
         d = obs()
-    ph = d.get("phase")
-    if ph == "event":
-        opts = d.get("options", [])
-        title = d.get("title") or ""
-        render = f"event opts={len(opts)}"
-        if not opts and not d.get("finished"):
-            render += " NO-OPTIONS"
-        # interaction: take option 0 if any, then drain
-        if opts:
-            unlocked = [o for o in opts if not o.get("locked")]
-            if unlocked:
-                run("option", str(unlocked[0]["idx"]), ok=True)
-                time.sleep(0.5)
-                after = obs().get("phase")
-                render += f" ->{after}"
-                if after == "card_select":
-                    run("pick-card", "0", ok=True)
-                    run("confirm", ok=True)
-                elif after == "bundle_select":
-                    run("pick-card", "0", ok=True)
-                elif after == "crystal_sphere":
-                    run("proceed", ok=True)
-        results[ev] = render
-    elif ph in special_ok:
-        results[ev] = f"special:{ph}"
-    else:
-        results[ev] = f"UNEXPECTED phase={ph} overlay={d.get('overlay')}"
-    if (i + 1) % 20 == 0:
-        print(f"  ...{i + 1}/{len(ids)}")
-        fresh_run()
+        for _ in range(10):
+            if d.get("phase") != "map":
+                break
+            time.sleep(0.5)
+            d = obs()
+        ph = d.get("phase")
+        if ph == "event":
+            opts = d.get("options", [])
+            render = f"event opts={len(opts)}"
+            if not opts and not d.get("finished"):
+                render += " NO-OPTIONS"
+            # interaction: take option 0 if any, then drain
+            if opts:
+                unlocked = [o for o in opts if not o.get("locked")]
+                if unlocked:
+                    run("option", str(unlocked[0]["idx"]), ok=True)
+                    time.sleep(0.5)
+                    after = obs().get("phase")
+                    render += f" ->{after}"
+                    if after == "card_select":
+                        run("pick-card", "0", ok=True)
+                        run("confirm", ok=True)
+                    elif after == "bundle_select":
+                        run("pick-card", "0", ok=True)
+                    elif after == "crystal_sphere":
+                        run("proceed", ok=True)
+            results[ev] = render
+        elif ph in special_ok:
+            results[ev] = f"special:{ph}"
+        else:
+            results[ev] = f"UNEXPECTED phase={ph} overlay={d.get('overlay')}"
+        if (i + 1) % 20 == 0:
+            print(f"  ...{i + 1}/{len(ids)}")
+            fresh_run()
 
-print()
-bad = {k: v for k, v in results.items() if "FAIL" in v or "UNEXPECTED" in v or "NO-OPTIONS" in v}
-tally = Counter("ok" if k not in bad else "bad" for k in results)
-print(f"== {tally['ok']} ok, {tally['bad']} problems of {len(results)}")
-for k, v in sorted(bad.items()):
-    print(f"  {k}: {v}")
-post = Counter(v.split("->")[1].split()[0] for v in results.values() if "->" in v)
-print("option-0 landed in:", dict(post))
-run("abandon", ok=True)
+    print()
+    bad = {k: v for k, v in results.items() if "FAIL" in v or "UNEXPECTED" in v or "NO-OPTIONS" in v}
+    tally = Counter("ok" if k not in bad else "bad" for k in results)
+    print(f"== {tally['ok']} ok, {tally['bad']} problems of {len(results)}")
+    for k, v in sorted(bad.items()):
+        print(f"  {k}: {v}")
+    post = Counter(v.split("->")[1].split()[0] for v in results.values() if "->" in v)
+    print("option-0 landed in:", dict(post))
+    run("abandon", ok=True)
+    return bad
+
+
+if __name__ == "__main__":
+    sys.exit(1 if sweep() else 0)
