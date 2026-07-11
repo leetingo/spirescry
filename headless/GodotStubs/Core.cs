@@ -166,12 +166,17 @@ public static class Engine
 
 public static class GD
 {
-    public static void Print(params object[] args) => Console.Error.WriteLine(string.Join("", args));
-    public static void Print(string msg) => Console.Error.WriteLine(msg);
-    public static void PrintErr(params object[] args) => Console.Error.WriteLine("[ERROR] " + string.Join("", args));
-    public static void PrintErr(string msg) => Console.Error.WriteLine("[ERROR] " + msg);
-    public static void PushError(params object[] args) => Console.Error.WriteLine("[ERROR] " + string.Join("", args));
-    public static void PushError(string msg) => Console.Error.WriteLine("[ERROR] " + msg);
+    // Everything the engine logs in host mode funnels through these stubs,
+    // so the UTC stamp lands on every line (matches HostLog's clock).
+    private static void Emit(string msg) =>
+        Console.Error.WriteLine($"[{DateTime.UtcNow:HH:mm:ss.fff}] {msg}");
+
+    public static void Print(params object[] args) => Emit(string.Join("", args));
+    public static void Print(string msg) => Emit(msg);
+    public static void PrintErr(params object[] args) => Emit("[ERROR] " + string.Join("", args));
+    public static void PrintErr(string msg) => Emit("[ERROR] " + msg);
+    public static void PushError(params object[] args) => Emit("[ERROR] " + string.Join("", args));
+    public static void PushError(string msg) => Emit("[ERROR] " + msg);
     public static void PushWarning(params object[] args) { }
     public static void PushWarning(string msg) { }
     public static void PrintRich(params object[] args) { }
