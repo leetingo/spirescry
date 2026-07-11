@@ -467,9 +467,13 @@ def x1():
     d = bridge.wait_phase("crystal_sphere")
     assert d["grid"]["width"] > 0 and d["divinationsLeft"] > 0, d["grid"]
     assert d["cells"], "no cells in the crystal snapshot"
-    assert d.get("tool"), "no tool in the crystal snapshot"
-    run("option", "1", ok=True)  # tool picker verb (either tool is fine)
-    left = obs()["divinationsLeft"]
+    before = d.get("tool")
+    assert before, "no tool in the crystal snapshot"
+    run("option", "0" if before == "big" else "1")  # the OTHER tool
+    time.sleep(0.5)
+    d = obs()
+    assert d["tool"] != before, f"tool verb changed nothing (still {d['tool']})"
+    left = d["divinationsLeft"]
     for _ in range(left + 2):
         d = obs()
         if d["phase"] != "crystal_sphere" or d.get("finished"):
