@@ -19,20 +19,28 @@ no Steam). Case groups:
   X  special screens: crystal-sphere minigame, Neow bundle select
   K  cheat surface: gold / relic / card-upgraded / card graft real state
   V  victory: cheat-driven full clear to a victory game_over
-  E  events: all 57 forced, rendered, and responded (eventsweep)
+  E  events: all 57 forced; every unlocked option clicked and drained
+     to completion (--quick: first option only)
+  M  exhaustive content sweeps (tests/sweeps.py): every encounter
+     fought, every card attempted (playable effects execute; legality
+     rejects stay clean), every potion drunk, every relic obtained
   F  the full act-1 parity loop (tests/parity.py), key sets recorded
   H  request audit trail (STS2_AGENT_HTTP_LOG line format)
 
   Coverage map — phases: all but relic_reward (no reachable trigger in
   the current game build; pick-relic is exercised in treasure) and
   overlay/unknown (fault phases by design). Verbs: all, including every
-  cheat. Outcomes: victory and defeat (abandoned rides R3/R4).
+  cheat. Content: all cards/potions/relics/encounters/events/characters
+  (per /models). Outcomes: victory and defeat (abandoned rides R3/R4).
+  Combinatorial interactions (card x relic x enemy) remain sampled, not
+  enumerated — parity, V1, and real runs are that layer.
 
   e2e.py --boot           boot a host on STS2_AGENT_PORT (default 7779),
                           run all cases, tear the host down
   e2e.py                  run against an already-listening bridge
                           (boot-log and audit-trail cases are skipped)
-  e2e.py --only P1,K1     run a subset (case-name prefixes)
+  e2e.py --quick          skip the M sweeps, E1 clicks first options only
+  e2e.py --only P1,M2     run a subset (case-name prefixes)
   e2e.py --keys-out F     write the parity key sets to F
   e2e.py --log F          host stderr file (with --boot)
 
@@ -70,9 +78,9 @@ ROSTER = []  # collected by P5, consumed by R2
 PARITY_SEED = "SPIRECI1"
 
 
-def case(name, boot_only=False):
+def case(name, boot_only=False, deep=False):
     def deco(fn):
-        CASES.append((name, boot_only, fn))
+        CASES.append((name, boot_only, deep, fn))
         return fn
     return deco
 
@@ -122,14 +130,14 @@ def launch(character="IRONCLAD", seed=None):
     raise AssertionError(f"new-run {character} never reached the Neow event")
 
 
-def to_map(seed=None):
-    launch(seed=seed)
+def to_map(seed=None, character="IRONCLAD"):
+    launch(character=character, seed=seed)
     run("proceed")
     return bridge.wait_phase("map")
 
 
-def into_combat(seed=None):
-    d = to_map(seed=seed)
+def into_combat(seed=None, character="IRONCLAD"):
+    d = to_map(seed=seed, character=character)
     node = next(p for p in d["next"] if p["type"] == "monster")
     run("map-move", str(node["col"]), str(node["row"]))
     d = bridge.wait_phase("combat")
@@ -592,11 +600,61 @@ def v1():
 
 # ---------- E: events ----------
 
-@case("E1 every event renders and responds (full sweep)")
+@case("E1 every event responds (every option unless --quick)")
 def e1():
     import eventsweep
-    bad = eventsweep.sweep()
+    bad = eventsweep.sweep(all_options=not ARGS.quick)
     assert not bad, f"{len(bad)} events misbehaved: {bad}"
+
+
+# ---------- M: exhaustive content sweeps ----------
+
+@case("M1 bestiary: every encounter loads, fights, resolves", deep=True)
+def m1():
+    import sweeps
+    bad = sweeps.encounters()
+    assert not bad, f"{len(bad)} encounters misbehaved: {bad}"
+
+
+@case("M2 every playable card executes; legality rejects cleanly", deep=True)
+def m2():
+    import sweeps
+    bad = sweeps.cards()
+    assert not bad, f"{len(bad)} cards misbehaved: {bad}"
+
+
+@case("M3 every potion procures and drinks", deep=True)
+def m3():
+    import sweeps
+    bad = sweeps.potions()
+    assert not bad, f"{len(bad)} potions misbehaved: {bad}"
+
+
+@case("M4 every legal relic obtain hook lands", deep=True)
+def m4():
+    import sweeps
+    bad = sweeps.relics()
+    assert not bad, f"{len(bad)} relics misbehaved: {bad}"
+
+
+@case("M5 delayed card effects expose their picker")
+def m5():
+    # TOOLS_OF_THE_TRADE asks for a discard at the start of the NEXT
+    # player turn, outside the play verb's HeadlessPicker.Around scope.
+    # The pure host must still expose that automatic choice rather than
+    # falling through to the absent GUI screen.
+    d = into_combat(seed="CIM5", character="SILENT")
+    assert d.get("side") == "player", f"never got player turn: {d.get('side')}"
+    run("cheat", "card", "TOOLS_OF_THE_TRADE")
+    run("cheat", "energy", "99")
+    run("play", "TOOLS_OF_THE_TRADE")
+    run("end-turn")
+    pick = bridge.wait_phase("hand_select", timeout=25)
+    assert pick.get("min") == 1 and pick.get("cards"), pick
+    run("pick-card", str(pick["cards"][0]["idx"]))
+    time.sleep(0.8)
+    assert obs()["phase"] == "combat", obs()["phase"]
+    to_menu()
 
 
 # ---------- F: the full loop ----------
@@ -656,6 +714,8 @@ def main():
     global LOG_PATH, ARGS
     ap = argparse.ArgumentParser()
     ap.add_argument("--boot", action="store_true")
+    ap.add_argument("--quick", action="store_true",
+                    help="skip the exhaustive sweeps (M*), first-option E1")
     ap.add_argument("--only", help="comma-separated case-name prefixes")
     ap.add_argument("--keys-out")
     ap.add_argument("--log", default=os.path.join(
@@ -664,8 +724,9 @@ def main():
     ARGS = ap.parse_args()
 
     if ARGS.list:
-        for name, boot_only, _ in CASES:
-            print(name + ("  (--boot only)" if boot_only else ""))
+        for name, boot_only, deep, _ in CASES:
+            print(name + ("  (--boot only)" if boot_only else "")
+                  + ("  (skipped by --quick)" if deep else ""))
         return 0
 
     proc = None
@@ -676,11 +737,14 @@ def main():
     only = [p.strip() for p in ARGS.only.split(",")] if ARGS.only else None
     failures = []
     try:
-        for name, boot_only, fn in CASES:
+        for name, boot_only, deep, fn in CASES:
             if only and not any(name.startswith(p) for p in only):
                 continue
             if boot_only and not ARGS.boot:
                 print(f"SKIP {name} (needs --boot)")
+                continue
+            if deep and ARGS.quick:
+                print(f"SKIP {name} (--quick)")
                 continue
             print(f"== {name}")
             t0 = time.monotonic()
@@ -708,9 +772,9 @@ def main():
             except subprocess.TimeoutExpired:
                 proc.kill()
 
-    ran = sum(1 for name, b, _ in CASES
+    ran = sum(1 for name, b, deep, _ in CASES
               if (not only or any(name.startswith(p) for p in only))
-              and (ARGS.boot or not b))
+              and (ARGS.boot or not b) and not (deep and ARGS.quick))
     print(f"\n{ran - len(failures)}/{ran} cases passed"
           + (f"; FAILED: {failures}" if failures else ""))
     if failures and LOG_PATH:

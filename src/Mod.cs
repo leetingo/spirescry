@@ -28,10 +28,35 @@ public static class Mod
 // segfault the CLR — only the type name and Message are safe.
 internal static class SafeLog
 {
-    public static void Info(string msg) => Log.Info($"[{Mod.Id}] {msg}", 1);
+    public static void Info(string msg)
+    {
+        var line = $"[{Mod.Id}] {msg}";
+        try { Log.Info(line, 1); }
+        catch { Fallback(line); }
+    }
 
-    public static void Error(string context, Exception ex) =>
-        Log.Error($"[{Mod.Id}] {context}: {ex.GetType().Name}: {ex.Message}", 1);
+    public static void Error(string context, Exception ex)
+    {
+        var line = $"[{Mod.Id}] {context}: {ex.GetType().Name}: {ex.Message}";
+        try
+        {
+            Log.Error(line, 1);
+        }
+        catch
+        {
+            // Error reporting is on the recovery path and must never mask
+            // the original exception. The pure host can temporarily lose
+            // the engine logger after a model hook faults; stderr remains
+            // available in both host and game boots.
+            Fallback(line);
+        }
+    }
+
+    private static void Fallback(string line)
+    {
+        try { Console.Error.WriteLine(line); }
+        catch { /* no logging sink is worth failing the request */ }
+    }
 }
 
 internal static class Boot

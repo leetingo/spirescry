@@ -89,6 +89,7 @@ public sealed class HttpBridge
             resp = (req.HttpMethod, path) switch
             {
                 ("GET", "/health") => await Handlers.Health(),
+                ("GET", "/models") => await Handlers.Models(req.QueryString["kind"]),
                 ("GET", "/obs") => await Handlers.Obs(
                     req.QueryString["since"], req.QueryString["wait"], req.QueryString["compact"]),
                 ("POST", "/step") => await Handlers.Step(body),

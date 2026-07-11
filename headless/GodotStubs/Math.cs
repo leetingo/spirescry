@@ -152,4 +152,7 @@ public static class Mathf
     }
     public static bool IsEqualApprox(float a, float b) => MathF.Abs(a - b) < Epsilon;
     public static float Snapped(float value, float step) => step != 0 ? MathF.Round(value / step) * step : value;
+    // Phantasmal Gardener's death effect calls Log; without it the action
+    // faults mid-kill and strands the fight. Godot's Log is natural log.
+    public static float Log(float s) => MathF.Log(s);
 }

@@ -11,11 +11,13 @@
 
 using System.Reflection;
 using HarmonyLib;
+using MegaCrit.Sts2.Core.GameActions;
 using MegaCrit.Sts2.Core.Modding;
 using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Saves;
 using MegaCrit.Sts2.Core.TestSupport;
 using Spirescry.Bridge;
+using Spirescry.State;
 using Spirescry.Threading;
 
 namespace Spirescry.Host;
@@ -50,6 +52,7 @@ internal static class HeadlessBoot
         InitModelDb();
         HeadlessLocalization.Init();
         ApplyHarmonyPatches();
+        HeadlessPicker.Install();
         MainThreadPump.BootstrapHeadless();
         // Background continuations (unpatched Task.Delay in engine code)
         // mutate state outside handler calls; a slow pump tick folds those
@@ -202,6 +205,7 @@ internal static class HeadlessBoot
             PatchMonsterFlavorHooks();
             PatchProgressTracking();
             PatchReattachFadeOut();
+            PatchStaleActionPop();
             RerouteBundleScreen();
             RerouteCrystalSphere();
             RerouteCustomRewards();
@@ -242,6 +246,44 @@ internal static class HeadlessBoot
     }
 
     private static bool SkipReattachFadeOutVoid() => false;
+
+    // A fight that ends mid-end-turn (an on-death effect racing the vote)
+    // strands the EndPlayerTurnAction; its parked continuation pops it
+    // into the NEXT fight's queues, throws "didn't find it in any queue!"
+    // and wedges that fight's turn start. The engine's own Reset() path
+    // makes exactly this pop a silent no-op (_wasReset) — give the stale
+    // pop the same semantics instead of letting it kill the action chain.
+    private static void PatchStaleActionPop()
+    {
+        var t = typeof(AbstractModelSubtypes).Assembly.GetType(
+            "MegaCrit.Sts2.Core.GameActions.Multiplayer.ActionQueueSet");
+        var m = t?.GetMethod("PopAction",
+            BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+        if (m is null)
+        {
+            HostLog.Info("ActionQueueSet.PopAction not found — stale-pop guard off");
+            return;
+        }
+        _harmony!.Patch(m, finalizer: Local(nameof(SwallowStalePop)));
+        HostLog.Info("stale-action pops downgraded to no-ops");
+    }
+
+    private static Exception? SwallowStalePop(Exception? __exception, GameAction action)
+    {
+        if (__exception is InvalidOperationException ex
+            && ex.Message.Contains("didn't find it in any queue")
+            // The observed cross-combat continuation is an end-turn that
+            // Reset already canceled. Do not hide a live or arbitrary
+            // missing-queue pop: those are genuine queue corruption and
+            // must still reach the bridge's wedge/error handling.
+            && action.GetType().Name == "EndPlayerTurnAction"
+            && action.State.ToString() == "Canceled")
+        {
+            HostLog.Info($"swallowed stale-action pop: {ex.Message}");
+            return null;
+        }
+        return __exception;
+    }
 
     // Custom reward offers (event trades like THE_FUTURE_OF_POTIONS) run
     // RewardsCmd.OfferCustom → RewardsSet.Offer, which shows the GUI

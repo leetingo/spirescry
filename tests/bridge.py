@@ -14,22 +14,28 @@ import time
 BIN = os.environ.get("SPIRESCRY_BIN", "spirescry")
 
 
-def cli(*args):
+def cli(*args, timeout=30):
     """Run one spirescry command. not_ready is the bridge's transient
     signal (queue paused, map intro window, ...) — by contract the agent
     retries it (the CLI exits 75, EX_TEMPFAIL, for exactly that)."""
     for _ in range(15):
-        r = subprocess.run([BIN, *args], capture_output=True, text=True)
+        try:
+            r = subprocess.run(
+                [BIN, *args], capture_output=True, text=True, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            return subprocess.CompletedProcess(
+                [BIN, *args], 124, "",
+                f"command timed out after {timeout}s")
         if r.returncode != 75:
             break
         time.sleep(0.4)
     return r
 
 
-def run(*args, ok=False):
+def run(*args, ok=False, timeout=30):
     """One CLI call that must succeed. ok=True tolerates failure and
     returns {"_err": stderr}; otherwise a failure ends the harness."""
-    r = cli(*args)
+    r = cli(*args, timeout=timeout)
     if r.returncode != 0:
         if ok:
             return {"_err": r.stderr.strip()}

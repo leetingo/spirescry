@@ -1,3 +1,4 @@
+using System.Reflection;
 using System.Text.Json;
 using MegaCrit.Sts2.Core.CardSelection;
 using MegaCrit.Sts2.Core.Combat;
@@ -76,12 +77,80 @@ public static class Dispatcher
             "hp" => CheatHp(args),
             "wound-enemies" => CheatWoundEnemies(),
             "event" => CheatEvent(args),
+            "combat" => CheatCombat(args),
             "card" => CheatCard(args),
             "card-upgraded" => CheatCard(args),
             "relic" => CheatRelic(args),
+            "potion" => CheatPotion(args),
+            "stars" => SetCombatResource("Stars", args),
+            "energy" => SetCombatResource("Energy", args),
             var n => DispatchResult.Reject("bad_request",
-                $"unknown cheat '{n}' (supported: goto, gold, heal, hp, wound-enemies, event, card, card-upgraded, relic)"),
+                $"unknown cheat '{n}' (supported: goto, gold, heal, hp, wound-enemies, event, combat, card, card-upgraded, relic, potion, stars, energy)"),
         };
+    }
+
+    // Force-enter any combat encounter by model id — the combat analog of
+    // the event cheat; makes the whole bestiary deterministically testable.
+    private static DispatchResult CheatCombat(JsonElement args)
+    {
+        if (RequirePhase(Phase.Map) is { } err) return err;
+        if (!TryGetString(args, "id", out var id))
+            return DispatchResult.Reject("bad_request", "missing args.id (encounter model entry)");
+        var model = ModelDb.AllEncounters.FirstOrDefault(e =>
+            string.Equals(e.Id.Entry, id, StringComparison.OrdinalIgnoreCase));
+        if (model is null)
+            return DispatchResult.Reject("bad_target",
+                $"no encounter model '{id}' (known: {string.Join(",", ModelDb.AllEncounters.Select(e => e.Id.Entry))})");
+        var rm = RunManager.Instance;
+        var rs = rm?.DebugOnlyGetState();
+        if (rs is null)
+            return DispatchResult.Reject("not_ready", "run state not available");
+
+        NMapScreen.Instance?.Close(animateOut: false);
+        // The registry holds canonical prototypes; rooms want a run-scoped
+        // mutable copy (same contract as the relic cheat).
+        var room = new CombatRoom(model.ToMutable(), rs);
+        if (RunMode.IsHeadless)
+            rm!.EnterRoom(room).GetAwaiter().GetResult();
+        else
+            Fire(rm!.EnterRoom(room), "cheat-combat");
+        return DispatchResult.Success();
+    }
+
+    private static DispatchResult CheatPotion(JsonElement args)
+    {
+        if (!TryGetString(args, "id", out var id))
+            return DispatchResult.Reject("bad_request", "missing args.id");
+        var rs = RunManager.Instance?.DebugOnlyGetState();
+        var player = rs is null ? null : LocalContext.GetMe(rs);
+        if (player is null)
+            return DispatchResult.Reject("not_ready", "no run in progress");
+
+        var entry = id.ToUpperInvariant();
+        var proto = ModelDb.AllPotions.FirstOrDefault(p => p.Id.Entry == entry);
+        if (proto is null)
+            return DispatchResult.Reject("bad_request", $"no potion model '{entry}'");
+
+        var procure = PotionCmd.TryToProcure(proto.ToMutable(), player);
+        if (RunMode.IsHeadless) procure.GetAwaiter().GetResult();
+        else Fire(procure, "cheat-potion");
+        return DispatchResult.Success();
+    }
+
+    // Stars/energy live on the combat state; sweeps refill between plays
+    // instead of grinding end-turn cycles to regenerate resources.
+    private static DispatchResult SetCombatResource(string prop, JsonElement args)
+    {
+        if (!TryGetInt(args, "value", out var value))
+            return DispatchResult.Reject("bad_request", "missing args.value");
+        if (CombatManager.Instance is not { IsInProgress: true })
+            return DispatchResult.Reject("bad_phase", "not in combat");
+        var rs = RunManager.Instance?.DebugOnlyGetState();
+        var pcs = (rs is null ? null : LocalContext.GetMe(rs))?.PlayerCombatState;
+        if (pcs is null)
+            return DispatchResult.Reject("not_ready", "no combat state");
+        Reflect.SetPropertyOrBackingField(pcs, prop, Math.Max(0, value));
+        return DispatchResult.Success();
     }
 
     // Force-enter any event room by model id — the same direct entry the
@@ -215,10 +284,35 @@ public static class Dispatcher
         var proto = ModelDb.AllRelics.FirstOrDefault(r => r.Id.Entry == entry);
         if (proto is null)
             return DispatchResult.Reject("bad_request", $"no relic model '{entry}'");
+        if (!proto.IsAllowed(rs!))
+            return DispatchResult.Reject("not_playable",
+                $"relic '{entry}' is not allowed in this run");
 
-        var obtain = RelicCmd.Obtain(proto.ToMutable(), player);
-        if (RunMode.IsHeadless) obtain.GetAwaiter().GetResult();
-        else Fire(obtain, "cheat-relic");
+        var relic = proto.ToMutable();
+        // Reward factories initialize player-specific saved properties
+        // before obtain (Dusty Tome chooses its AncientCard, for example).
+        // A raw model clone does not, so honor the same optional hook.
+        relic.GetType().GetMethod("SetupForPlayer",
+            BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance,
+            binder: null, types: [typeof(Player)], modifiers: null)
+            ?.Invoke(relic, [player]);
+
+        Task? obtain = null;
+        // Pickup relics such as ASTROLABE open a deck picker from their
+        // AfterObtained hook. Pre-arm the same deferred selector used by
+        // event/shop/rest choices; if a choice is pending, return so the
+        // agent can drive it through card_select instead of blocking on a
+        // GUI screen that does not exist in the pure host.
+        HeadlessPicker.Around(() => obtain = RelicCmd.Obtain(relic, player));
+        if (obtain is null)
+            return DispatchResult.Reject("internal", "relic obtain did not start");
+        if (RunMode.IsHeadless
+            && !HeadlessPicker.IsActive
+            && !HeadlessBundle.IsActive
+            && !HeadlessRewards.IsActive)
+            obtain.GetAwaiter().GetResult();
+        else
+            Fire(obtain, "cheat-relic");
         return DispatchResult.Success();
     }
 

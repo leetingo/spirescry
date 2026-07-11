@@ -119,18 +119,25 @@ picks), and text comes from tables extracted out of your local install's
 - **A full run, both boots**: Neow to the finale, victory or defeat —
   including the ascension-10 two-boss ending (the first boss exits back to
   the map; `obs.next` carries the second).
-- **Every event**: all 57 event models render and interact
-  (`tests/eventsweep.py` forces each one via `cheat event`).
+- **Every event**: all 57 event models render; every unlocked first-level
+  option is forced on a fresh copy and drained to completion
+  (`tests/eventsweep.py --all-options`).
+- **Every content atom**: 85 encounters resolve; all 593 cards are tried
+  in their owning character's combat (playable effects execute, legality
+  rejects stay clean); 65 potions are used; all 297 relic pickup hooks
+  run. These sweeps catch single-model host/stub faults; the combinatorial
+  card × relic × enemy space remains sampled by real runs.
 - **Every selection surface**: deck pickers (rest-site upgrade, shop
   removal, transforms), choose-a-card offers, mid-combat hand selects,
   Neow's card-pack bundles, the crystal-sphere minigame (`map-move`
   clicks a cell, `option 0/1` picks the divination tool).
 - **Reproducibility**: `new-run --seed --ascension`.
 - **Dev cheats** for single-point verification:
-  `cheat goto|gold|hp|heal|wound-enemies|event|card|card-upgraded|relic`
-  — jump anywhere on the act map, end fights fast, force any event room
-  by model id, graft cards and relics into the run (state reconstruction
-  after a host fault). No full-run replay needed to test one phase.
+  `cheat goto|gold|hp|stars|energy|heal|wound-enemies|event|combat|card|card-upgraded|relic|potion`
+  — jump anywhere on the act map, end fights fast, force any event or
+  encounter by model id, and graft content into the run. `models
+  card|relic|potion|event|encounter|character` enumerates the current
+  game build instead of baking ids into tests.
 
 ## Testing
 
@@ -140,10 +147,10 @@ picks), and text comes from tables extracted out of your local install's
                          # phase must expose the same keys in each
 python3 tests/e2e.py --boot   # the pre-merge suite against a self-booted
                               # host (port 7779): every phase, verb, and
-                              # cheat — all 57 events, every character's
-                              # first fight, a full victory clear, the
-                              # act-1 parity loop (--only X1,V1 subsets)
-python3 tests/eventsweep.py   # the event sweep alone (also e2e case E1)
+                              # content atom; intentionally long-running
+python3 tests/e2e.py --boot --quick  # iteration loop: skip exhaustive M*,
+                                     # click the first option per event
+python3 tests/eventsweep.py --all-options  # event sweep alone (e2e E1)
 ```
 
 CI runs only the pure unit tests (`unit-tests.yml`, GitHub-hosted): the

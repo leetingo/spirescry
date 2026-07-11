@@ -104,4 +104,42 @@ public static class Handlers
             ? Response.Json(new { ok = true, enqueued = action, rev = Signals.Revision })
             : Response.Error(result.Err!, result.Msg ?? "");
     }
+
+    // The registry the cheats validate against, enumerable — sweeps drive
+    // every card/potion/encounter from here instead of hardcoded lists.
+    public static async Task<Response> Models(string? kind)
+    {
+        var entries = await MainThreadPump.Instance!.Run<object?>(() => kind switch
+        {
+            "card" => MegaCrit.Sts2.Core.Models.ModelDb.AllCards
+                .OrderBy(c => c.Id.Entry)
+                .Select(c => (object)new
+                {
+                    model = c.Id.Entry,
+                    type = c.Type.ToString().ToLowerInvariant(),
+                    rarity = c.Rarity.ToString().ToLowerInvariant(),
+                    pool = c.Pool.Title,
+                }).ToArray(),
+            "relic" => MegaCrit.Sts2.Core.Models.ModelDb.AllRelics
+                .OrderBy(r => r.Id.Entry)
+                .Select(r => (object)new { model = r.Id.Entry }).ToArray(),
+            "potion" => MegaCrit.Sts2.Core.Models.ModelDb.AllPotions
+                .OrderBy(p => p.Id.Entry)
+                .Select(p => (object)new { model = p.Id.Entry }).ToArray(),
+            "event" => MegaCrit.Sts2.Core.Models.ModelDb.AllEvents
+                .OrderBy(e => e.Id.Entry)
+                .Select(e => (object)new { model = e.Id.Entry }).ToArray(),
+            "encounter" => MegaCrit.Sts2.Core.Models.ModelDb.AllEncounters
+                .OrderBy(e => e.Id.Entry)
+                .Select(e => (object)new { model = e.Id.Entry }).ToArray(),
+            "character" => MegaCrit.Sts2.Core.Models.ModelDb.AllCharacters
+                .OrderBy(c => c.Id.Entry)
+                .Select(c => (object)new { model = c.Id.Entry }).ToArray(),
+            _ => null,
+        });
+        return entries is null
+            ? Response.Error("bad_request",
+                "kind must be card|relic|potion|event|encounter|character")
+            : Response.Json(new { ok = true, kind, entries });
+    }
 }

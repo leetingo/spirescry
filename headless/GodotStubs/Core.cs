@@ -12,7 +12,7 @@ public class GodotObject
     public static bool IsInstanceValid(GodotObject? obj) => obj != null;
     public virtual bool IsQueuedForDeletion() => false;
     public Variant Call(StringName method, params Variant[] args) => default;
-    public void CallDeferred(StringName method, params Variant[] args) { }
+    public Variant CallDeferred(StringName method, params Variant[] args) => default;
 
     // ToSignal must be on GodotObject (not Node) to match real Godot's
     // declaration. Returns a SignalAwaiter whose IsCompleted is always true,
@@ -109,7 +109,7 @@ public class Node : GodotObject
     public int GetIndex(bool includeInternal = false) =>
         _parent is null ? -1 : _parent._children.IndexOf(this);
 
-    public void CallDeferred(StringName method, params Variant[] args) { }
+    public new Variant CallDeferred(StringName method, params Variant[] args) => default;
 
     public virtual void _Ready() { }
     public virtual void _EnterTree() { }
