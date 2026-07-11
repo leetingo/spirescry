@@ -534,22 +534,32 @@ public static class Dispatcher
             rm.ActionQueueSynchronizer.RequestEnqueue(action);
             return false;
         }
+        return ResolveInline(action.GetType().Name,
+            () => rm.ActionQueueSet.EnqueueWithoutSynchronizing(action));
+    }
+
+    // Headless engine entry points drain synchronously. Victory teardown
+    // can therefore clear the queue before the just-finished action pops
+    // itself; that exact exception means the effect completed, while any
+    // other exception is a genuine abandoned-resolution wedge.
+    private static bool ResolveInline(string actionName, Action resolve)
+    {
         try
         {
-            rm.ActionQueueSet.EnqueueWithoutSynchronizing(action);
+            resolve();
             return false;
         }
         catch (InvalidOperationException ex) when (
-            ex.Message.Contains("didn't find it in any queue")
-            && CombatManager.Instance is not { IsInProgress: true })
+            ResolutionGuards.IsVictoryTeardownPop(ex,
+                CombatManager.Instance is { IsInProgress: true }))
         {
-            SafeLog.Info($"{action.GetType().Name} settled by combat teardown ({ex.Message})");
+            SafeLog.Info($"{actionName} settled by combat teardown ({ex.Message})");
             return true;
         }
         catch (Exception ex)
         {
-            Signals.Bump($"wedge:{action.GetType().Name}");
-            SafeLog.Error($"{action.GetType().Name} died mid-resolution", ex);
+            Signals.Bump($"wedge:{actionName}");
+            SafeLog.Error($"{actionName} died mid-resolution", ex);
             throw;
         }
     }
@@ -1447,8 +1457,19 @@ public static class Dispatcher
         var (target, err) = ResolveTarget(potion.TargetType, args, state, player);
         if (err is not null) return err.Value;
         // Some potions (Attack Potion, …) open a card pick mid-effect.
-        HeadlessPicker.Around(() => potion.EnqueueManualUse(target!));
-        return DispatchResult.Success();
+        var settled = false;
+        HeadlessPicker.Around(() =>
+        {
+            if (RunMode.IsHeadless)
+                settled = ResolveInline(potion.GetType().Name,
+                    () => potion.EnqueueManualUse(target!));
+            else
+                potion.EnqueueManualUse(target!);
+        });
+        return settled
+            ? DispatchResult.Success(
+                "combat ended during potion resolution; the action settled with victory cleanup")
+            : DispatchResult.Success();
     }
 
     // Discarding is legal anywhere a run is active (clears a slot for a

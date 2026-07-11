@@ -133,10 +133,17 @@ public static class Signals
     private static void WatchDeadBoard(GameAction? running)
     {
         var combat = CombatManager.Instance;
-        var deadBoard = running is null
-            && !HeadlessPicker.IsActive
-            && combat is { IsInProgress: true }
-            && AllEnemiesDead(combat);
+        // IsEnding legitimately has an all-dead board while victory
+        // actions, revives, and phase transitions are still settling.
+        var queuesEmpty = RunManager.Instance is { } rm
+            && EngineQueues.All(rm).All(q => q.depth == 0);
+        var deadBoard = ResolutionGuards.IsDeadBoardCandidate(
+            running is not null,
+            HeadlessPicker.IsActive,
+            combat is { IsInProgress: true },
+            combat is { IsEnding: true },
+            queuesEmpty,
+            combat is not null && AllEnemiesDead(combat));
         if (!deadBoard)
         {
             _deadBoardSinceUtc = null;

@@ -9,6 +9,7 @@
 
   <ItemGroup>
     <Compile Include="../../src/Reflect.cs" Link="Reflect.cs" />
+    <Compile Include="../../src/State/ResolutionGuards.cs" Link="ResolutionGuards.cs" />
     <Compile Include="../../src/State/RichText.cs" Link="RichText.cs" />
     <Compile Include="../../headless/Host/FirstChanceFilter.cs" Link="FirstChanceFilter.cs" />
   </ItemGroup>

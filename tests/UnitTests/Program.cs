@@ -142,6 +142,43 @@ internal static class Tests
         True(!FirstChanceFilter.IsKnownGodotStubMiss(newMethod));
     }
 
+    public static void MissingQueuePopIsSettledOnlyAfterCombatTeardown()
+    {
+        var pop = new InvalidOperationException(
+            "Tried to pop action, but we didn't find it in any queue!");
+
+        True(ResolutionGuards.IsVictoryTeardownPop(pop, combatInProgress: false));
+        False(ResolutionGuards.IsVictoryTeardownPop(pop, combatInProgress: true));
+        False(ResolutionGuards.IsVictoryTeardownPop(
+            new InvalidOperationException("some other queue failure"),
+            combatInProgress: false));
+    }
+
+    public static void EndingCombatIsNotADeadBoardWedge()
+    {
+        False(ResolutionGuards.IsDeadBoardCandidate(
+            actionRunning: false,
+            pickerActive: false,
+            combatInProgress: true,
+            combatIsEnding: true,
+            queuesEmpty: true,
+            allEnemiesDead: true));
+        False(ResolutionGuards.IsDeadBoardCandidate(
+            actionRunning: false,
+            pickerActive: false,
+            combatInProgress: true,
+            combatIsEnding: false,
+            queuesEmpty: false,
+            allEnemiesDead: true));
+        True(ResolutionGuards.IsDeadBoardCandidate(
+            actionRunning: false,
+            pickerActive: false,
+            combatInProgress: true,
+            combatIsEnding: false,
+            queuesEmpty: true,
+            allEnemiesDead: true));
+    }
+
     private static void Equal(object? expected, object? actual)
     {
         if (!Equals(expected, actual))
@@ -152,6 +189,12 @@ internal static class Tests
     {
         if (!actual)
             throw new InvalidOperationException("expected true");
+    }
+
+    private static void False(bool actual)
+    {
+        if (actual)
+            throw new InvalidOperationException("expected false");
     }
 
     private static void Throws<T>(Action action) where T : Exception
