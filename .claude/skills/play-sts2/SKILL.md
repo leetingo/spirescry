@@ -89,7 +89,7 @@ never report it as the source run's outcome or history.
 
 ## The ledger
 
-Keep a three-line ledger in your head across the turn, updated after
+Keep a five-line ledger in your head across the turn, updated after
 every followed action, instead of re-deriving from full JSON each read:
 
 ```
