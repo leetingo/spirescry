@@ -12,6 +12,10 @@ headless/*/bin/
 headless/*/obj/
 __pycache__/
 
+# CI artifacts (tests/ci.py --log / --keys-out in the workflow)
+/host-ci.log
+/host-keys.json
+
 # OS / editor cruft
 .DS_Store
 .vscode/
