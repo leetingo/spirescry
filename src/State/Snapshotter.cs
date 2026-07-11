@@ -4,7 +4,10 @@ using MegaCrit.Sts2.Core.Context;
 using MegaCrit.Sts2.Core.Entities.Cards;
 using MegaCrit.Sts2.Core.Entities.Creatures;
 using MegaCrit.Sts2.Core.Entities.Players;
+using MegaCrit.Sts2.Core.Events;
+using MegaCrit.Sts2.Core.HoverTips;
 using MegaCrit.Sts2.Core.Localization;
+using MegaCrit.Sts2.Core.Models.Events;
 using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Models.Powers;
 using MegaCrit.Sts2.Core.MonsterMoves.Intents;
@@ -689,18 +692,24 @@ public static class Snapshotter
     {
         var ev = Screens.CurrentEvent();
         if (ev is null) return new { phase, available = false };
+        var owner = ev.Owner;
 
-        // Fills per-event vars into option text. Neow-style events format
-        // through a separate dialogue table and can throw here — their
-        // options still read fine with default vars.
-        try { ev.CalculateVars(); } catch { }
+        // EventRoom already called CalculateVars exactly once when the
+        // event began. Never call it while observing: several events roll
+        // RNG or advance counters there, so a read would change both the
+        // advertised choice and the effect that the click later executes.
         // The GUI's event nodes copy the event's DynamicVars into each
         // text's LocString before rendering; headless has no nodes, so do
         // it here or var-bearing descriptions ({SoloGold}, …) fail to
         // format and degrade to raw text.
         try
         {
-            if (ev.Description is { } pageDesc) ev.DynamicVars.AddTo(pageDesc);
+            if (ev.Description is { } pageDesc)
+            {
+                owner?.Character.AddDetailsTo(pageDesc);
+                pageDesc.Add("IsMultiplayer", owner is not null && owner.RunState.Players.Count > 1);
+                ev.DynamicVars.AddTo(pageDesc);
+            }
             foreach (var o in ev.CurrentOptions ?? [])
             {
                 if (o?.Title is { } t) ev.DynamicVars.AddTo(t);
@@ -716,6 +725,7 @@ public static class Snapshotter
             title = SafeText(ev.Title),
             description = SafeText(ev.Description),
             finished = ev.IsFinished,
+            fakeMerchant = ev is FakeMerchant fake ? FakeMerchantView(fake) : null,
             options = (ev.CurrentOptions ?? []).Select((o, i) => new
             {
                 idx = i,
@@ -724,7 +734,91 @@ public static class Snapshotter
                 locked = o.IsLocked,
                 chosen = o.WasChosen,
                 proceed = o.IsProceed,
+                // The GUI marks choices that kill this player with a red
+                // pulse. Null means the option has no lethal predicate.
+                lethal = OptionLethal(o, owner),
+                // GUI hover cards/tooltips are decision state, not
+                // decoration: event choices often name a relic, curse, or
+                // enchantment without explaining its effect in the body.
+                hints = EventHints(o),
+                relic = o.Relic is { } r ? new
+                {
+                    model = r.Id.Entry,
+                    title = SafeText(r.Title),
+                    description = SafeText(r.DynamicDescription),
+                } : null,
             }).ToArray(),
+        };
+    }
+
+    private static object FakeMerchantView(FakeMerchant fake)
+    {
+        var owner = fake.Owner;
+        var inventory = fake.Inventory;
+        return new
+        {
+            available = inventory is not null,
+            canFight = owner?.PotionSlots.Any(p => p?.Id.Entry == "FOUL_POTION") == true,
+            relics = (inventory?.RelicEntries ?? [])
+                .Select((entry, i) => new
+                {
+                    idx = i,
+                    model = entry.Model?.Id.Entry,
+                    title = entry.Model is { } relic ? SafeText(relic.Title) : null,
+                    description = entry.Model is { } described
+                        ? SafeText(described.DynamicDescription)
+                        : null,
+                    cost = entry.Cost,
+                    stocked = entry.IsStocked,
+                    affordable = entry.EnoughGold,
+                }).ToArray(),
+        };
+    }
+
+    private static bool? OptionLethal(EventOption option, Player? owner)
+    {
+        if (option.WillKillPlayer is null) return null;
+        if (owner is null) return null;
+        try { return option.WillKillPlayer(owner); }
+        catch { return null; }
+    }
+
+    private static object[] EventHints(EventOption option)
+    {
+        try
+        {
+            return (option.HoverTips ?? [])
+                .Select(EventHintView)
+                .ToArray();
+        }
+        catch { return []; }
+    }
+
+    private static object EventHintView(IHoverTip hint)
+    {
+        if (hint is CardHoverTip card)
+            return new
+            {
+                kind = "card",
+                model = card.Card.Id.Entry,
+                title = card.Card.Title,
+                description = CardDescription(card.Card),
+                upgraded = card.Card.IsUpgraded,
+            };
+        if (hint is HoverTip text)
+            return new
+            {
+                kind = "text",
+                model = text.CanonicalModel?.Id.Entry,
+                title = RichText.NormalizeIcons(text.Title ?? ""),
+                description = RichText.NormalizeIcons(text.Description ?? ""),
+            };
+        return new
+        {
+            kind = hint.GetType().Name,
+            model = hint.CanonicalModel?.Id.Entry,
+            title = "",
+            description = "",
         };
     }
 

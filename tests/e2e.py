@@ -823,6 +823,82 @@ def h1():
         "no long-poll audit line"
 
 
+# ---------- I: information exposure ----------
+
+@case("I1 event snapshots are read-only")
+def i1():
+    to_map(seed="CIEVENTREAD")
+    run("cheat", "gold", "500")
+    run("cheat", "event", "LOST_WISP")
+    first = bridge.wait_phase("event")
+    second = obs()
+    assert first["options"] == second["options"], \
+        f"/obs mutated event options: {first['options']} -> {second['options']}"
+    assert first["description"] == second["description"], \
+        f"/obs mutated event page: {first['description']} -> {second['description']}"
+    to_menu()
+
+
+@case("I2 event options expose GUI hover-tip decisions")
+def i2():
+    to_map(seed="CIEVENTTIPS")
+    run("cheat", "event", "DOLL_ROOM")
+    bridge.wait_phase("event")
+    run("option", "1")
+    d = bridge.wait_phase("event")
+    assert len(d["options"]) == 2, d["options"]
+    for option in d["options"]:
+        hints = option.get("hints")
+        assert hints and any(h.get("description") for h in hints), option
+        assert any(h.get("model") for h in hints), option
+    to_menu()
+
+
+@case("I3 lethal event choices are explicit")
+def i3():
+    to_map(seed="CIEVENTLETHAL")
+    run("cheat", "hp", "1")
+    run("cheat", "event", "BRAIN_LEECH")
+    d = bridge.wait_phase("event")
+    rip = next(o for o in d["options"] if o["title"] == "Rip the Leech Off")
+    assert rip.get("lethal") is True, rip
+    to_menu()
+
+
+@case("I4 event page conditionals match GUI rendering")
+def i4():
+    to_map(seed="CIEVENTTEXT")
+    run("cheat", "event", "JUNGLE_MAZE_ADVENTURE")
+    bridge.wait_phase("event")
+    run("option", "0")
+    d = bridge.wait_phase("event")
+    assert "{IsMultiplayer:" not in d["description"], d["description"]
+    to_menu()
+
+
+@case("I5 fake merchant inventory is visible and buyable")
+def i5():
+    to_map(seed="CIFAKESHOP")
+    run("cheat", "gold", "500")
+    run("cheat", "event", "FAKE_MERCHANT")
+    d = bridge.wait_phase("event")
+    shop = d.get("fakeMerchant")
+    assert shop and len(shop["relics"]) == 6, d
+    first = shop["relics"][0]
+    assert first["model"] and first["description"] and first["stocked"], first
+    before_gold = d["player"]["gold"]
+    run("buy", "relic", "--idx", "0")
+    for _ in range(20):
+        d = obs()
+        if not d["fakeMerchant"]["relics"][0]["stocked"]:
+            break
+        time.sleep(0.1)
+    assert not d["fakeMerchant"]["relics"][0]["stocked"], d["fakeMerchant"]
+    assert d["player"]["gold"] < before_gold, d["player"]
+    assert first["model"] in d["player"]["relics"], d["player"]["relics"]
+    to_menu()
+
+
 # ---------- runner ----------
 
 def boot_host(log_path):
