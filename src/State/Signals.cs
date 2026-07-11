@@ -23,6 +23,8 @@ public static class Signals
     private static GameAction? _watchedAction;
     private static DateTime _watchedSinceUtc;
     private static bool _wedgeAnnounced;
+    private static DateTime? _deadBoardSinceUtc;
+    private static bool _deadBoardAnnounced;
 
     // Milliseconds the executor has been stuck on the SAME action. The
     // serial executor never recovers from a parked action on its own —
@@ -95,6 +97,7 @@ public static class Signals
     private static void WatchExecutor()
     {
         var running = RunManager.Instance?.ActionExecutor?.CurrentlyRunningAction;
+        WatchDeadBoard(running);
         if (running is null || !ReferenceEquals(running, _watchedAction))
         {
             _watchedAction = running;
@@ -119,6 +122,48 @@ public static class Signals
             _wedgeAnnounced = true;
             Bump($"wedge:{running.GetType().Name}");
         }
+    }
+
+    // The stuck-executor clock above can't see the other fatal shape: an
+    // exception mid death-resolution aborts the chain, leaving nothing
+    // running, nothing queued, every enemy dead — and the combat never
+    // ending. Executor-idle resets the wedge clock, so a second clock
+    // times the dead board itself and announces once past the same
+    // threshold.
+    private static void WatchDeadBoard(GameAction? running)
+    {
+        var combat = CombatManager.Instance;
+        var deadBoard = running is null
+            && !HeadlessPicker.IsActive
+            && combat is { IsInProgress: true }
+            && AllEnemiesDead(combat);
+        if (!deadBoard)
+        {
+            _deadBoardSinceUtc = null;
+            _deadBoardAnnounced = false;
+            return;
+        }
+        _deadBoardSinceUtc ??= DateTime.UtcNow;
+        if (!_deadBoardAnnounced
+            && (DateTime.UtcNow - _deadBoardSinceUtc.Value).TotalMilliseconds > 8000)
+        {
+            _deadBoardAnnounced = true;
+            Bump("wedge:DeadBoard");
+        }
+    }
+
+    private static bool AllEnemiesDead(CombatManager combat)
+    {
+        var enemies = combat.DebugOnlyGetState()?.Enemies;
+        if (enemies is null) return false;
+        var any = false;
+        foreach (var e in enemies)
+        {
+            if (e is null) continue;
+            any = true;
+            if (e.IsAlive) return false;
+        }
+        return any;
     }
 
     // New runs / scene loads construct fresh engine singletons; cheap

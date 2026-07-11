@@ -34,7 +34,9 @@ namespace Spirescry.Actions;
 
 public readonly record struct DispatchResult(bool Ok, string? Err = null, string? Msg = null)
 {
-    public static DispatchResult Success() => new(true);
+    // On success, Msg is an optional note for the response (e.g. "the
+    // action settled with victory cleanup") — not an error.
+    public static DispatchResult Success(string? msg = null) => new(true, null, msg);
     public static DispatchResult Reject(string err, string msg) => new(false, err, msg);
 }
 
@@ -517,10 +519,39 @@ public static class Dispatcher
     // Single owner of the enqueue-mode swap: GUI rides the synchronizer
     // (the queue drains on frames), headless enqueues directly and the
     // queue drains inline before this returns.
-    private static void Enqueue(RunManager rm, GameAction action)
+    //
+    // Returns true when the action's own resolution ended the combat out
+    // from under its queue bookkeeping: victory teardown clears the
+    // queues, so the engine's pop of the finished action finds nothing
+    // and throws even though every effect already settled. Any other
+    // mid-drain throw aborts the rest of the resolution chain with no
+    // executor left running — a shape the stuck-executor watchdog can
+    // never see — so announce the wedge here before rethrowing.
+    private static bool Enqueue(RunManager rm, GameAction action)
     {
-        if (RunMode.IsHeadless) rm.ActionQueueSet.EnqueueWithoutSynchronizing(action);
-        else rm.ActionQueueSynchronizer.RequestEnqueue(action);
+        if (!RunMode.IsHeadless)
+        {
+            rm.ActionQueueSynchronizer.RequestEnqueue(action);
+            return false;
+        }
+        try
+        {
+            rm.ActionQueueSet.EnqueueWithoutSynchronizing(action);
+            return false;
+        }
+        catch (InvalidOperationException ex) when (
+            ex.Message.Contains("didn't find it in any queue")
+            && CombatManager.Instance is not { IsInProgress: true })
+        {
+            SafeLog.Info($"{action.GetType().Name} settled by combat teardown ({ex.Message})");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Signals.Bump($"wedge:{action.GetType().Name}");
+            SafeLog.Error($"{action.GetType().Name} died mid-resolution", ex);
+            throw;
+        }
     }
 
     // Engine calls that return Tasks must not block the main thread —
@@ -1484,8 +1515,12 @@ public static class Dispatcher
 
     private static DispatchResult EndTurn(CombatState state, Player player)
     {
-        Enqueue(RunManager.Instance!, new EndPlayerTurnAction(player, state.RoundNumber));
-        return DispatchResult.Success();
+        var settled = Enqueue(RunManager.Instance!,
+            new EndPlayerTurnAction(player, state.RoundNumber));
+        return settled
+            ? DispatchResult.Success(
+                "combat ended during end-turn resolution; the action settled with victory cleanup")
+            : DispatchResult.Success();
     }
 
     private static (Creature? target, DispatchResult? err) ResolveTarget(
