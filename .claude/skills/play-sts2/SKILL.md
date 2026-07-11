@@ -130,10 +130,10 @@ every verb → not_ready: player actions disabled
 ```
 
 Nothing is running and nothing is queued — the engine died mid
-death-resolution and the win flow will never fire. There may be no
-`wedge:` event at all: the watchdog times a stuck executor, and here
-the executor is already gone. More verbs only pollute the evidence.
-Instead:
+death-resolution and the win flow will never fire. Newer hosts announce
+this as a `wedge:DeadBoard` event after ~8 s; older hosts stay silent
+(the stuck-executor watchdog can't time an executor that's already
+gone). Either way, more verbs only pollute the evidence. Instead:
 
 1. Capture `obs`, `health`, the last verb you fired, and the exception
    from the host log.
