@@ -22,6 +22,7 @@
 #                      (auto-detected on macOS; required elsewhere)
 #   SPIRESCRY_CLI_BIN  where to install the spirescry binary
 #   STS2_AGENT_PORT    bridge port the headless health wait polls (default 7777)
+#   STS2_AGENT_HTTP_LOG  1 → launched bridge logs one line per request (passes through)
 
 set -euo pipefail
 
@@ -120,22 +121,33 @@ headless_setup() {
     ok "headless/Host/bin/Release/spirescry_host"
 }
 
+# Keep exactly one previous generation: debugging "it worked last boot"
+# needs last boot's log, and `>` used to destroy it at relaunch.
+rotate_log() {
+    [ -f "$1" ] && mv -f "$1" "$1.1"
+    return 0
+}
+
 # Run the host: game logic from the IL-patched sts2.dll inside a plain
 # .NET process — no game binary, no Godot engine, no Steam.
 #
 # --foreground execs the host in this process. Sandboxed executors (CI,
 # agent runners) reap nohup'd children with their parent shell; a
-# foreground host lives exactly as long as its own terminal/task.
+# foreground host lives exactly as long as its own terminal/task. Its
+# output still tees into the log file, so diagnostics survive the
+# terminal — the tee children hang off the host process and exit with it.
 launch_host() {
     [ -f headless/Host/bin/Release/spirescry_host.dll ] || die "host not built — run: ./build.sh headless-setup"
     ! pgrep -qf spirescry_host || die "host already running — ./build.sh stop first"
+    log="${TMPDIR:-/tmp}/spirescry-host.log"
+    rotate_log "$log"
     # Through the dotnet CLI, not the apphost — the CLI resolves its own
     # runtime regardless of DOTNET_ROOT.
     if [ "${1:-}" = "--foreground" ]; then
-        step "launch host, foreground (bridge port $STS2_AGENT_PORT)"
-        exec dotnet headless/Host/bin/Release/spirescry_host.dll
+        step "launch host, foreground (bridge port $STS2_AGENT_PORT, log $log)"
+        exec dotnet headless/Host/bin/Release/spirescry_host.dll \
+            > >(tee -a "$log") 2> >(tee -a "$log" >&2)
     fi
-    log="${TMPDIR:-/tmp}/spirescry-host.log"
     step "launch host (bridge port $STS2_AGENT_PORT, log $log)"
     nohup dotnet headless/Host/bin/Release/spirescry_host.dll > "$log" 2>&1 &
     wait_bridge 30 "$log"
@@ -189,6 +201,7 @@ launch_headless() {
     ! pgrep -qf "$STS2_GAME_DIR" || die "game already running — ./build.sh stop first"
 
     log="${TMPDIR:-/tmp}/spirescry-headless.log"
+    rotate_log "$log"
     step "launch headless (bridge port $STS2_AGENT_PORT, log $log)"
     nohup "$game_bin" --headless > "$log" 2>&1 &
     wait_bridge 60 "$log"
