@@ -130,7 +130,8 @@ potions, relics, deck — enchanted cards show `enchant`).
 - `enemies[]`: `id` is the `--target` value, `title` the readable name;
   `intents[]` show `damage` × `hits` (nulls mean a non-attack). `damage`
   is the modified number the pip shows; `baseDamage` the raw roll — a
-  gap between them is Strength/Weak/back-attack at work.
+  gap between them reflects any active attacker- or target-side damage
+  modifier (including Strength/Weak and back-attack).
 - Surround fights (`SURROUNDED_POWER` on you): `you.facing` is
   `left`/`right`, each flanker carries `side` and `isBehind` — a hit
   from behind lands half again as hard, and targeted plays can turn
