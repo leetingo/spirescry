@@ -128,7 +128,13 @@ potions, relics, deck — enchanted cards show `enchant`).
   (`{"Damage": 8}`) — plus `model` (the exact string `play` wants),
   `cost`, `target`, `unplayable`.
 - `enemies[]`: `id` is the `--target` value, `title` the readable name;
-  `intents[]` show `damage` × `hits` (nulls mean a non-attack).
+  `intents[]` show `damage` × `hits` (nulls mean a non-attack). `damage`
+  is the modified number the pip shows; `baseDamage` the raw roll — a
+  gap between them is Strength/Weak/back-attack at work.
+- Surround fights (`SURROUNDED_POWER` on you): `you.facing` is
+  `left`/`right`, each flanker carries `side` and `isBehind` — a hit
+  from behind lands half again as hard, and targeted plays can turn
+  you around. Re-check after every targeted card.
 - `--target` only when the card targets an enemy; a lone enemy
   auto-targets.
 - X-cost cards (`WHIRLWIND`) display `cost` = your current energy: they
