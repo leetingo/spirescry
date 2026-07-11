@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
-"""Host-mode CI suite for the spirescry bridge.
+"""Pre-merge end-to-end suite for the spirescry bridge.
 
-Runs everything against the pure .NET host (the dll boot: no game
-binary, no Steam). Case groups:
+Local, not CI — the host is built from the game's own dlls, so this
+runs where the game is installed. Run it (--boot) before merging.
+
+Everything drives the pure .NET host (the dll boot: no game binary,
+no Steam). Case groups:
 
   B  boot: /health shape, boot-log assertions (Harmony patches landed,
      ModelDb registered clean, timestamped lines)
@@ -14,14 +17,14 @@ binary, no Steam). Case groups:
   F  the full act-1 parity loop (tests/parity.py), key sets recorded
   H  request audit trail (STS2_AGENT_HTTP_LOG line format)
 
-  ci.py --boot           boot a host on STS2_AGENT_PORT (default 7779),
+  e2e.py --boot           boot a host on STS2_AGENT_PORT (default 7779),
                          run all cases, tear the host down
-  ci.py                  run against an already-listening bridge
+  e2e.py                  run against an already-listening bridge
                          (boot-log and audit-trail cases are skipped)
-  ci.py --sweep          also run eventsweep.py at the end (minutes)
-  ci.py --only P1,K1     run a subset (case-name prefixes)
-  ci.py --keys-out F     write the parity key sets to F
-  ci.py --log F          host stderr file (with --boot)
+  e2e.py --sweep          also run eventsweep.py at the end (minutes)
+  e2e.py --only P1,K1     run a subset (case-name prefixes)
+  e2e.py --keys-out F     write the parity key sets to F
+  e2e.py --log F          host stderr file (with --boot)
 
 Cases keep the world tidy: each one starts from the state it needs and
 a failure falls back to the main menu before the next case runs.
@@ -54,7 +57,7 @@ ROSTER = []  # collected by P5, consumed by R2
 # The pinned parity seed (see F1): full path coverage — shop with
 # potions (one opens a mid-combat picker in the boss fight), treasure,
 # smith. SPIRECI2/SPIRECI3 also pass, with less potion coverage.
-CI_SEED = "SPIRECI1"
+PARITY_SEED = "SPIRECI1"
 
 
 def case(name, boot_only=False):
@@ -351,9 +354,10 @@ def k1():
 def f1():
     import parity
     parity.KEYS.clear()
-    # Pinned seed: CI wants the same map/shop/boss every run. Re-pin via
-    # env after a game update reshuffles what the seed generates.
-    parity.drive(seed=os.environ.get("SPIRESCRY_CI_SEED", CI_SEED))
+    # Pinned seed: the pre-merge run wants the same map/shop/boss every
+    # time. Re-pin via env after a game update reshuffles what the seed
+    # generates.
+    parity.drive(seed=os.environ.get("SPIRESCRY_PARITY_SEED", PARITY_SEED))
     if ARGS.keys_out:
         json.dump(parity.KEYS, open(ARGS.keys_out, "w"),
                   indent=1, sort_keys=True)
