@@ -138,8 +138,18 @@ picks), and text comes from tables extracted out of your local install's
 ./build.sh verify        # drives one act-1 loop against BOTH boots, then
                          # diffs the recorded snapshot key sets — same
                          # phase must expose the same keys in each
+python3 tests/ci.py --boot    # the CI suite against a self-booted host
+                              # (port 7779): boot/protocol/lifecycle/
+                              # combat/cheat cases + the act-1 loop
 python3 tests/eventsweep.py   # force + exercise all 57 events (minutes)
 ```
+
+CI: `unit-tests.yml` runs the C# + Rust unit tests on GitHub-hosted
+runners; `host-ci.yml` runs `tests/ci.py` against the pure .NET host on
+a **self-hosted runner** (labels `[self-hosted, sts2]`) — the game's
+dlls are not distributable, so integration needs a machine with the
+game installed, .NET 9, Rust, and python3. The nightly job adds the
+full event sweep.
 
 ## Build
 
