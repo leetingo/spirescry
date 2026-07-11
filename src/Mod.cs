@@ -21,17 +21,21 @@ public static class Mod
     public const int ProtocolVersion = 1;
 
     // The short git hash build.sh stamps via -p:SourceRevisionId (the
-    // SDK appends it to InformationalVersion after a '+'). "unknown"
-    // means the build skipped the stamp.
+    // SDK appends it to InformationalVersion after a '+'). The stamp's
+    // prefix distinguishes it from the SDK's automatic full git SHA.
     public static string BuildHash { get; } = ReadBuildHash();
 
     private static string ReadBuildHash()
     {
+        const string stampPrefix = "spirescry.";
         var info = typeof(Mod).Assembly
             .GetCustomAttribute<AssemblyInformationalVersionAttribute>()
             ?.InformationalVersion;
         var plus = info?.IndexOf('+') ?? -1;
-        return plus >= 0 ? info![(plus + 1)..] : "unknown";
+        var metadata = plus >= 0 ? info![(plus + 1)..] : "";
+        return metadata.StartsWith(stampPrefix, StringComparison.Ordinal)
+            ? metadata[stampPrefix.Length..]
+            : "unknown";
     }
 
     public static void Initialize()
