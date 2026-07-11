@@ -252,11 +252,7 @@ public static class Dispatcher
         var game = NGame.Instance;
         if (!rm.IsAbandoned && !rm.IsGameOver)
         {
-            // Mid-combat abandon runs visual teardown that NREs headless;
-            // swallow it — the forced reset below is what matters there.
-            if (game is null)
-                try { rm.Abandon(); }
-                catch (Exception ex) { SafeLog.Error("abandon (headless)", ex); }
+            if (game is null) HeadlessAbandonTeardown(rm);
             else rm.Abandon();
         }
         if (game is { })
@@ -268,20 +264,44 @@ public static class Dispatcher
         // Headless: no NGame to run the menu transition. The post-state it
         // would leave is just State == null and IsAbandoned == false; wipe
         // both so PhaseDetector reads main_menu, and drop any parked
-        // headless stand-ins referencing the dead run. A combat abandoned
-        // mid-fight also leaves CombatManager live — clear it or the phase
-        // sticks on combat.
-        if (CombatManager.Instance is { IsInProgress: true } cm)
-        {
-            Reflect.SetPropertyOrBackingField(cm, "IsInProgress", false);
-            Reflect.SetField(cm, "_state", null);
-        }
+        // headless stand-ins referencing the dead run.
+        //
+        // CombatManager is a static singleton, so a mid-combat abandon
+        // must go through the engine's own Reset: the forced player kills
+        // mint a _pendingLoss that references the DEAD run's state, and
+        // anything short of Reset leaves it (plus the queue synchronizer's
+        // in-combat state) on the instance — the next run's first combat
+        // then "ends" the moment it sets up, parking the room transition
+        // with a paused queue and phase unknown.
+        try { CombatManager.Instance.Reset(graceful: true); }
+        catch (Exception ex) { SafeLog.Error("abandon combat reset", ex); }
         // Stale queued actions must not leak into the next run.
         try { rm.ActionQueueSet?.Reset(); } catch { }
         Reflect.SetPropertyOrBackingField(rm, "State", null);
         Reflect.SetPropertyOrBackingField(rm, "IsAbandoned", false);
         HeadlessState.ResetAll();
         return DispatchResult.Success();
+    }
+
+    // The engine's Abandon() is UI-first and fire-and-forget: AbandonInternal
+    // closes screens (null headless — the engine swallows the NRE) and then
+    // kills the players ASYNCHRONOUSLY (per player: forced kill + a scaled
+    // wait). Calling it and wiping state right after raced that teardown —
+    // its parked continuations fired into the NEXT run's combat, ending it
+    // the moment it loaded (instant combat_ended, transition queue left
+    // paused, phase parked at unknown). Replicate the meaningful half here,
+    // synchronously: same forced-kill pipeline, no UI closes, bounded wait
+    // so the wipe below always runs against a quiescent engine.
+    private static void HeadlessAbandonTeardown(RunManager rm)
+    {
+        try
+        {
+            Reflect.SetPropertyOrBackingField(rm, "IsAbandoned", true);
+            if (Reflect.Invoke(rm, "GuaranteeKillAllPlayers") is Task kill
+                && !kill.Wait(TimeSpan.FromSeconds(5)))
+                SafeLog.Info("abandon: kill-players teardown still pending after 5s — resetting anyway");
+        }
+        catch (Exception ex) { SafeLog.Error("abandon (headless)", ex); }
     }
 
     private static DispatchResult? RequirePhase(Phase need)

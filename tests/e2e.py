@@ -272,6 +272,20 @@ def r3():
     bridge.wait_phase("main_menu")
 
 
+@case("R4 mid-combat abandon doesn't poison the next combat")
+def r4():
+    # Regression: CombatManager is a static singleton — abandoning
+    # mid-fight used to leave a _pendingLoss on it that instantly ended
+    # the NEXT run's first combat (phase parked at unknown, transition
+    # queue left paused). The abandon path now routes through the
+    # engine's own CombatManager.Reset.
+    into_combat(seed="CIR4A")
+    to_menu()
+    d = into_combat(seed="CIR4B")
+    assert d.get("phase") == "combat", f"combat did not load: {d.get('phase')}"
+    to_menu()
+
+
 # ---------- C: combat ----------
 
 @case("C1 combat economy: block, energy, bad_target, overdraw")
@@ -318,10 +332,8 @@ def c1():
     else:
         raise AssertionError("never ran out of energy in 8 plays")
 
-    # Leave through the real death pipeline. Known host bug: abandoning
-    # MID-COMBAT poisons the next combat load (phase parks at `unknown`,
-    # rev frozen) — reproduce it by replacing the block below with
-    # to_menu(). Track it before leaning on mid-combat abandons anywhere.
+    # Leave through the real death pipeline (R4 covers the mid-combat
+    # abandon path directly).
     import parity
     parity.kill_current_combat()
     bridge.wait_phase("rewards")
