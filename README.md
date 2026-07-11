@@ -127,9 +127,10 @@ picks), and text comes from tables extracted out of your local install's
   clicks a cell, `option 0/1` picks the divination tool).
 - **Reproducibility**: `new-run --seed --ascension`.
 - **Dev cheats** for single-point verification:
-  `cheat goto|gold|hp|heal|wound-enemies|event` — jump anywhere on the
-  act map, end fights fast, force any event room by model id. No full-run
-  replay needed to test one phase.
+  `cheat goto|gold|hp|heal|wound-enemies|event|card|card-upgraded|relic`
+  — jump anywhere on the act map, end fights fast, force any event room
+  by model id, graft cards and relics into the run (state reconstruction
+  after a host fault). No full-run replay needed to test one phase.
 
 ## Testing
 

@@ -77,8 +77,10 @@ public static class Dispatcher
             "wound-enemies" => CheatWoundEnemies(),
             "event" => CheatEvent(args),
             "card" => CheatCard(args),
+            "card-upgraded" => CheatCard(args),
+            "relic" => CheatRelic(args),
             var n => DispatchResult.Reject("bad_request",
-                $"unknown cheat '{n}' (supported: goto, gold, heal, hp, wound-enemies, event, card)"),
+                $"unknown cheat '{n}' (supported: goto, gold, heal, hp, wound-enemies, event, card, card-upgraded, relic)"),
         };
     }
 
@@ -185,9 +187,38 @@ public static class Dispatcher
         var inCombat = CombatManager.Instance is { IsInProgress: true };
         ICardScope scope = inCombat ? CombatManager.Instance!.DebugOnlyGetState()! : rs;
         var card = scope.CreateCard(proto, player);
+        var makeUpgraded = args.TryGetProperty("upgraded", out var upgraded)
+            && upgraded.ValueKind == JsonValueKind.True;
+        if (TryGetString(args, "name", out var cheatName) && cheatName == "card-upgraded")
+            makeUpgraded = true;
+        if (makeUpgraded)
+        {
+            Reflect.Invoke(card, "UpgradeInternal");
+            Reflect.Invoke(card, "FinalizeUpgradeInternal");
+        }
         var add = CardPileCmd.Add(card, inCombat ? PileType.Hand : PileType.Deck);
         if (RunMode.IsHeadless) add.GetAwaiter().GetResult();
         else Fire(add, "cheat-card");
+        return DispatchResult.Success();
+    }
+
+    private static DispatchResult CheatRelic(JsonElement args)
+    {
+        if (!TryGetString(args, "id", out var id))
+            return DispatchResult.Reject("bad_request", "missing args.id");
+        var rs = RunManager.Instance?.DebugOnlyGetState();
+        var player = rs is null ? null : LocalContext.GetMe(rs);
+        if (player is null)
+            return DispatchResult.Reject("not_ready", "no run in progress");
+
+        var entry = id.ToUpperInvariant();
+        var proto = ModelDb.AllRelics.FirstOrDefault(r => r.Id.Entry == entry);
+        if (proto is null)
+            return DispatchResult.Reject("bad_request", $"no relic model '{entry}'");
+
+        var obtain = RelicCmd.Obtain(proto.ToMutable(), player);
+        if (RunMode.IsHeadless) obtain.GetAwaiter().GetResult();
+        else Fire(obtain, "cheat-relic");
         return DispatchResult.Success();
     }
 
