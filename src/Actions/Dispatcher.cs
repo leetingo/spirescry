@@ -393,8 +393,11 @@ public static class Dispatcher
         // in-combat state) on the instance — the next run's first combat
         // then "ends" the moment it sets up, parking the room transition
         // with a paused queue and phase unknown.
-        try { CombatManager.Instance.Reset(graceful: true); }
-        catch (Exception ex) { SafeLog.Error("abandon combat reset", ex); }
+        if (CombatManager.Instance is { } combat)
+        {
+            try { combat.Reset(graceful: true); }
+            catch (Exception ex) { SafeLog.Error("abandon combat reset", ex); }
+        }
         // Stale queued actions must not leak into the next run.
         try { rm.ActionQueueSet?.Reset(); } catch { }
         Reflect.SetPropertyOrBackingField(rm, "State", null);

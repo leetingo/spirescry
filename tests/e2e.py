@@ -523,6 +523,16 @@ def r3():
     bridge.wait_phase("main_menu")
 
 
+@case("R3b pre-combat abandon tolerates missing combat manager", boot_only=True)
+def r3b():
+    to_map(seed="CIR3B")
+    before = len(host_log())
+    run("abandon")
+    bridge.wait_phase("main_menu")
+    teardown_log = host_log()[before:]
+    assert "abandon combat reset" not in teardown_log, teardown_log[-1000:]
+
+
 @case("R4 mid-combat abandon doesn't poison the next combat")
 def r4():
     # Regression: CombatManager is a static singleton — abandoning
