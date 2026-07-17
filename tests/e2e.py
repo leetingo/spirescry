@@ -716,6 +716,31 @@ def w1():
     to_menu()
 
 
+@case("W2 CLI skip selects among multiple card reward alternatives")
+def w2():
+    d = into_combat(seed="CISKIPALT")
+    run("cheat", "relic", "PAELS_WING")
+    assert any(r["model"] == "PAELS_WING" for r in obs()["you"]["relics"]), \
+        "Pael's Wing was not obtained"
+
+    run("cheat", "wound-enemies", ok=True)
+    atk = next(c for c in d["hand"] if c["target"] == "anyenemy")
+    run("play", atk["model"], "--target", str(alive_enemy(d)["id"]))
+    rewards = bridge.wait_phase("rewards")
+    card_tile = next(t for t in rewards["rewards"] if t["type"] == "card")
+    deck0 = len(obs()["player"]["deck"])
+    run("pick-reward", str(card_tile["idx"]))
+    offered = bridge.wait_phase("card_reward")
+    alternatives = offered.get("alternatives", [])
+    assert len(alternatives) >= 2, alternatives
+
+    reject(["skip"], "bad_request")
+    run("skip", str(alternatives[-1]["idx"]))
+    bridge.wait_phase("rewards", "map")
+    assert len(obs()["player"]["deck"]) == deck0, "alternative skip added a card"
+    to_menu()
+
+
 # ---------- X: special screens ----------
 
 @case("X1 crystal sphere: dig, tool verb, rewards out")

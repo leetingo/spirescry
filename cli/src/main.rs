@@ -160,7 +160,7 @@ enum Cmd {
     /// Confirm the current card selection (deck pickers, hand select)
     Confirm,
     /// Skip a card/relic offer, or cancel a cancelable deck picker
-    Skip,
+    Skip { idx: Option<u32> },
     /// Travel to a map node (col/row from obs.next)
     MapMove { col: u32, row: u32 },
     /// List model entries: kind is card/relic/potion/event/encounter/character
@@ -263,7 +263,7 @@ fn main() -> ExitCode {
         Cmd::PickReward { idx } => client.step("pick-reward", json!({ "idx": idx })),
         Cmd::PickCard { idx } => client.step("pick-card", json!({ "idx": idx })),
         Cmd::Confirm => client.step("confirm", json!({})),
-        Cmd::Skip => client.step("skip", json!({})),
+        Cmd::Skip { idx } => client.step("skip", skip_args(*idx)),
         Cmd::Buy { kind, idx } => client.step("buy", json!({ "kind": kind, "idx": idx })),
         Cmd::Leave => client.step("leave", json!({})),
         Cmd::PickRelic { idx } => client.step("pick-relic", json!({ "idx": idx })),
@@ -308,6 +308,13 @@ fn main() -> ExitCode {
             eprintln!("spirescry: {}", e);
             ExitCode::from(e.exit_status())
         }
+    }
+}
+
+fn skip_args(idx: Option<u32>) -> Value {
+    match idx {
+        Some(i) => json!({ "idx": i }),
+        None => json!({}),
     }
 }
 
@@ -1030,6 +1037,27 @@ mod tests {
                 assert_eq!(target, Some(7));
             }
             _ => panic!("expected play command"),
+        }
+    }
+
+    #[test]
+    fn parses_skip_alternative_index_as_optional() {
+        let indexed = Cli::try_parse_from(["spirescry", "skip", "2"]).unwrap();
+        match indexed.cmd {
+            Cmd::Skip { idx } => {
+                assert_eq!(idx, Some(2));
+                assert_eq!(skip_args(idx), json!({ "idx": 2 }));
+            }
+            _ => panic!("expected skip command"),
+        }
+
+        let bare = Cli::try_parse_from(["spirescry", "skip"]).unwrap();
+        match bare.cmd {
+            Cmd::Skip { idx } => {
+                assert_eq!(idx, None);
+                assert_eq!(skip_args(idx), json!({}));
+            }
+            _ => panic!("expected skip command"),
         }
     }
 
