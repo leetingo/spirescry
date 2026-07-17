@@ -89,11 +89,12 @@ never report it as the source run's outcome or history.
 
 ## The ledger
 
-Keep a five-line ledger in your head across the turn, updated after
+Keep a six-line ledger in your head across the turn, updated after
 every followed action, instead of re-deriving from full JSON each read:
 
 ```
 you:    hp / block / energy / stars
+orbs:   slots / ordered queue / passive → evoke values  (Defect only)
 facing: left|right / who's behind          (surround fights only)
 threat: enemy hp / incoming damage × hits / stacks that gate damage
 turn:   cards played so far, once-per-turn triggers used, potions left
