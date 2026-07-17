@@ -31,7 +31,7 @@ public class CanvasItem : Node
     public void SetSelfModulate(Color c) => SelfModulate = c;
     public Color GetSelfModulate() => SelfModulate;
     public Tween CreateTween() => new Tween();
-    public Rect2 GetViewportRect() => new Rect2(Vector2.Zero, new Vector2(1920, 1080));
+    public Rect2 GetViewportRect() => new Rect2(Vector2.Zero, StubDisplay.ViewportSize);
 }
 
 public class Control : CanvasItem
@@ -62,7 +62,7 @@ public class Control : CanvasItem
     public MouseFilterEnum MouseFilter { get; set; }
     public string TooltipText { get; set; } = "";
 
-    public Rect2 GetViewportRect() => new Rect2(0, 0, 1920, 1080);
+    public Rect2 GetViewportRect() => new Rect2(Vector2.Zero, StubDisplay.ViewportSize);
     public void GrabFocus() { }
     public void ReleaseFocus() { }
     public bool HasFocus() => false;

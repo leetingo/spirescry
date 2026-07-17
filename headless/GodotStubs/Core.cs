@@ -5,6 +5,11 @@ using System.Runtime.CompilerServices;
 
 namespace Godot;
 
+internal static class StubDisplay
+{
+    internal static readonly Vector2 ViewportSize = new(1920, 1080);
+}
+
 public class GodotObject
 {
     public class SignalName { }
@@ -236,5 +241,5 @@ public class Viewport : Node
     }
 
     public Vector2 GetMousePosition() => Vector2.Zero;
-    public Rect2 GetVisibleRect() => new Rect2(0, 0, 1920, 1080);
+    public Rect2 GetVisibleRect() => new Rect2(Vector2.Zero, StubDisplay.ViewportSize);
 }
