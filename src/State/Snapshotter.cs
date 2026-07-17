@@ -233,24 +233,21 @@ public static class Snapshotter
     // capacity, so other snapshots stay clean.
     private static object? OrbViews(PlayerCombatState pcs)
     {
-        try
+        var q = pcs.OrbQueue
+            ?? throw new InvalidOperationException("player orb queue is unavailable");
+        if (q.Capacity == 0) return null;
+        return new
         {
-            var q = pcs.OrbQueue;
-            if (q is null || q.Capacity == 0) return null;
-            return new
-            {
-                slots = q.Capacity,
-                channeled = q.Orbs
-                    .Where(o => o != null)
-                    .Select(o => (object)new
-                    {
-                        id = o.Id.Entry,
-                        passive = o.PassiveVal,
-                        evoke = o.EvokeVal,
-                    }).ToArray(),
-            };
-        }
-        catch { return null; }
+            slots = q.Capacity,
+            channeled = q.Orbs
+                .Where(o => o != null)
+                .Select(o => (object)new
+                {
+                    id = o.Id.Entry,
+                    passive = o.PassiveVal,
+                    evoke = o.EvokeVal,
+                }).ToArray(),
+        };
     }
 
     private static object[] PowerViews(Creature c)
