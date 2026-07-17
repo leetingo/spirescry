@@ -228,6 +228,28 @@ public static class Snapshotter
         return result.ToArray();
     }
 
+    // Channeled orbs in slot order (index 0 evokes first) plus the slot
+    // count — the Defect's whole economy. null for characters with no orb
+    // capacity, so other snapshots stay clean.
+    private static object? OrbViews(PlayerCombatState pcs)
+    {
+        var q = pcs.OrbQueue
+            ?? throw new InvalidOperationException("player orb queue is unavailable");
+        if (q.Capacity == 0) return null;
+        return new
+        {
+            slots = q.Capacity,
+            channeled = q.Orbs
+                .Where(o => o != null)
+                .Select(o => (object)new
+                {
+                    id = o.Id.Entry,
+                    passive = o.PassiveVal,
+                    evoke = o.EvokeVal,
+                }).ToArray(),
+        };
+    }
+
     private static object[] PowerViews(Creature c)
     {
         try
@@ -734,6 +756,7 @@ public static class Snapshotter
                 block = creature.Block,
                 energy = new[] { pcs.Energy, pcs.MaxEnergy },
                 stars = pcs.Stars,
+                orbs = OrbViews(pcs),
                 powers = PowerViews(creature),
             },
             potions = PotionViews(player!),

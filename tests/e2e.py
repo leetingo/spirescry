@@ -379,6 +379,22 @@ def c1():
     to_menu()
 
 
+@case("C2 orb economy is visible through /obs")
+def c2():
+    d = into_combat(seed="CIORBS", character="DEFECT")
+    orbs = d["you"]["orbs"]
+    assert orbs["slots"] > 0, f"Defect has no orb capacity: {orbs}"
+    assert orbs["channeled"], f"Defect opened with no channeled orb: {orbs}"
+    first = orbs["channeled"][0]
+    assert set(("id", "passive", "evoke")) <= first.keys(), first
+    assert first["id"].endswith("_ORB"), first
+    to_menu()
+
+    d = into_combat(seed="CIORBSNO", character="IRONCLAD")
+    assert d["you"]["orbs"] is None, d["you"]["orbs"]
+    to_menu()
+
+
 # ---------- S: shop ----------
 
 @case("S1 shop: every buy kind, gold accounting, leave")
