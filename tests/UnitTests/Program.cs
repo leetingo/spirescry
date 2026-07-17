@@ -193,6 +193,31 @@ internal static class Tests
             allEnemiesDead: true));
     }
 
+    public static void DecisionCardTextKeySeparatesEveryTextChangingModifier()
+    {
+        Equal("BASH+0", DecisionProjection.CardTextKey("BASH", 0, null, null));
+        Equal("BASH+1", DecisionProjection.CardTextKey("BASH", 1, null, null));
+        Equal("BASH+1@SELF_HELP!CURSED",
+            DecisionProjection.CardTextKey("BASH", 1, "SELF_HELP", "CURSED"));
+    }
+
+    public static void DecisionLegalVerbsComeFromVisibleTargetsAndGates()
+    {
+        var snapshot = System.Text.Json.Nodes.JsonNode.Parse("""
+            {
+              "phase":"card_select",
+              "cards":[{"idx":0}],
+              "confirmable":false,
+              "cancelable":true,
+              "player":{"potions":[]}
+            }
+            """)!.AsObject();
+
+        var legal = DecisionProjection.LegalVerbs(snapshot, runActive: true);
+
+        Equal("pick-card,skip,abandon", string.Join(',', legal));
+    }
+
     private static void Equal(object? expected, object? actual)
     {
         if (!Equals(expected, actual))

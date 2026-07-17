@@ -15,6 +15,7 @@ using MegaCrit.Sts2.Core.Nodes;
 using MegaCrit.Sts2.Core.Nodes.Cards;
 using MegaCrit.Sts2.Core.Nodes.Cards.Holders;
 using MegaCrit.Sts2.Core.Nodes.Combat;
+using MegaCrit.Sts2.Core.Nodes.GodotExtensions;
 using MegaCrit.Sts2.Core.Nodes.Relics;
 using MegaCrit.Sts2.Core.Nodes.Rewards;
 using MegaCrit.Sts2.Core.Nodes.Rooms;
@@ -34,13 +35,24 @@ public static class Snapshotter
     // agents that poll often. Set per snapshot; safe as a static because
     // the pump runs one job at a time on the main thread.
     private static bool _compact;
+    private static bool _decision;
+    private static HashSet<string> _knownCardTexts = new(StringComparer.Ordinal);
+    private static HashSet<string> _emittedCardTexts = new(StringComparer.Ordinal);
 
     // Must be called on the main thread.
     public static object ForCurrentPhase() => ForCurrentPhase(false);
 
-    public static object ForCurrentPhase(bool compact)
+    public static object ForCurrentPhase(bool compact) => ForCurrentPhase(compact, false, []);
+
+    public static object ForCurrentPhase(
+        bool compact, bool decision, IEnumerable<string> knownCardTexts)
     {
-        _compact = compact;
+        _compact = compact || decision;
+        _decision = decision;
+        // Per-request scope: repeated GETs are identical. The caller owns
+        // cross-request caching explicitly through ?known= / --known-card.
+        _knownCardTexts = knownCardTexts.ToHashSet(StringComparer.Ordinal);
+        _emittedCardTexts = new HashSet<string>(StringComparer.Ordinal);
         var phase = PhaseDetector.Current();
         return phase switch
         {
@@ -72,9 +84,10 @@ public static class Snapshotter
     // Bundle offers: pick one pack of cards (Neow's Scroll Boxes, …).
     private static object BundleSelectSnapshot(string phase)
     {
+        var gui = RunMode.IsHeadless ? null : Screens.Top<NChooseABundleSelectionScreen>();
         var bundles = RunMode.IsHeadless
             ? HeadlessBundle.Bundles
-            : Screens.Top<NChooseABundleSelectionScreen>() is { } screen
+            : gui is { } screen
                 ? Screens.Bundles(screen)
                 : null;
         if (bundles is null || bundles.Count == 0) return new { phase, available = false };
@@ -82,6 +95,12 @@ public static class Snapshotter
         {
             phase,
             player = FooterView(),
+            confirmable = gui is not null
+                && Reflect.Field<NClickableControl>(gui, "_confirmButton") is { IsEnabled: true },
+            cancelable = RunMode.IsHeadless
+                ? HeadlessBundle.IsActive
+                : gui is not null
+                    && Reflect.Field<NClickableControl>(gui, "_skipButton") is { IsEnabled: true },
             bundles = bundles.Select((b, i) => new
             {
                 idx = i,
@@ -318,31 +337,44 @@ public static class Snapshotter
         // `cost` stays the gold amount for wire compatibility; `price`
         // names it explicitly. Cards add playCost/starCost so their combat
         // economy is visible before purchase without changing old clients.
-        object CardEntry(MegaCrit.Sts2.Core.Entities.Merchant.MerchantCardEntry e, int i) => new
+        object CardEntry(MegaCrit.Sts2.Core.Entities.Merchant.MerchantCardEntry e, int i)
         {
-            idx = i,
-            model = e.CreationResult?.Card?.Id.Entry,
-            title = e.CreationResult?.Card?.Title,
-            description = e.CreationResult?.Card is { } c ? CardDescription(c) : null,
-            cost = e.Cost,
-            price = e.Cost,
-            playCost = e.CreationResult?.Card?.EnergyCost.Canonical,
-            starCost = e.CreationResult?.Card is { } c2 ? StarCost(c2) : null,
-            stocked = e.IsStocked,
-            affordable = e.EnoughGold,
-        };
+            var card = e.CreationResult?.Card;
+            var showText = card is not null && ShouldShowCardText(card);
+            return new
+            {
+                idx = i,
+                model = card?.Id.Entry,
+                title = card?.Title,
+                textKey = card is null ? null : CardTextKey(card),
+                description = showText ? CardDescription(card!) : null,
+                cost = e.Cost,
+                price = e.Cost,
+                playCost = card?.EnergyCost.Canonical,
+                starCost = card is null ? null : StarCost(card),
+                stocked = e.IsStocked,
+                affordable = e.EnoughGold,
+                purchasable = e.IsStocked && e.EnoughGold,
+            };
+        }
         // Model goes null once the entry is purchased — like CardEntry,
         // render the sold-out tile instead of throwing.
-        object StockEntry(string? model, LocString? title, MegaCrit.Sts2.Core.Entities.Merchant.MerchantEntry e, int i) => new
+        object StockEntry(string? model, LocString? title, MegaCrit.Sts2.Core.Entities.Merchant.MerchantEntry e, int i)
         {
-            idx = i,
-            model,
-            title = SafeText(title),
-            cost = e.Cost,
-            price = e.Cost,
-            stocked = e.IsStocked,
-            affordable = e.EnoughGold,
-        };
+            var potionHasRoom = e is not MegaCrit.Sts2.Core.Entities.Merchant.MerchantPotionEntry
+                || player?.HasOpenPotionSlots == true;
+            return new
+            {
+                idx = i,
+                model,
+                title = SafeText(title),
+                cost = e.Cost,
+                price = e.Cost,
+                stocked = e.IsStocked,
+                affordable = e.EnoughGold,
+                purchasable = e.IsStocked && e.EnoughGold && potionHasRoom,
+            };
+        }
         return new
         {
             phase,
@@ -361,6 +393,7 @@ public static class Snapshotter
                     price = cr.Cost,
                     used = cr.Used,
                     affordable = cr.EnoughGold,
+                    purchasable = !cr.Used && cr.EnoughGold,
                 }
                 : null,
         };
@@ -374,6 +407,8 @@ public static class Snapshotter
         {
             phase,
             player = FooterView(),
+            proceedAvailable = RunMode.IsHeadless
+                || NRestSiteRoom.Instance?.ProceedButton is { Visible: true },
             options = options.Select((o, i) => new
             {
                 idx = i,
@@ -422,6 +457,8 @@ public static class Snapshotter
             phase,
             // Headless has no chest-flag node; offered relics == open chest.
             chestOpened = opened || relics is { Count: > 0 },
+            proceedAvailable = RunMode.IsHeadless
+                || NRun.Instance?.TreasureRoom?.ProceedButton is { Visible: true },
             player = FooterView(),
             relics = (relics ?? []).Select(RelicView).ToArray(),
         };
@@ -540,23 +577,51 @@ public static class Snapshotter
         catch { return SafeText(card.Description); }
     }
 
+    // A caller-cache key for exactly the prose-bearing card variant. Card
+    // model alone is insufficient: upgrades, enchantments, and afflictions
+    // all change the rendered rules text while leaving Id.Entry unchanged.
+    private static string CardTextKey(CardModel card) => DecisionProjection.CardTextKey(
+        card.Id.Entry,
+        card.CurrentUpgradeLevel,
+        card.Enchantment?.Id.Entry,
+        card.Affliction?.Id.Entry);
+
+    private static bool ShouldShowCardText(CardModel card, bool compactElides = false)
+    {
+        if (!_decision) return !compactElides || !_compact;
+        var key = CardTextKey(card);
+        return !_knownCardTexts.Contains(key) && _emittedCardTexts.Add(key);
+    }
+
+    private static bool CanPlayCard(CardModel card)
+    {
+        try { return card.CanPlay(out _, out _); }
+        catch { return false; }
+    }
+
     // Shared per-card views — both boots build their snapshots through
     // these, so the shapes can't drift between modes (tests/parity.py
     // compares the key sets).
-    private static object RewardCardView(CardModel c, int i) => new
+    private static object RewardCardView(CardModel c, int i)
     {
-        idx = i,
-        model = c.Id.Entry,
-        title = c.Title,
-        cost = c.EnergyCost.Canonical,
-        starCost = StarCost(c),
-        type = c.Type.ToString().ToLowerInvariant(),
-        rarity = c.Rarity.ToString().ToLowerInvariant(),
-        description = CardDescription(c),
-    };
+        var showText = ShouldShowCardText(c);
+        return new
+        {
+            idx = i,
+            model = c.Id.Entry,
+            title = c.Title,
+            cost = c.EnergyCost.Canonical,
+            starCost = StarCost(c),
+            type = c.Type.ToString().ToLowerInvariant(),
+            rarity = c.Rarity.ToString().ToLowerInvariant(),
+            textKey = CardTextKey(c),
+            description = showText ? CardDescription(c) : null,
+        };
+    }
 
     private static object SelectCardView(CardModel c, int i, bool selected)
     {
+        var showText = ShouldShowCardText(c);
         var preview = UpgradePreview(c);
         return new
         {
@@ -566,11 +631,14 @@ public static class Snapshotter
             cost = c.EnergyCost.Canonical,
             starCost = StarCost(c),
             upgraded = c.IsUpgraded,
+            enchant = c.Enchantment?.Id.Entry,
+            affliction = c.Affliction?.Id.Entry,
             selected,
-            description = CardDescription(c),
-            // Preserve upgradedPreview's string/null wire type; the added
-            // fields expose cost-only upgrades without nesting the string.
-            upgradedPreview = preview?.description,
+            textKey = CardTextKey(c),
+            description = showText ? CardDescription(c) : null,
+            // Preserve upgradedPreview's string/null wire type; numeric
+            // upgrade economics do not need to be hidden with cached prose.
+            upgradedPreview = showText ? preview?.description : null,
             upgradedPlayCost = preview?.playCost,
             upgradedStarCost = preview?.starCost,
         };
@@ -607,18 +675,24 @@ public static class Snapshotter
         catch { return null; }
     }
 
-    private static object HandCardView(CardModel? c, int i) => c is null
-        ? new { idx = i }
-        : (object)new
+    private static object HandCardView(CardModel? card, int i)
+    {
+        var showText = card is not null
+            && ShouldShowCardText(card, compactElides: true);
+        return new
         {
             idx = i,
-            model = c.Id.Entry,
-            cost = c.EnergyCost.GetAmountToSpend(),
-            starCost = StarCost(c),
-            upgraded = c.IsUpgraded,
-            description = _compact ? null : CardText(c, PileType.Hand),
-            vars = CardVars(c),
+            model = card?.Id.Entry,
+            cost = card?.EnergyCost.GetAmountToSpend(),
+            starCost = card is null ? null : StarCost(card),
+            upgraded = card?.IsUpgraded ?? false,
+            enchant = card?.Enchantment?.Id.Entry,
+            affliction = card?.Affliction?.Id.Entry,
+            textKey = card is null ? null : CardTextKey(card),
+            description = showText ? CardText(card!, PileType.Hand) : null,
+            vars = card is null ? null : CardVars(card),
         };
+    }
 
     private static object MapSnapshot(string phase)
     {
@@ -889,6 +963,7 @@ public static class Snapshotter
             phase,
             turn = state.RoundNumber,
             side = state.CurrentSide.ToString().ToLowerInvariant(),
+            actionsDisabled = combat.PlayerActionsDisabled,
             you = new
             {
                 hp = new[] { creature.CurrentHp, creature.MaxHp },
@@ -918,6 +993,7 @@ public static class Snapshotter
                     // Compact keeps the numbers (vars) and drops the prose —
                     // the refresh still runs so vars carry modified values.
                     if (_compact) RefreshCardPreview(c);
+                    var showText = ShouldShowCardText(c, compactElides: true);
                     return (object)new
                     {
                         model = c.Id.Entry,
@@ -925,8 +1001,12 @@ public static class Snapshotter
                         starCost = StarCost(c),
                         target = c.TargetType.ToString().ToLowerInvariant(),
                         upgraded = c.IsUpgraded,
+                        enchant = c.Enchantment?.Id.Entry,
+                        affliction = c.Affliction?.Id.Entry,
                         unplayable = c.Keywords.Contains(CardKeyword.Unplayable),
-                        description = _compact ? null : CardText(c, PileType.Hand),
+                        playable = CanPlayCard(c),
+                        textKey = CardTextKey(c),
+                        description = showText ? CardText(c, PileType.Hand) : null,
                         vars = CardVars(c),
                     };
                 })
@@ -1032,6 +1112,7 @@ public static class Snapshotter
                 prompt = "",
                 min = HeadlessPicker.MinSelect,
                 max = HeadlessPicker.MaxSelect,
+                confirmable = picked.Count >= HeadlessPicker.MinSelect,
                 selected = picked.Select(c => c.Id.Entry).ToArray(),
                 cards = HeadlessPicker.Candidates
                     .Select((c, i) => HandCardView(c, i)).ToArray(),
@@ -1044,6 +1125,7 @@ public static class Snapshotter
             min = HeadlessPicker.MinSelect,
             max = HeadlessPicker.MaxSelect,
             cancelable = true,
+            confirmable = picked.Count >= HeadlessPicker.MinSelect,
             cards = HeadlessPicker.Candidates
                 .Select((c, i) => SelectCardView(c, i, picked.Contains(c))).ToArray(),
         };
@@ -1068,6 +1150,7 @@ public static class Snapshotter
                 min = 1,
                 max = 1,
                 cancelable = Screens.ChooseSkipEnabled(choose),
+                confirmable = false,
                 cards = chooseHolders.Select((h, i) => SelectCardView(h.CardModel, i, false)).ToArray(),
             };
         }
@@ -1079,6 +1162,15 @@ public static class Snapshotter
 
         var prefs = Screens.Prefs(screen);
         var selected = Screens.SelectedCards(screen).ToHashSet();
+        var selectedCount = selected.Count;
+        var confirmable = screen switch
+        {
+            NSimpleCardSelectScreen or NCombatPileCardSelectScreen =>
+                Reflect.Field<NClickableControl>(screen, "_confirmButton") is { IsEnabled: true },
+            NDeckTransformSelectScreen => selectedCount >= prefs.MinSelect,
+            NDeckCardSelectScreen => selectedCount >= prefs.MinSelect,
+            _ => selectedCount >= prefs.MaxSelect,
+        };
         return new
         {
             phase,
@@ -1087,6 +1179,7 @@ public static class Snapshotter
             min = prefs.MinSelect,
             max = prefs.MaxSelect,
             cancelable = prefs.Cancelable,
+            confirmable,
             cards = cards.Select((c, i) => SelectCardView(c, i, selected.Contains(c))).ToArray(),
         };
     }
@@ -1103,6 +1196,8 @@ public static class Snapshotter
 
         var prefs = Screens.Prefs(hand);
         var selected = Screens.SelectedCards(hand);
+        var confirmable = Reflect.Field<NClickableControl>(
+            hand, "_selectModeConfirmButton") is { IsEnabled: true };
         return new
         {
             phase,
@@ -1110,6 +1205,7 @@ public static class Snapshotter
             prompt = SafeText(prefs.Prompt),
             min = prefs.MinSelect,
             max = prefs.MaxSelect,
+            confirmable,
             selected = selected.Select(c => c.Id.Entry).ToArray(),
             cards = hand.ActiveHolders.Select((h, i) =>
                 HandCardView(h.CardNode?.Model, i))
