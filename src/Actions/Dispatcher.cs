@@ -1121,6 +1121,48 @@ public static class Dispatcher
 
     // ---- treasure / relic reward ------------------------------------------
 
+    // DoNormalRewards grants gold as well as creating the relic offer, so
+    // guard it by room identity. Observation is deliberately read-only;
+    // the first headless pick-relic/skip opens the chest and asks the agent
+    // to rescry before making the actual selection.
+    private static TreasureRoom? _openedHeadlessTreasure;
+    private static TreasureRoom? _normalRewardsGrantedFor;
+
+    private static DispatchResult? OpenHeadlessTreasureIfNeeded(
+        TreasureRoomRelicSynchronizer sync)
+    {
+        if (!RunMode.IsHeadless) return null;
+        if (RunManager.Instance?.DebugOnlyGetState()?.CurrentRoom is not TreasureRoom room)
+            return DispatchResult.Reject(
+                RejectionCodes.NotReady, "treasure room not available");
+        if (ReferenceEquals(_openedHeadlessTreasure, room))
+            return sync.CurrentRelics is { Count: > 0 }
+                ? null
+                : DispatchResult.Reject(
+                    RejectionCodes.BadState, "no relic offer available");
+
+        try
+        {
+            if (sync.CurrentRelics is not { Count: > 0 })
+                HeadlessTreasure.Open(sync.BeginRelicPicking);
+            if (!ReferenceEquals(_normalRewardsGrantedFor, room))
+            {
+                room.DoNormalRewards().GetAwaiter().GetResult();
+                _normalRewardsGrantedFor = room;
+            }
+            room.DoExtraRewardsIfNeeded().GetAwaiter().GetResult();
+            _openedHeadlessTreasure = room;
+            return DispatchResult.Success("chest opened — rescry, then pick-relic / skip");
+        }
+        catch (Exception ex)
+        {
+            SafeLog.Error("headless treasure open", ex);
+            return DispatchResult.Reject(
+                RejectionCodes.Internal,
+                $"chest open failed: {ex.GetType().Name}: {ex.Message}", 500);
+        }
+    }
+
     private static DispatchResult PickRelic(JsonElement args)
     {
         if (!TryGetInt(args, "idx", out var idx))
@@ -1133,9 +1175,11 @@ public static class Dispatcher
                     var sync = RunManager.Instance?.TreasureRoomRelicSynchronizer;
                     if (sync is null || (room is null && !RunMode.IsHeadless))
                         return DispatchResult.Reject(RejectionCodes.NotReady, "treasure room not mounted");
+                    if (OpenHeadlessTreasureIfNeeded(sync) is { } headlessOpen)
+                        return headlessOpen;
                     // The chest must be opened before picking or the room
-                    // never wires its exit. (Headless: the treasure snapshot
-                    // opens the chest through the room model instead.)
+                    // never wires its exit. Headless opens through the room
+                    // model above because it has no chest button.
                     if (room is not null && !Screens.ChestOpened(room))
                     {
                         var chest = Reflect.Field<NButton>(room, "_chestButton");
@@ -1466,9 +1510,14 @@ public static class Dispatcher
 
             case Phase.Treasure:
                 var sync = RunManager.Instance?.TreasureRoomRelicSynchronizer;
-                if (sync is null || sync.CurrentRelics is not { Count: > 0 })
-                    return DispatchResult.Reject(RejectionCodes.BadState,
-                        "no relic offer to skip");
+                if (sync is null)
+                    return DispatchResult.Reject(
+                        RejectionCodes.NotReady, "treasure room not mounted");
+                if (OpenHeadlessTreasureIfNeeded(sync) is { } headlessOpen)
+                    return headlessOpen;
+                if (sync.CurrentRelics is not { Count: > 0 })
+                    return DispatchResult.Reject(
+                        RejectionCodes.BadState, "no relic offer to skip");
                 sync.SkipRelicLocally();
                 return DispatchResult.Success();
 

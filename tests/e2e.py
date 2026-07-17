@@ -719,8 +719,10 @@ def w1():
     relics0 = len(obs()["player"]["relics"])
     run("cheat", "goto", str(tre["col"]), str(tre["row"]))
     d = bridge.wait_phase("treasure")
-    assert d.get("relics"), "treasure offered no relics"
-    run("skip")
+    assert d.get("chestOpened") is False and not d.get("relics"), d
+    run("skip")  # opens the chest; observation stays read-only
+    assert obs().get("relics"), "opened treasure offered no relics"
+    run("skip")  # declines the visible offer
     time.sleep(1)
     assert len(obs()["player"]["relics"]) == relics0, "skip still granted a relic"
     to_menu()
@@ -748,6 +750,31 @@ def w2():
     run("skip", str(alternatives[-1]["idx"]))
     bridge.wait_phase("rewards", "map")
     assert len(obs()["player"]["deck"]) == deck0, "alternative skip added a card"
+    to_menu()
+
+
+@case("W3 treasure observation is read-only until a verb opens the chest")
+def w3():
+    to_map(seed="CITREASUREOBS")
+    tre = next((p for p in obs()["graph"] if p["type"] == "treasure"), None)
+    assert tre, "seed CITREASUREOBS grew no treasure — re-pin the seed"
+    run("cheat", "goto", str(tre["col"]), str(tre["row"]))
+
+    first = bridge.wait_phase("treasure")
+    second = obs()
+    assert first["chestOpened"] is False and second["chestOpened"] is False
+    assert first["relics"] == [] and second["relics"] == []
+    assert first["player"]["gold"] == second["player"]["gold"], \
+        "observing the closed chest changed gold"
+
+    relics0 = len(first["player"]["relics"])
+    run("pick-relic", "0")  # first verb opens the headless chest
+    opened = obs()
+    assert opened["chestOpened"] is True and opened["relics"], opened
+    run("pick-relic", "0")  # second selects from the now-visible offer
+    assert len(obs()["player"]["relics"]) == relics0 + 1
+    run("proceed")
+    bridge.wait_phase("map")
     to_menu()
 
 

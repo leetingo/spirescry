@@ -13,6 +13,7 @@ using System.Reflection;
 using HarmonyLib;
 using MegaCrit.Sts2.Core.Modding;
 using MegaCrit.Sts2.Core.Models;
+using MegaCrit.Sts2.Core.Multiplayer.Game;
 using MegaCrit.Sts2.Core.Saves;
 using MegaCrit.Sts2.Core.TestSupport;
 using Spirescry.Bridge;
@@ -203,6 +204,7 @@ internal static class HeadlessBoot
         // that hangs on the first combat action is worse than not starting.
         PatchCmdWait();
         VerifyQueueWaitIlPatch();
+        PatchTreasureChestGate();
 
         // Cosmetic — a missing one loses a label or a particle, not liveness.
         try
@@ -260,6 +262,20 @@ internal static class HeadlessBoot
     }
 
     private static bool SkipReattachFadeOutVoid() => false;
+
+    private static void PatchTreasureChestGate()
+    {
+        var method = typeof(TreasureRoomRelicSynchronizer).GetMethod(
+            nameof(TreasureRoomRelicSynchronizer.BeginRelicPicking),
+            BindingFlags.Public | BindingFlags.Instance)
+            ?? throw new InvalidOperationException(
+                "TreasureRoomRelicSynchronizer.BeginRelicPicking not found");
+        _harmony!.Patch(method, prefix: Local(nameof(BeginRelicPickingPrefix)));
+        HostLog.Info("gated treasure relic offers behind an explicit verb");
+    }
+
+    private static bool BeginRelicPickingPrefix() =>
+        HeadlessTreasure.CanBeginRelicPicking;
 
     // Custom reward offers (event trades like THE_FUTURE_OF_POTIONS) run
     // RewardsCmd.OfferCustom → RewardsSet.Offer, which shows the GUI

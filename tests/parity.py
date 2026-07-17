@@ -265,6 +265,9 @@ def drive(seed=None):
         run("cheat", "goto", str(tre["col"]), str(tre["row"]))
         wait_phase("treasure")
         d = obs()
+        if not d["chestOpened"]:
+            run("pick-relic", "0")
+            d = obs()
         print("    relics:", [r["model"] for r in d["relics"]])
         if d["relics"]:
             run("pick-relic", "0")
