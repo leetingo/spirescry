@@ -698,39 +698,26 @@ public static class Snapshotter
         // event began. Never call it while observing: several events roll
         // RNG or advance counters there, so a read would change both the
         // advertised choice and the effect that the click later executes.
-        // The GUI's event nodes copy the event's DynamicVars into each
-        // text's LocString before rendering; headless has no nodes, so do
-        // it here or var-bearing descriptions ({SoloGold}, …) fail to
-        // format and degrade to raw text.
-        try
-        {
-            if (ev.Description is { } pageDesc)
-            {
-                owner?.Character.AddDetailsTo(pageDesc);
-                pageDesc.Add("IsMultiplayer", owner is not null && owner.RunState.Players.Count > 1);
-                ev.DynamicVars.AddTo(pageDesc);
-            }
-            foreach (var o in ev.CurrentOptions ?? [])
-            {
-                if (o?.Title is { } t) ev.DynamicVars.AddTo(t);
-                if (o?.Description is { } d) ev.DynamicVars.AddTo(d);
-            }
-        }
-        catch { }
         return new
         {
             phase,
             id = ev.Id.Entry,
             player = FooterView(),
             title = SafeText(ev.Title),
-            description = SafeText(ev.Description),
+            description = SafeText(ev.Description, local =>
+            {
+                owner?.Character.AddDetailsTo(local);
+                local.Add("IsMultiplayer",
+                    owner is not null && owner.RunState.Players.Count > 1);
+                ev.DynamicVars.AddTo(local);
+            }),
             finished = ev.IsFinished,
             fakeMerchant = ev is FakeMerchant fake ? FakeMerchantView(fake) : null,
             options = (ev.CurrentOptions ?? []).Select((o, i) => new
             {
                 idx = i,
-                title = SafeText(o.Title),
-                description = SafeText(o.Description),
+                title = SafeText(o.Title, ev.DynamicVars.AddTo),
+                description = SafeText(o.Description, ev.DynamicVars.AddTo),
                 locked = o.IsLocked,
                 chosen = o.WasChosen,
                 proceed = o.IsProceed,
@@ -768,6 +755,9 @@ public static class Snapshotter
                     description = entry.Model is { } described
                         ? SafeText(described.DynamicDescription)
                         : null,
+                    price = entry.Cost,
+                    // Keep `cost` as an alias for clients that already
+                    // consume the ordinary shop's legacy gold-price field.
                     cost = entry.Cost,
                     stocked = entry.IsStocked,
                     affordable = entry.EnoughGold,
@@ -779,20 +769,11 @@ public static class Snapshotter
     {
         if (option.WillKillPlayer is null) return null;
         if (owner is null) return null;
-        try { return option.WillKillPlayer(owner); }
-        catch { return null; }
+        return option.WillKillPlayer(owner);
     }
 
-    private static object[] EventHints(EventOption option)
-    {
-        try
-        {
-            return (option.HoverTips ?? [])
-                .Select(EventHintView)
-                .ToArray();
-        }
-        catch { return []; }
-    }
+    private static object[] EventHints(EventOption option) =>
+        (option.HoverTips ?? []).Select(EventHintView).ToArray();
 
     private static object EventHintView(IHoverTip hint)
     {
@@ -801,7 +782,7 @@ public static class Snapshotter
             {
                 kind = "card",
                 model = card.Card.Id.Entry,
-                title = card.Card.Title,
+                title = RichText.NormalizeIcons(card.Card.Title ?? ""),
                 description = CardDescription(card.Card),
                 upgraded = card.Card.IsUpgraded,
             };
@@ -860,7 +841,7 @@ public static class Snapshotter
 
     // Missing locale keys throw from GetFormattedText (Neow-style events
     // store their body elsewhere) — fall back to the raw entry key.
-    private static string SafeText(LocString? s)
+    private static string SafeText(LocString? s, Action<LocString>? addVariables = null)
     {
         if (s is null) return "";
         try
@@ -871,6 +852,7 @@ public static class Snapshotter
             // before supplying card-pipeline defaults for power/potion text.
             var local = new LocString(s.LocTable, s.LocEntryKey);
             local.AddVariablesFrom(s);
+            addVariables?.Invoke(local);
             if (!local.Variables.ContainsKey("energyPrefix"))
                 local.AddObj("energyPrefix", "");
             if (!local.Variables.ContainsKey("singleStarIcon"))

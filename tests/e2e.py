@@ -851,6 +851,7 @@ def i2():
         hints = option.get("hints")
         assert hints and any(h.get("description") for h in hints), option
         assert any(h.get("model") for h in hints), option
+        assert all(isinstance(h.get("title"), str) for h in hints), hints
     to_menu()
 
 
@@ -886,6 +887,7 @@ def i5():
     assert shop and len(shop["relics"]) == 6, d
     first = shop["relics"][0]
     assert first["model"] and first["description"] and first["stocked"], first
+    assert first["price"] == first["cost"] and first["price"] > 0, first
     before_gold = d["player"]["gold"]
     run("buy", "relic", "--idx", "0")
     for _ in range(20):

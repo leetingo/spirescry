@@ -4,10 +4,11 @@ Audited 2026-07-12 against the GUI behavior in `sts2.dll`, the bridge
 snapshot/dispatcher implementation, and 132 live full-`obs` captures covering
 all 57 forceable events and every reachable special phase.
 
-Capture provenance and the machine-readable files are in
-`/Users/tingo/work/spirescry-captures/`. The audit intentionally distinguishes
-information shown by the GUI from engine-internal information that neither a
-human nor an agent should receive.
+The raw captures were intentionally kept outside the repository because they
+are local diagnostic artifacts. Reproducible claims from them are encoded in
+the `I1`–`I5` public E2E cases. The audit distinguishes information shown by
+the GUI from engine-internal information that neither a human nor an agent
+should receive.
 
 ## Fixed in this branch
 
@@ -60,17 +61,16 @@ Ordered by expected decision impact:
    rarity, and footprint wherever a cell has been uncovered. JSON currently
    reports only `hasItem`; it should expose type/rarity/origin/size for an item
    only after at least one of its cells is visible.
-3. **Live relic state.** The GUI shows `DisplayAmount`, status/disabled state,
-   wax/melted state, and descriptions. Footer snapshots still expose relic ids
-   only; combat has no relic inventory at all.
-4. **Map decision metadata.** The graph omits edges, quest markers, ancient
-   identity, and traveled-node history that the GUI displays.
-5. **Combat run context and special resources.** Combat omits the master deck,
-   gold, act/floor/ascension, pets, and orb queue. These should be added only
-   where the GUI exposes them and without leaking draw order.
-6. **Picker intent.** Headless card selectors expose an empty prompt, so the
+3. **Map decision metadata beyond routing.** Graph edges are exposed, but quest
+   markers, ancient identity, and traveled-node history shown by the GUI are
+   still absent.
+4. **Combat run context and special resources.** Combat now exposes relic
+   counters and the orb queue, but still omits the master deck, gold,
+   act/floor/ascension, and pets. These should be added only where the GUI
+   exposes them and without leaking draw order.
+5. **Picker intent.** Headless card selectors expose an empty prompt, so the
    agent must infer upgrade/remove/transform/discard from the preceding action.
-7. **Degradation markers.** Text, powers, intents, card vars, reflection-backed
+6. **Degradation markers.** Text, powers, intents, card vars, reflection-backed
    collections, and the 64-entry signal log can silently degrade to plausible
    empty/null values. Responses should identify degraded/truncated fields.
 
