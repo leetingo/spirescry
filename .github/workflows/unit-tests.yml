@@ -30,3 +30,6 @@ jobs:
 
       - name: Run CLI unit tests
         run: cargo test --manifest-path cli/Cargo.toml
+
+      - name: Run build stop tests
+        run: tests/build_stop_test.sh
