@@ -467,6 +467,22 @@ def p11():
     to_menu()
 
 
+@case("P12 asynchronous verb faults wake observation waiters")
+def p12():
+    to_menu()
+    accepted = run("cheat", "async-fault")
+    t0 = time.monotonic()
+    changed = run("obs", "--since", str(accepted["rev"]), "--wait", "2000")
+    took = time.monotonic() - t0
+    fault_events = [
+        event for event in changed.get("events", [])
+        if event["type"].startswith("async_fault:forced-async-fault:")
+    ]
+    assert changed.get("changed") is True, changed
+    assert fault_events, changed.get("events")
+    assert took < 1.5, f"fault event did not wake parked obs ({took:.2f}s)"
+
+
 # ---------- R: run lifecycle ----------
 
 @case("R1 same seed, same world")

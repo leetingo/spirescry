@@ -71,6 +71,7 @@ public static class Dispatcher
     {
         "goto", "gold", "heal", "hp", "wound-enemies", "event", "combat",
         "card", "card-upgraded", "relic", "potion", "stars", "energy",
+        "async-fault",
     };
 
     public static DispatchResult Dispatch(string action, JsonElement args) => action switch
@@ -115,9 +116,22 @@ public static class Dispatcher
             "potion" => CheatPotion(args),
             "stars" => SetCombatResource("Stars", args),
             "energy" => SetCombatResource("Energy", args),
+            "async-fault" => CheatAsyncFault(),
             var n => DispatchResult.Reject(RejectionCodes.BadRequest,
                 $"unknown cheat '{n}' (supported: {string.Join(", ", Cheats)})"),
         };
+    }
+
+    private static DispatchResult CheatAsyncFault()
+    {
+        Fire(ForcedAsyncFault(), "forced-async-fault");
+        return DispatchResult.Success();
+    }
+
+    private static async Task ForcedAsyncFault()
+    {
+        await Task.Delay(250).ConfigureAwait(false);
+        throw new InvalidOperationException("forced asynchronous failure");
     }
 
     // Force-enter any combat encounter by model id — the combat analog of

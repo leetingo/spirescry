@@ -55,12 +55,22 @@ public static class Signals
     public static void TrackAsync(Task task, string label)
     {
         lock (Gate) PendingAsync.Add(task);
-        _ = task.ContinueWith(_ =>
+        _ = task.ContinueWith(completed =>
         {
             lock (Gate) PendingAsync.Remove(task);
-            Bump($"async:{label}");
+            Bump(AsyncCompletionEvent(completed, label));
         }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously,
             TaskScheduler.Default);
+    }
+
+    private static string AsyncCompletionEvent(Task task, string label)
+    {
+        if (task.Exception is not { } aggregate) return $"async:{label}";
+        var cause = aggregate.Flatten().InnerExceptions.FirstOrDefault() ?? aggregate;
+        var message = string.Join(' ', cause.Message.Split(
+            (char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+        if (message.Length > 160) message = message[..160];
+        return $"async_fault:{label}:{cause.GetType().Name}:{message}";
     }
 
     // Call from a main-thread pump job immediately before reading state or
