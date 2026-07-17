@@ -270,18 +270,19 @@ public static class Snapshotter
         if (rs is null || inv is null) return new { phase, available = false };
         var player = LocalContext.GetMe(rs);
 
-        // price is gold; cost/starCost are what the card costs to play —
-        // the old single "cost" field hid a card's energy cost until after
-        // purchase.
+        // `cost` stays the gold amount for wire compatibility; `price`
+        // names it explicitly. Cards add playCost/starCost so their combat
+        // economy is visible before purchase without changing old clients.
         object CardEntry(MegaCrit.Sts2.Core.Entities.Merchant.MerchantCardEntry e, int i) => new
         {
             idx = i,
             model = e.CreationResult?.Card?.Id.Entry,
             title = e.CreationResult?.Card?.Title,
             description = e.CreationResult?.Card is { } c ? CardDescription(c) : null,
-            cost = e.CreationResult?.Card?.EnergyCost.Canonical,
-            starCost = e.CreationResult?.Card is { } c2 ? StarCost(c2) : null,
+            cost = e.Cost,
             price = e.Cost,
+            playCost = e.CreationResult?.Card?.EnergyCost.Canonical,
+            starCost = e.CreationResult?.Card is { } c2 ? StarCost(c2) : null,
             stocked = e.IsStocked,
             affordable = e.EnoughGold,
         };
@@ -292,6 +293,7 @@ public static class Snapshotter
             idx = i,
             model,
             title = SafeText(title),
+            cost = e.Cost,
             price = e.Cost,
             stocked = e.IsStocked,
             affordable = e.EnoughGold,
@@ -308,7 +310,13 @@ public static class Snapshotter
             potions = inv.PotionEntries
                 .Select((e, i) => StockEntry(e.Model?.Id.Entry, e.Model?.Title, e, i)).ToArray(),
             cardRemoval = inv.CardRemovalEntry is { } cr
-                ? new { price = cr.Cost, used = cr.Used, affordable = cr.EnoughGold }
+                ? new
+                {
+                    cost = cr.Cost,
+                    price = cr.Cost,
+                    used = cr.Used,
+                    affordable = cr.EnoughGold,
+                }
                 : null,
         };
     }
@@ -502,18 +510,26 @@ public static class Snapshotter
         description = CardDescription(c),
     };
 
-    private static object SelectCardView(CardModel c, int i, bool selected) => new
+    private static object SelectCardView(CardModel c, int i, bool selected)
     {
-        idx = i,
-        model = c.Id.Entry,
-        title = c.Title,
-        cost = c.EnergyCost.Canonical,
-        starCost = StarCost(c),
-        upgraded = c.IsUpgraded,
-        selected,
-        description = CardDescription(c),
-        upgradedPreview = UpgradePreview(c),
-    };
+        var preview = UpgradePreview(c);
+        return new
+        {
+            idx = i,
+            model = c.Id.Entry,
+            title = c.Title,
+            cost = c.EnergyCost.Canonical,
+            starCost = StarCost(c),
+            upgraded = c.IsUpgraded,
+            selected,
+            description = CardDescription(c),
+            // Preserve upgradedPreview's string/null wire type; the added
+            // fields expose cost-only upgrades without nesting the string.
+            upgradedPreview = preview?.description,
+            upgradedPlayCost = preview?.playCost,
+            upgradedStarCost = preview?.starCost,
+        };
+    }
 
     // -1 = the card has no star cost (the second combat currency);
     // surface null so energy-only cards stay clean. X-star cards report
@@ -533,7 +549,7 @@ public static class Snapshotter
     // mutate a card's dynamic vars in place, so the upgraded numbers only
     // exist on an upgraded instance: build a throwaway twin from the
     // canonical model and replay the upgrades one level past the card.
-    private static object? UpgradePreview(CardModel c)
+    private static (string description, int playCost, int? starCost)? UpgradePreview(CardModel c)
     {
         if (!c.IsUpgradable) return null;
         try
@@ -541,14 +557,7 @@ public static class Snapshotter
             var twin = ModelDb.GetById<CardModel>(c.Id).ToMutable();
             for (var lvl = 0; lvl <= c.CurrentUpgradeLevel; lvl++)
                 twin.UpgradeInternal();
-            // Cost changes are upgrades too (WILD+ 2->1 renders identical
-            // text) — surface the twin's costs beside its description.
-            return new
-            {
-                cost = twin.EnergyCost.Canonical,
-                starCost = StarCost(twin),
-                description = CardDescription(twin),
-            };
+            return (CardDescription(twin), twin.EnergyCost.Canonical, StarCost(twin));
         }
         catch { return null; }
     }

@@ -59,6 +59,11 @@ Phases: `main_menu`, `map`, `combat`, `event`, `shop`, `rest_site`,
 `overlay`/`unknown` for anything unmapped, carrying the overlay's type
 name so a stuck screen is diagnosable from `/obs` alone.
 
+Shop inventory keeps `cost` as its original gold-price field and also
+exposes the clearer `price` alias. Card stock adds `playCost` and `starCost`;
+upgrade candidates keep the string `upgradedPreview` and add
+`upgradedPlayCost` / `upgradedStarCost` beside it.
+
 **`POST /step`** takes `{"action": ..., "args": ...}`. Verbs: `new-run`,
 `abandon`, `option`, `proceed`, `map-move`, `pick-reward`, `pick-card`,
 `pick-relic`, `confirm`, `skip`, `buy`, `leave`, `play`, `end-turn`,

@@ -200,6 +200,11 @@ def drive(seed=None):
     wait_phase("card_select")
     d = obs()
     print(f"    picker: min={d['min']} max={d['max']} cards={len(d['cards'])}")
+    preview = next((c for c in d["cards"] if c["upgradedPreview"] is not None), None)
+    assert preview is not None, "smith picker has no upgradable-card preview"
+    assert isinstance(preview["upgradedPreview"], str), \
+        f"upgradedPreview wire type changed: {preview['upgradedPreview']!r}"
+    assert "upgradedPlayCost" in preview and "upgradedStarCost" in preview, preview
     run("pick-card", "1")
     confirm_if_selecting()
     wait_phase("rest_site")
@@ -214,6 +219,16 @@ def drive(seed=None):
         run("cheat", "gold", "1000")
         run("cheat", "goto", str(shop["col"]), str(shop["row"]))
         wait_phase("shop")
+        inventory = obs()
+        for kind in ("cards", "colorless", "relics", "potions"):
+            for entry in inventory[kind]:
+                assert entry["cost"] == entry["price"], \
+                    f"{kind} legacy cost != gold price: {entry}"
+        for entry in inventory["cards"] + inventory["colorless"]:
+            assert "playCost" in entry and "starCost" in entry, entry
+        removal = inventory.get("cardRemoval")
+        if removal is not None:
+            assert removal["cost"] == removal["price"], removal
         run("buy", "card_removal", "--idx", "0")
         wait_phase("card_select")
         run("pick-card", "0")
