@@ -101,7 +101,7 @@ public static class Handlers
             return r;
         });
         if (!result.Ok)
-            return Response.Error(result.Err!, result.Msg ?? "");
+            return Response.Error(result.Err!, result.Msg ?? "", result.Status);
         // The action is enqueued on the engine's action queue and
         // resolves over the following frames — follow with
         // /obs?since=<rev>&wait=<ms> to wake on the outcome. A success

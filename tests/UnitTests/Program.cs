@@ -145,13 +145,27 @@ internal static class Tests
     public static void MissingQueuePopIsSettledOnlyAfterCombatTeardown()
     {
         var pop = new InvalidOperationException(
-            "Tried to pop action, but we didn't find it in any queue!");
+            "Tried to pop action EndPlayerTurnAction, but we didn't find it in any queue!");
 
-        True(ResolutionGuards.IsVictoryTeardownPop(pop, combatInProgress: false));
-        False(ResolutionGuards.IsVictoryTeardownPop(pop, combatInProgress: true));
-        False(ResolutionGuards.IsVictoryTeardownPop(
+        Equal(InlineFaultKind.VictorySettled, ResolutionGuards.ClassifyInlineFault(
+            pop, "EndPlayerTurnAction", combatInProgress: false, revisionChanged: true));
+        Equal(InlineFaultKind.Partial, ResolutionGuards.ClassifyInlineFault(
+            pop, "EndPlayerTurnAction", combatInProgress: true, revisionChanged: true));
+        Equal(InlineFaultKind.Partial, ResolutionGuards.ClassifyInlineFault(
+            pop, "PlayCardAction", combatInProgress: false, revisionChanged: true));
+        Equal(InlineFaultKind.Failed, ResolutionGuards.ClassifyInlineFault(
             new InvalidOperationException("some other queue failure"),
-            combatInProgress: false));
+            "EndPlayerTurnAction", combatInProgress: false, revisionChanged: false));
+    }
+
+    public static void InlineFaultClassificationDistinguishesPartialFromFailed()
+    {
+        var fault = new MissingMethodException("missing Godot API");
+
+        Equal(InlineFaultKind.Partial, ResolutionGuards.ClassifyInlineFault(
+            fault, "PlayCardAction", combatInProgress: true, revisionChanged: true));
+        Equal(InlineFaultKind.Failed, ResolutionGuards.ClassifyInlineFault(
+            fault, "PlayCardAction", combatInProgress: true, revisionChanged: false));
     }
 
     public static void EndingCombatIsNotADeadBoardWedge()

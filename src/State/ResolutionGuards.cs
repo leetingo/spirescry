@@ -1,14 +1,36 @@
 namespace Spirescry.State;
 
+internal enum InlineFaultKind
+{
+    VictorySettled,
+    Partial,
+    Failed,
+}
+
 // Pure predicates for the two headless resolution fault shapes. Keeping
 // classification independent of engine singletons makes the boundary
 // exhaustive and directly regression-testable.
 internal static class ResolutionGuards
 {
-    public static bool IsVictoryTeardownPop(Exception ex, bool combatInProgress) =>
-        !combatInProgress
-        && ex is InvalidOperationException
-        && ex.Message.Contains("didn't find it in any queue", StringComparison.Ordinal);
+    public static InlineFaultKind ClassifyInlineFault(
+        Exception ex,
+        string actionName,
+        bool combatInProgress,
+        bool revisionChanged)
+    {
+        // Only the observed EndPlayerTurnAction duplicate pop is known to
+        // be idempotent. A different action, or an exception merely using
+        // similar queue wording, still represents unknown corruption.
+        if (!combatInProgress
+            && actionName == "EndPlayerTurnAction"
+            && ex is InvalidOperationException
+            && ex.Message.Contains(
+                "Tried to pop action EndPlayerTurnAction", StringComparison.Ordinal)
+            && ex.Message.Contains("didn't find it in any queue", StringComparison.Ordinal))
+            return InlineFaultKind.VictorySettled;
+
+        return revisionChanged ? InlineFaultKind.Partial : InlineFaultKind.Failed;
+    }
 
     public static bool IsDeadBoardCandidate(
         bool actionRunning,
