@@ -649,8 +649,8 @@ def c4():
     to_menu()
 
 
-@case("C3 facing/back-attack fields track a surround fight")
-def c3():
+@case("C5 facing/back-attack fields track a surround fight")
+def c5():
     to_map(seed="CIC3CRAB", character="DEFECT")
     run("cheat", "combat", "KAISER_CRAB_BOSS")
     d = bridge.wait_phase("combat", timeout=30)
