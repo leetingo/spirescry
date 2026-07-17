@@ -11,18 +11,36 @@ no Steam). Case groups:
      ModelDb registered clean, timestamped lines)
   P  protocol: rev monotonicity, long-poll semantics, route/verb/cheat
      rejections with actionable codes
-  R  run lifecycle: seeded determinism, every character boots to Neow
+  R  run lifecycle: seeded determinism, every character boots + fights,
+     abandon from map and mid-combat (regression: #66)
   C  combat economy: block, energy accounting, bad_target, overdraw
+  S  shop: every buy kind with gold accounting, removal picker, leave
+  W  skip: card reward + treasure walk away without granting
+  X  special screens: crystal-sphere minigame, Neow bundle select
   K  cheat surface: gold / relic / card-upgraded / card graft real state
+  V  victory: cheat-driven full clear to a victory game_over
+  E  events: all 57 forced; every unlocked option clicked and drained
+     to completion (--quick: first option only)
+  M  exhaustive content sweeps (tests/sweeps.py): every encounter
+     fought, every card attempted (playable effects execute; legality
+     rejects stay clean), every potion drunk, every relic obtained
   F  the full act-1 parity loop (tests/parity.py), key sets recorded
   H  request audit trail (STS2_AGENT_HTTP_LOG line format)
 
+  Coverage map — phases: all but relic_reward (no reachable trigger in
+  the current game build; pick-relic is exercised in treasure) and
+  overlay/unknown (fault phases by design). Verbs: all, including every
+  cheat. Content: all cards/potions/relics/encounters/events/characters
+  (per /models). Outcomes: victory and defeat (abandoned rides R3/R4).
+  Combinatorial interactions (card x relic x enemy) remain sampled, not
+  enumerated — parity, V1, and real runs are that layer.
+
   e2e.py --boot           boot a host on STS2_AGENT_PORT (default 7779),
-                         run all cases, tear the host down
+                          run all cases, tear the host down
   e2e.py                  run against an already-listening bridge
-                         (boot-log and audit-trail cases are skipped)
-  e2e.py --sweep          also run eventsweep.py at the end (minutes)
-  e2e.py --only P1,K1     run a subset (case-name prefixes)
+                          (boot-log and audit-trail cases are skipped)
+  e2e.py --quick          skip the M sweeps, E1 clicks first options only
+  e2e.py --only P1,M2     run a subset (case-name prefixes)
   e2e.py --keys-out F     write the parity key sets to F
   e2e.py --log F          host stderr file (with --boot)
 
@@ -60,9 +78,9 @@ ROSTER = []  # collected by P5, consumed by R2
 PARITY_SEED = "SPIRECI1"
 
 
-def case(name, boot_only=False):
+def case(name, boot_only=False, deep=False):
     def deco(fn):
-        CASES.append((name, boot_only, fn))
+        CASES.append((name, boot_only, deep, fn))
         return fn
     return deco
 
@@ -112,14 +130,14 @@ def launch(character="IRONCLAD", seed=None):
     raise AssertionError(f"new-run {character} never reached the Neow event")
 
 
-def to_map(seed=None):
-    launch(seed=seed)
+def to_map(seed=None, character="IRONCLAD"):
+    launch(character=character, seed=seed)
     run("proceed")
     return bridge.wait_phase("map")
 
 
-def into_combat(seed=None):
-    d = to_map(seed=seed)
+def into_combat(seed=None, character="IRONCLAD"):
+    d = to_map(seed=seed, character=character)
     node = next(p for p in d["next"] if p["type"] == "monster")
     run("map-move", str(node["col"]), str(node["row"]))
     d = bridge.wait_phase("combat")
@@ -253,16 +271,35 @@ def r1():
     assert a[2] == b[2], "act-1 graph drifted between identical seeds"
 
 
-@case("R2 every character boots to Neow")
+@case("R2 every character boots and fights")
 def r2():
     assert ROSTER, "P5 did not collect a roster"
     for c in ROSTER:
-        launch(character=c)
+        launch(character=c, seed="CICHAR")
         p = obs().get("player") or {}
         missing = [k for k in ("hp", "gold", "deck", "relics") if k not in p]
         assert not missing, f"{c}: player footer missing {missing}"
-        print(f"    {c}: hp={p['hp']} deck={len(p['deck'])} cards")
-    to_menu()
+        run("proceed")
+        d = bridge.wait_phase("map")
+        node = next(x for x in d["next"] if x["type"] == "monster")
+        run("map-move", str(node["col"]), str(node["row"]))
+        d = bridge.wait_phase("combat")
+        for _ in range(10):
+            if d.get("side") == "player":
+                break
+            time.sleep(1)
+            d = obs()
+        you = d["you"]
+        assert isinstance(you.get("hp"), list) and isinstance(you.get("energy"), list), you
+        assert "stars" in you, f"{c}: combat snapshot lost the stars field"
+        assert d["hand"], f"{c}: empty opening hand"
+        for card in d["hand"]:
+            assert card.get("model") and "cost" in card and "vars" in card, card
+        en = d["enemies"][0]
+        assert en.get("title") and "intents" in en, en
+        print(f"    {c}: hp={you['hp']} energy={you['energy']} "
+              f"stars={you['stars']} hand={len(d['hand'])}")
+        to_menu()  # a mid-combat abandon per character (regression: #66)
 
 
 @case("R3 abandon mid-run returns to the menu")
@@ -342,6 +379,147 @@ def c1():
     to_menu()
 
 
+# ---------- S: shop ----------
+
+@case("S1 shop: every buy kind, gold accounting, leave")
+def s1():
+    d = to_map(seed="CISHOP")
+    shop = next((p for p in d["graph"] if p["type"] == "shop"), None)
+    assert shop, "seed CISHOP grew no shop — re-pin the seed"
+    run("cheat", "gold", "5000")
+    run("cheat", "goto", str(shop["col"]), str(shop["row"]))
+    d = bridge.wait_phase("shop")
+
+    def buy(kind, stock_key):
+        before = obs()
+        stock = before[stock_key]
+        assert stock and stock[0]["stocked"], f"no {kind} in stock: {stock}"
+        cost = stock[0]["cost"]
+        run("buy", kind, "--idx", "0")
+        time.sleep(0.8)
+        after = obs()
+        assert after["gold"] == before["gold"] - cost, \
+            f"{kind}: gold {before['gold']} - {cost} != {after['gold']}"
+        return after
+
+    deck0 = len(obs()["player"]["deck"])
+    buy("card", "cards")
+    buy("colorless", "colorless")
+    assert len(obs()["player"]["deck"]) == deck0 + 2, "bought cards missing from deck"
+
+    relics0 = len(obs()["player"]["relics"])
+    buy("relic", "relics")
+    assert len(obs()["player"]["relics"]) == relics0 + 1, "bought relic missing"
+
+    potions0 = len(obs()["player"]["potions"])
+    buy("potion", "potions")
+    assert len(obs()["player"]["potions"]) == potions0 + 1, "bought potion missing"
+
+    d = obs()
+    assert d["cardRemoval"] and not d["cardRemoval"]["used"], d.get("cardRemoval")
+    run("buy", "card_removal", "--idx", "0")
+    d = bridge.wait_phase("card_select")
+    run("pick-card", "0")
+    time.sleep(1)
+    if obs()["phase"] == "card_select":
+        run("confirm")
+    bridge.wait_phase("shop")
+    assert len(obs()["player"]["deck"]) == deck0 + 1, "removal did not shrink the deck"
+
+    run("leave")
+    bridge.wait_phase("map")
+    to_menu()
+
+
+@case("W1 skip: card reward and treasure walk away clean")
+def w1():
+    d = into_combat(seed="CISKIP")
+    run("cheat", "wound-enemies", ok=True)
+    atk = next(c for c in d["hand"] if c["target"] == "anyenemy")
+    run("play", atk["model"], "--target", str(alive_enemy(d)["id"]))
+    d = bridge.wait_phase("rewards")
+
+    deck0 = len(obs()["player"]["deck"])
+    card_tile = next(t for t in d["rewards"] if t["type"] == "card")
+    run("pick-reward", str(card_tile["idx"]))
+    d = bridge.wait_phase("card_reward")
+    assert d.get("cards"), "card reward offered nothing"
+    run("skip")
+    time.sleep(1)
+    assert len(obs()["player"]["deck"]) == deck0, "skip still added a card"
+    bridge.wait_phase("rewards", "map")
+    if obs()["phase"] == "rewards":
+        run("proceed")
+        bridge.wait_phase("map")
+
+    tre = next((p for p in obs()["graph"] if p["type"] == "treasure"), None)
+    assert tre, "seed CISKIP grew no treasure — re-pin the seed"
+    relics0 = len(obs()["player"]["relics"])
+    run("cheat", "goto", str(tre["col"]), str(tre["row"]))
+    d = bridge.wait_phase("treasure")
+    assert d.get("relics"), "treasure offered no relics"
+    run("skip")
+    time.sleep(1)
+    assert len(obs()["player"]["relics"]) == relics0, "skip still granted a relic"
+    to_menu()
+
+
+# ---------- X: special screens ----------
+
+@case("X1 crystal sphere: dig, tool verb, rewards out")
+def x1():
+    to_map(seed="CICRYS")
+    run("cheat", "event", "CRYSTAL_SPHERE")
+    d = bridge.wait_phase("event")
+    run("option", "0")  # Uncover Future
+    d = bridge.wait_phase("crystal_sphere")
+    assert d["grid"]["width"] > 0 and d["divinationsLeft"] > 0, d["grid"]
+    assert d["cells"], "no cells in the crystal snapshot"
+    before = d.get("tool")
+    assert before, "no tool in the crystal snapshot"
+    run("option", "0" if before == "big" else "1")  # the OTHER tool
+    time.sleep(0.5)
+    d = obs()
+    assert d["tool"] != before, f"tool verb changed nothing (still {d['tool']})"
+    left = d["divinationsLeft"]
+    for _ in range(left + 2):
+        d = obs()
+        if d["phase"] != "crystal_sphere" or d.get("finished"):
+            break
+        hidden = next((c for c in d["cells"] if c["hidden"]), None)
+        assert hidden, "no hidden cells left but the minigame isn't finished"
+        run("map-move", str(hidden["col"]), str(hidden["row"]))
+        time.sleep(0.8)
+    d = bridge.wait_phase("rewards", "map", "event", timeout=15)
+    if d["phase"] == "rewards":
+        run("proceed")
+        bridge.wait_phase("map")
+    to_menu()
+
+
+@case("X2 bundle select: Neow's Scroll Boxes")
+def x2():
+    launch(seed="BX16")
+    d = obs()
+    pack = next((o for o in d.get("options", [])
+                 if "pack" in (o.get("description") or "").lower()), None)
+    assert pack, ("seed BX16 no longer offers Scroll Boxes — re-pin: "
+                  f"{[o.get('title') for o in d.get('options', [])]}")
+    deck0 = len(obs()["player"]["deck"])
+    run("option", str(pack["idx"]))
+    d = bridge.wait_phase("bundle_select")
+    bundles = d.get("bundles")
+    assert bundles and bundles[0]["cards"], f"empty bundle offer: {d}"
+    picked = len(bundles[0]["cards"])
+    run("pick-card", "0")
+    time.sleep(1)
+    d = obs()
+    assert d["phase"] != "bundle_select", "pick-card did not resolve the bundle"
+    assert len(obs()["player"]["deck"]) == deck0 + picked, \
+        f"deck did not grow by the pack ({picked})"
+    to_menu()
+
+
 # ---------- K: cheats ----------
 
 @case("K1 cheat surface grafts real state")
@@ -357,6 +535,125 @@ def k1():
     assert p["deck"].get("STRIKE_IRONCLAD+", 0) >= 1, \
         f"card-upgraded cheat: {p['deck']}"
     assert p["deck"].get("BASH", 0) >= 2, f"card cheat: {p['deck']}"
+    to_menu()
+
+
+# ---------- V: victory ----------
+
+@case("V1 cheat-driven full clear reaches a victory game_over")
+def v1():
+    import parity
+    launch(seed="CIVICT")
+    run("proceed")
+    bridge.wait_phase("map")
+    for _ in range(8):  # acts; the loop exits on game_over
+        d = obs()
+        if d["phase"] != "map":
+            break
+        boss = next(p for p in d["graph"] if p["type"] == "boss")
+        run("cheat", "goto", str(boss["col"]), str(boss["row"]), ok=True)
+        bridge.wait_phase("combat", timeout=30)
+        parity.kill_current_combat()
+        # walk whatever follows — reward tiles, transition events,
+        # pickers — until the next act's map or the victory screen
+        for _ in range(40):
+            d = obs()
+            ph = d["phase"]
+            if ph in ("map", "game_over"):
+                break
+            if ph == "rewards":
+                tiles = d.get("rewards", [])
+                if tiles:
+                    run("pick-reward", str(tiles[0]["idx"]), ok=True)
+                else:
+                    run("proceed", ok=True)
+            elif ph == "relic_reward":
+                run("pick-relic", "0", ok=True)
+            elif ph == "card_reward":
+                run("skip", ok=True)
+            elif ph in ("card_select", "hand_select", "bundle_select"):
+                run("pick-card", "0", ok=True)
+                run("confirm", ok=True)
+            elif ph == "event":
+                opts = [x for x in d.get("options", [])
+                        if not x.get("locked") and not x.get("chosen")]
+                if opts:
+                    run("option", str(opts[0]["idx"]), ok=True)
+                else:
+                    run("proceed", ok=True)
+            elif ph == "combat":
+                parity.kill_current_combat()
+            else:
+                run("proceed", ok=True)
+            time.sleep(0.8)
+        if obs()["phase"] == "game_over":
+            break
+    d = obs()
+    assert d["phase"] == "game_over", f"never reached game_over: {d['phase']}"
+    assert d.get("outcome") == "victory", f"outcome: {d.get('outcome')}"
+    assert d.get("seed") == "CIVICT", d.get("seed")
+    assert d.get("actNumber", 0) >= 3, \
+        f"won suspiciously early: act {d.get('actNumber')}"
+    print(f"    victory at act {d['actNumber']} floor {d['actFloor']}")
+    to_menu()
+
+
+# ---------- E: events ----------
+
+@case("E1 every event responds (every option unless --quick)")
+def e1():
+    import eventsweep
+    bad = eventsweep.sweep(all_options=not ARGS.quick)
+    assert not bad, f"{len(bad)} events misbehaved: {bad}"
+
+
+# ---------- M: exhaustive content sweeps ----------
+
+@case("M1 bestiary: every encounter loads, fights, resolves", deep=True)
+def m1():
+    import sweeps
+    bad = sweeps.encounters()
+    assert not bad, f"{len(bad)} encounters misbehaved: {bad}"
+
+
+@case("M2 every playable card executes; legality rejects cleanly", deep=True)
+def m2():
+    import sweeps
+    bad = sweeps.cards()
+    assert not bad, f"{len(bad)} cards misbehaved: {bad}"
+
+
+@case("M3 every potion procures and drinks", deep=True)
+def m3():
+    import sweeps
+    bad = sweeps.potions()
+    assert not bad, f"{len(bad)} potions misbehaved: {bad}"
+
+
+@case("M4 every legal relic obtain hook lands", deep=True)
+def m4():
+    import sweeps
+    bad = sweeps.relics()
+    assert not bad, f"{len(bad)} relics misbehaved: {bad}"
+
+
+@case("M5 delayed card effects expose their picker")
+def m5():
+    # TOOLS_OF_THE_TRADE asks for a discard at the start of the NEXT
+    # player turn, outside the play verb's HeadlessPicker.Around scope.
+    # The pure host must still expose that automatic choice rather than
+    # falling through to the absent GUI screen.
+    d = into_combat(seed="CIM5", character="SILENT")
+    assert d.get("side") == "player", f"never got player turn: {d.get('side')}"
+    run("cheat", "card", "TOOLS_OF_THE_TRADE")
+    run("cheat", "energy", "99")
+    run("play", "TOOLS_OF_THE_TRADE")
+    run("end-turn")
+    pick = bridge.wait_phase("hand_select", timeout=25)
+    assert pick.get("min") == 1 and pick.get("cards"), pick
+    run("pick-card", str(pick["cards"][0]["idx"]))
+    time.sleep(0.8)
+    assert obs()["phase"] == "combat", obs()["phase"]
     to_menu()
 
 
@@ -417,7 +714,8 @@ def main():
     global LOG_PATH, ARGS
     ap = argparse.ArgumentParser()
     ap.add_argument("--boot", action="store_true")
-    ap.add_argument("--sweep", action="store_true")
+    ap.add_argument("--quick", action="store_true",
+                    help="skip the exhaustive sweeps (M*), first-option E1")
     ap.add_argument("--only", help="comma-separated case-name prefixes")
     ap.add_argument("--keys-out")
     ap.add_argument("--log", default=os.path.join(
@@ -426,8 +724,9 @@ def main():
     ARGS = ap.parse_args()
 
     if ARGS.list:
-        for name, boot_only, _ in CASES:
-            print(name + ("  (--boot only)" if boot_only else ""))
+        for name, boot_only, deep, _ in CASES:
+            print(name + ("  (--boot only)" if boot_only else "")
+                  + ("  (skipped by --quick)" if deep else ""))
         return 0
 
     proc = None
@@ -438,11 +737,14 @@ def main():
     only = [p.strip() for p in ARGS.only.split(",")] if ARGS.only else None
     failures = []
     try:
-        for name, boot_only, fn in CASES:
+        for name, boot_only, deep, fn in CASES:
             if only and not any(name.startswith(p) for p in only):
                 continue
             if boot_only and not ARGS.boot:
                 print(f"SKIP {name} (needs --boot)")
+                continue
+            if deep and ARGS.quick:
+                print(f"SKIP {name} (--quick)")
                 continue
             print(f"== {name}")
             t0 = time.monotonic()
@@ -462,12 +764,6 @@ def main():
                     to_menu()  # leave a sane world for the next case
                 except Exception:
                     pass
-        if ARGS.sweep and not failures:
-            print("== eventsweep (full event pass)")
-            r = subprocess.run(
-                [sys.executable, os.path.join(REPO, "tests", "eventsweep.py")])
-            if r.returncode != 0:
-                failures.append("eventsweep")
     finally:
         if proc:
             proc.terminate()
@@ -476,9 +772,9 @@ def main():
             except subprocess.TimeoutExpired:
                 proc.kill()
 
-    ran = sum(1 for name, b, _ in CASES
+    ran = sum(1 for name, b, deep, _ in CASES
               if (not only or any(name.startswith(p) for p in only))
-              and (ARGS.boot or not b))
+              and (ARGS.boot or not b) and not (deep and ARGS.quick))
     print(f"\n{ran - len(failures)}/{ran} cases passed"
           + (f"; FAILED: {failures}" if failures else ""))
     if failures and LOG_PATH:

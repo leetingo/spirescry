@@ -16,6 +16,7 @@ using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Saves;
 using MegaCrit.Sts2.Core.TestSupport;
 using Spirescry.Bridge;
+using Spirescry.State;
 using Spirescry.Threading;
 
 namespace Spirescry.Host;
@@ -50,6 +51,7 @@ internal static class HeadlessBoot
         InitModelDb();
         HeadlessLocalization.Init();
         ApplyHarmonyPatches();
+        HeadlessPicker.Install();
         MainThreadPump.BootstrapHeadless();
         // Background continuations (unpatched Task.Delay in engine code)
         // mutate state outside handler calls; a slow pump tick folds those

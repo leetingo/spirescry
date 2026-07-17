@@ -84,7 +84,12 @@ enum Cmd {
     Skip,
     /// Travel to a map node (col/row from obs.next)
     MapMove { col: u32, row: u32 },
-    /// Dev/verification cheats: goto <col> <row> | gold <n> | hp <n> | heal | wound-enemies | event <ID> | card <ID> | card-upgraded <ID> | relic <ID>
+    /// List model entries: kind is card/relic/potion/event/encounter/character
+    Models { kind: String },
+    /// Dev/verification cheats.
+    ///
+    /// goto <col> <row> | gold/hp/stars/energy <n> | heal | wound-enemies |
+    /// event/combat/card/card-upgraded/relic/potion <ID>
     Cheat { name: String, values: Vec<String> },
     /// Play a hand card by model entry (e.g. StrikeIronclad)
     Play {
@@ -114,6 +119,7 @@ fn main() -> ExitCode {
     };
     let result = match &cli.cmd {
         Cmd::Health => client.get("/health"),
+        Cmd::Models { kind } => client.get(&format!("/models?kind={}", kind)),
         Cmd::Obs {
             since,
             wait,
@@ -221,10 +227,11 @@ fn cheat_args(name: &str, values: &[String]) -> Result<Value, String> {
             args["col"] = json!(num(col)?);
             args["row"] = json!(num(row)?);
         }
-        ("gold", [value]) | ("hp", [value]) => args["value"] = json!(num(value)?),
-        ("event", [id]) | ("card", [id]) | ("card-upgraded", [id]) | ("relic", [id]) => {
-            args["id"] = json!(id)
+        ("gold", [value]) | ("hp", [value]) | ("stars", [value]) | ("energy", [value]) => {
+            args["value"] = json!(num(value)?)
         }
+        ("event", [id]) | ("combat", [id]) | ("card", [id]) | ("card-upgraded", [id])
+        | ("relic", [id]) | ("potion", [id]) => args["id"] = json!(id),
         _ => {}
     }
     Ok(args)
@@ -432,6 +439,19 @@ mod tests {
 
         assert_eq!(upgraded, json!({ "name": "card-upgraded", "id": "WHIRLWIND" }));
         assert_eq!(relic, json!({ "name": "relic", "id": "KUNAI" }));
+    }
+
+    #[test]
+    fn cheat_sweep_helpers_map_args() {
+        let combat = cheat_args("combat", &strings(&["KAISER_CRAB"])).unwrap();
+        let potion = cheat_args("potion", &strings(&["FLEX_POTION"])).unwrap();
+        let stars = cheat_args("stars", &strings(&["99"])).unwrap();
+        let energy = cheat_args("energy", &strings(&["99"])).unwrap();
+
+        assert_eq!(combat, json!({ "name": "combat", "id": "KAISER_CRAB" }));
+        assert_eq!(potion, json!({ "name": "potion", "id": "FLEX_POTION" }));
+        assert_eq!(stars, json!({ "name": "stars", "value": 99 }));
+        assert_eq!(energy, json!({ "name": "energy", "value": 99 }));
     }
 
     #[test]
