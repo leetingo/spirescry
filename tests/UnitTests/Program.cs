@@ -1,5 +1,6 @@
 using System.Reflection;
 using Spirescry;
+using Spirescry.Host;
 using Spirescry.State;
 
 // Every public static parameterless method on Tests is a test — discovered
@@ -103,6 +104,42 @@ internal static class Tests
     {
         Equal("Deal [green]9[/green] damage.",
             RichText.NormalizeIcons("Deal [green]9[/green] damage."));
+    }
+
+    public static void FirstChanceFilterRecognizesOnlyKnownStubMisses()
+    {
+        var knownType = new TypeLoadException(
+            "Could not load type 'MethodName' from assembly 'GodotSharp, "
+            + "Version=4.5.1.0, Culture=neutral, PublicKeyToken=null'.");
+        var knownReflection = new ReflectionTypeLoadException(
+            Type.EmptyTypes, [knownType]);
+        var knownMethod = new MissingMethodException(
+            "Method not found: 'System.Collections.Generic.IEnumerator`1<!0> "
+            + "Godot.Collections.Array`1.GetEnumerator()'.");
+
+        True(FirstChanceFilter.IsKnownGodotStubMiss(knownReflection));
+        True(FirstChanceFilter.IsKnownGodotStubMiss(knownMethod));
+    }
+
+    public static void FirstChanceFilterLeavesNewGodotApiMissesVisible()
+    {
+        var newType = new TypeLoadException(
+            "Could not load type 'FatalNewApi' from assembly 'GodotSharp, "
+            + "Version=4.5.1.0, Culture=neutral, PublicKeyToken=null'.");
+        var mixedReflection = new ReflectionTypeLoadException(
+            Type.EmptyTypes,
+            [
+                new TypeLoadException(
+                    "Could not load type 'MethodName' from assembly 'GodotSharp, "
+                    + "Version=4.5.1.0, Culture=neutral, PublicKeyToken=null'."),
+                newType,
+            ]);
+        var newMethod = new MissingMethodException(
+            "Method not found: 'Void Godot.Node.FatalNewApi()'.");
+
+        True(!FirstChanceFilter.IsKnownGodotStubMiss(newType));
+        True(!FirstChanceFilter.IsKnownGodotStubMiss(mixedReflection));
+        True(!FirstChanceFilter.IsKnownGodotStubMiss(newMethod));
     }
 
     private static void Equal(object? expected, object? actual)
