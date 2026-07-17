@@ -55,7 +55,12 @@ index) and `floor` (run-cumulative) stay for compatibility.
 `?compact=1` (CLI: `obs --compact`) elides the big repeats — no act
 graph, deck and combat piles as counts-by-model (`"STRIKE_IRONCLAD+": 2`
 = two upgraded copies), hand cards keep their numbers (`vars`) but drop
-the description prose — for agents that poll often.
+the description prose — for agents that poll often. `obs --decision`
+adds legal verbs derived from the targets in that exact snapshot and
+deduplicates card prose across every visible card surface. Each card has
+a stable `textKey` that includes upgrade, enchantment, and affliction;
+pass cached keys back as repeatable `--known-card <key>` flags to omit
+their prose without any process-global or read-order-dependent state.
 
 Phases: `main_menu`, `map`, `combat`, `event`, `shop`, `rest_site`,
 `treasure`, `rewards`, `card_reward`, `relic_reward`, `card_select`,

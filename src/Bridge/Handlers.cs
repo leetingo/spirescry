@@ -54,20 +54,29 @@ public static class Handlers
     // (engine events / phase changes bump it) or the wait expires — the
     // event-driven replacement for sleep-polling. The response carries the
     // current revision and, when `since` was given, the events behind it.
-    public static async Task<Response> Obs(string? sinceStr, string? waitStr, string? compactStr = null)
+    public static async Task<Response> Obs(
+        string? sinceStr,
+        string? waitStr,
+        string? compactStr = null,
+        string? decisionStr = null,
+        string[]? knownCards = null)
     {
         var since = long.TryParse(sinceStr, out var s) ? s : -1;
         var wait = int.TryParse(waitStr, out var w) ? Math.Clamp(w, 0, 60_000) : 0;
         var compact = compactStr is "1" or "true";
+        var decision = decisionStr is "1" or "true";
         var changed = since < 0 || wait == 0 || await Signals.WaitForChange(since, wait);
 
         return await MainThreadPump.Instance!.Run(() =>
         {
             var runId = Signals.RefreshRunIdentity();
-            var snapshot = Snapshotter.ForCurrentPhase(compact);
+            var snapshot = Snapshotter.ForCurrentPhase(compact, decision, knownCards ?? []);
             var node = JsonSerializer.SerializeToNode(snapshot)!.AsObject();
             node["rev"] = Signals.Revision;
             node["runId"] = runId;
+            if (decision)
+                node["legal"] = JsonSerializer.SerializeToNode(
+                    DecisionProjection.LegalVerbs(node, runId != "none"));
             if (since >= 0)
             {
                 node["changed"] = changed;

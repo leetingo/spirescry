@@ -53,6 +53,12 @@ enum Cmd {
         /// Elide the big repeats: no map graph, deck as counts-by-model
         #[arg(long)]
         compact: bool,
+        /// Compact decision projection with state-derived legal verbs
+        #[arg(long)]
+        decision: bool,
+        /// Card text keys already cached by the caller (repeatable)
+        #[arg(long = "known-card", requires = "decision")]
+        known_cards: Vec<String>,
     },
     /// Start a singleplayer run from the main menu
     NewRun {
@@ -134,6 +140,8 @@ fn main() -> ExitCode {
             since,
             wait,
             compact,
+            decision,
+            known_cards,
         } => {
             if wait.is_some() && since.is_none() {
                 Err("--wait has no effect without --since".to_string())
@@ -146,6 +154,15 @@ fn main() -> ExitCode {
                 }
                 if *compact {
                     path = format!("{}{}compact=1", path, sep);
+                    sep = '&';
+                }
+                if *decision {
+                    path = format!("{}{}decision=1", path, sep);
+                    sep = '&';
+                    for key in known_cards {
+                        path = format!("{}{}known={}", path, sep, query_component(key));
+                        sep = '&';
+                    }
                 }
                 client.compatible_get(&path)
             }
@@ -398,6 +415,18 @@ fn utc_clock() -> String {
     )
 }
 
+fn query_component(value: &str) -> String {
+    value
+        .bytes()
+        .flat_map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                vec![b as char]
+            }
+            _ => format!("%{b:02X}").chars().collect(),
+        })
+        .collect()
+}
+
 fn handle(result: Result<ureq::Response, ureq::Error>) -> Result<Value, String> {
     let resp = match result {
         Ok(resp) => resp,
@@ -460,10 +489,14 @@ mod tests {
                 since,
                 wait,
                 compact,
+                decision,
+                known_cards,
             } => {
                 assert_eq!(since, Some(42));
                 assert_eq!(wait, Some(250));
                 assert!(!compact);
+                assert!(!decision);
+                assert!(known_cards.is_empty());
             }
             _ => panic!("expected obs command"),
         }
@@ -477,6 +510,33 @@ mod tests {
             Cmd::Obs { compact, .. } => assert!(compact),
             _ => panic!("expected obs command"),
         }
+    }
+
+    #[test]
+    fn parses_decision_and_repeatable_known_card_keys() {
+        let cli = Cli::try_parse_from([
+            "spirescry",
+            "obs",
+            "--decision",
+            "--known-card",
+            "BASH+1@FOO!BAR",
+            "--known-card",
+            "STRIKE_IRONCLAD+0",
+        ])
+        .unwrap();
+
+        match cli.cmd {
+            Cmd::Obs {
+                decision,
+                known_cards,
+                ..
+            } => {
+                assert!(decision);
+                assert_eq!(known_cards, ["BASH+1@FOO!BAR", "STRIKE_IRONCLAD+0"]);
+            }
+            _ => panic!("expected obs command"),
+        }
+        assert_eq!(query_component("BASH+1@FOO!BAR"), "BASH%2B1%40FOO%21BAR");
     }
 
     #[test]

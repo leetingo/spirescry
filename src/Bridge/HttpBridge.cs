@@ -92,7 +92,9 @@ public sealed class HttpBridge
                 ("GET", "/health") => await Handlers.Health(),
                 ("GET", "/models") => await Handlers.Models(req.QueryString["kind"]),
                 ("GET", "/obs") => await Handlers.Obs(
-                    req.QueryString["since"], req.QueryString["wait"], req.QueryString["compact"]),
+                    req.QueryString["since"], req.QueryString["wait"],
+                    req.QueryString["compact"], req.QueryString["decision"],
+                    req.QueryString.GetValues("known")),
                 ("POST", "/step") => await Handlers.Step(body),
                 _ => Response.Error("not_found", $"no route {req.HttpMethod} {path}", 404),
             };

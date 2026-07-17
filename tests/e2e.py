@@ -302,6 +302,42 @@ def p8():
     to_menu()
 
 
+@case("P9 decision projection is stable and caller-scoped")
+def p9():
+    to_menu()
+    menu = run("obs", "--decision")
+    assert menu["legal"] == ["new-run"], menu["legal"]
+
+    into_combat(seed="CIDEcision")
+    run("cheat", "card", "BASH")
+    run("cheat", "card-upgraded", "BASH")
+    first = run("obs", "--decision")
+    second = run("obs", "--decision")
+    assert first["legal"] == second["legal"], (first["legal"], second["legal"])
+    for verb in ("play", "end-turn", "abandon"):
+        assert verb in first["legal"], first["legal"]
+
+    def text_shape(d):
+        return [(c.get("textKey"), c.get("description")) for c in d["hand"]]
+
+    # GET is referentially stable: it does not consume a process-global
+    # first-sighting set. Duplicate models carry prose once per response.
+    assert text_shape(first) == text_shape(second)
+    by_key = {}
+    for card in first["hand"]:
+        by_key.setdefault(card["textKey"], []).append(card.get("description"))
+    assert all(sum(text is not None for text in texts) <= 1
+               for texts in by_key.values()), by_key
+    assert "BASH+0" in by_key and "BASH+1" in by_key, sorted(by_key)
+
+    known = next(c["textKey"] for c in first["hand"]
+                 if c.get("description") is not None)
+    cached = run("obs", "--decision", "--known-card", known)
+    assert all(c.get("description") is None
+               for c in cached["hand"] if c["textKey"] == known), cached["hand"]
+    to_menu()
+
+
 # ---------- R: run lifecycle ----------
 
 @case("R1 same seed, same world")
