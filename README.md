@@ -135,8 +135,9 @@ overlay stack) plus a per-tick phase diff as the safety net; a `/step`
 accepted without either (in-phase inline mutations — reward claims, shop
 buys) bumps it itself. `obs?since=` responses name the events behind the
 bump (`phase:map->combat`, `action:PlayCardAction`, `enqueued:...`,
-`step:buy`, `wedge:...`). The server clamps `wait` to `0..60000` ms; the CLI
-uses 5000 ms when `--since` is supplied without an explicit `--wait`.
+`step:buy`, `wedge:...`). The server clamps `wait` to `0..60000` ms. Omitting
+`--wait` (or passing `0`) is a no-wait poll; pass a positive value explicitly
+when the caller should park for a change.
 
 The event log retains the latest 64 revision events. After a burst larger
 than that, an old `--since` still returns immediately with `changed: true`
@@ -224,9 +225,10 @@ picks), and text comes from tables extracted out of your local install's
   clicks a cell, `option 0/1` picks the divination tool).
 - **Reproducibility**: `new-run --seed --ascension`.
 - **Dev cheats** for single-point verification:
-  `cheat goto|gold|hp|stars|energy|heal|wound-enemies|event|combat|card|card-upgraded|relic|potion`
+  `cheat goto|gold|hp|stars|energy|heal|wound-enemies|event|combat|card|card-upgraded|relic|potion|async-fault`
   — jump anywhere on the act map, end fights fast, force any event or
-  encounter by model id, and graft content into the run. `models
+  encounter by model id, graft content into the run, or deliberately fault
+  tracked async work to verify the failure event stream. `models
   card|relic|potion|event|encounter|character` enumerates the current
   game build instead of baking ids into tests.
 

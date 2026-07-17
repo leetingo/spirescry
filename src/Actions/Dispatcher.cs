@@ -417,6 +417,8 @@ public static class Dispatcher
         Reflect.SetPropertyOrBackingField(rm, "State", null);
         Reflect.SetPropertyOrBackingField(rm, "IsAbandoned", false);
         HeadlessState.ResetAll();
+        _openedHeadlessTreasure = null;
+        _normalRewardsGrantedFor = null;
         return DispatchResult.Success();
     }
 
@@ -659,9 +661,13 @@ public static class Dispatcher
         // faults before registering the new fight. Clear only this completed,
         // faulted EndPlayerTurnAction state. ActionQueueSet.Reset is not safe
         // between rooms because it also deletes every player queue.
-        Reflect.SetField(executor, "_queueTaskCompletionSource", null);
-        Reflect.SetPropertyOrBackingField(executor, "CurrentlyRunningAction", null);
-        SafeLog.Info("cleared faulted victory EndPlayerTurnAction executor state");
+        var completionCleared = Reflect.SetField(
+            executor, "_queueTaskCompletionSource", null);
+        var actionCleared = Reflect.SetPropertyOrBackingField(
+            executor, "CurrentlyRunningAction", null);
+        SafeLog.Info(completionCleared && actionCleared
+            ? "cleared faulted victory EndPlayerTurnAction executor state"
+            : "could not fully clear faulted victory EndPlayerTurnAction executor state");
     }
 
     // Engine calls that return Tasks must not block the main thread —

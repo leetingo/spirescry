@@ -777,7 +777,7 @@ def w2():
     assert any(r["model"] == "PAELS_WING" for r in obs()["you"]["relics"]), \
         "Pael's Wing was not obtained"
 
-    run("cheat", "wound-enemies", ok=True)
+    run("cheat", "wound-enemies", allow_fail=True)
     atk = next(c for c in d["hand"] if c["target"] == "anyenemy")
     run("play", atk["model"], "--target", str(alive_enemy(d)["id"]))
     rewards = bridge.wait_phase("rewards")
