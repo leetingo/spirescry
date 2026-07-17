@@ -13,6 +13,62 @@ use serde_json::{json, Value};
 
 const PROTOCOL_VERSION: u64 = 2;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CliError {
+    Transient(String),
+    Fatal(String),
+}
+
+impl CliError {
+    fn transient(message: impl Into<String>) -> Self {
+        Self::Transient(message.into())
+    }
+
+    fn fatal(message: impl Into<String>) -> Self {
+        Self::Fatal(message.into())
+    }
+
+    fn message(&self) -> &str {
+        match self {
+            Self::Transient(message) | Self::Fatal(message) => message,
+        }
+    }
+
+    #[cfg(test)]
+    fn contains(&self, needle: &str) -> bool {
+        self.message().contains(needle)
+    }
+
+    fn exit_status(&self) -> u8 {
+        match self {
+            Self::Transient(_) => 75,
+            Self::Fatal(_) => 1,
+        }
+    }
+}
+
+impl std::fmt::Display for CliError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.message())
+    }
+}
+
+impl std::error::Error for CliError {}
+
+impl From<String> for CliError {
+    fn from(message: String) -> Self {
+        Self::fatal(message)
+    }
+}
+
+impl From<&str> for CliError {
+    fn from(message: &str) -> Self {
+        Self::fatal(message)
+    }
+}
+
+type CliResult<T> = Result<T, CliError>;
+
 #[derive(Parser)]
 #[command(name = "spirescry", version, about)]
 struct Cli {
@@ -161,7 +217,7 @@ fn main() -> ExitCode {
             known_cards,
         } => {
             if wait.is_some() && since.is_none() {
-                Err("--wait has no effect without --since".to_string())
+                Err(CliError::fatal("--wait has no effect without --since"))
             } else {
                 let mut path = String::from("/obs");
                 let mut sep = '?';
@@ -208,9 +264,9 @@ fn main() -> ExitCode {
         Cmd::Buy { kind, idx } => client.step("buy", json!({ "kind": kind, "idx": idx })),
         Cmd::Leave => client.step("leave", json!({})),
         Cmd::PickRelic { idx } => client.step("pick-relic", json!({ "idx": idx })),
-        Cmd::Cheat { name, values } => {
-            cheat_args(name, values).and_then(|args| client.step("cheat", args))
-        }
+        Cmd::Cheat { name, values } => cheat_args(name, values)
+            .map_err(CliError::from)
+            .and_then(|args| client.step("cheat", args)),
         Cmd::MapMove { col, row } => client.step("map-move", json!({ "col": col, "row": row })),
         Cmd::Play { model, target } => {
             let mut args = json!({ "model": model });
@@ -247,13 +303,7 @@ fn main() -> ExitCode {
         }
         Err(e) => {
             eprintln!("spirescry: {}", e);
-            // EX_TEMPFAIL: callers can retry on the exit code instead of
-            // grepping stderr for the transient signal.
-            if e.starts_with("not_ready") {
-                ExitCode::from(75)
-            } else {
-                ExitCode::FAILURE
-            }
+            ExitCode::from(e.exit_status())
         }
     }
 }
@@ -286,17 +336,17 @@ fn cheat_args(name: &str, values: &[String]) -> Result<Value, String> {
 }
 
 trait ReplayTransport {
-    fn get(&self, path: &str) -> Result<Value, String>;
-    fn post(&self, path: &str, body: Value) -> Result<Value, String>;
+    fn get(&self, path: &str) -> CliResult<Value>;
+    fn post(&self, path: &str, body: Value) -> CliResult<Value>;
 }
 
-fn replay(client: &impl ReplayTransport, file: &str) -> Result<Value, String> {
+fn replay(client: &impl ReplayTransport, file: &str) -> CliResult<Value> {
     let text = std::fs::read_to_string(file).map_err(|e| format!("read {}: {}", file, e))?;
     let log: Value = serde_json::from_str(&text).map_err(|e| format!("parse {}: {}", file, e))?;
     replay_value(client, &log)
 }
 
-fn replay_value(client: &impl ReplayTransport, log: &Value) -> Result<Value, String> {
+fn replay_value(client: &impl ReplayTransport, log: &Value) -> CliResult<Value> {
     if log.get("complete").and_then(Value::as_bool) != Some(true) {
         return Err("runlog is incomplete (it must start with new-run, contain one RunId, and fingerprint every followed verb)".into());
     }
@@ -322,7 +372,7 @@ fn replay_value(client: &impl ReplayTransport, log: &Value) -> Result<Value, Str
         .enumerate()
         .find(|(_, verb)| verb.get("runId").and_then(Value::as_str) != Some(source_run_id))
     {
-        return Err(format!("runlog crosses RunIds at verb {}", idx + 1));
+        return Err(format!("runlog crosses RunIds at verb {}", idx + 1).into());
     }
     if let Some((idx, _)) = verbs.iter().enumerate().find(|(_, verb)| {
         !matches!(
@@ -337,7 +387,8 @@ fn replay_value(client: &impl ReplayTransport, log: &Value) -> Result<Value, Str
         return Err(format!(
             "runlog verb {} has no verifiable settled fingerprint",
             idx + 1
-        ));
+        )
+        .into());
     }
 
     // Fail before the first state-changing request. A recipe can name a
@@ -370,7 +421,8 @@ fn replay_value(client: &impl ReplayTransport, log: &Value) -> Result<Value, Str
             "replay requires a clean main_menu with runId none; current phase={} runId={}",
             current.get("phase").and_then(Value::as_str).unwrap_or("?"),
             current.get("runId").and_then(Value::as_str).unwrap_or("?"),
-        ));
+        )
+        .into());
     }
 
     let seed = log.get("seed").and_then(Value::as_str);
@@ -392,7 +444,8 @@ fn replay_value(client: &impl ReplayTransport, log: &Value) -> Result<Value, Str
                 action,
                 expected_phase,
                 actual_phase,
-            ));
+            )
+            .into());
         }
 
         let mut args = verb.get("args").cloned().unwrap_or_else(|| json!({}));
@@ -425,7 +478,8 @@ fn replay_value(client: &impl ReplayTransport, log: &Value) -> Result<Value, Str
                 "divergence at verb {} ({}): reconstruction timed out",
                 idx + 1,
                 action,
-            ));
+            )
+            .into());
         }
         let next = response
             .get("obs")
@@ -441,7 +495,8 @@ fn replay_value(client: &impl ReplayTransport, log: &Value) -> Result<Value, Str
                     action,
                     expected,
                     actual,
-                ));
+                )
+                .into());
             }
         }
         let expected = verb
@@ -456,7 +511,8 @@ fn replay_value(client: &impl ReplayTransport, log: &Value) -> Result<Value, Str
                 action,
                 expected,
                 actual,
-            ));
+            )
+            .into());
         }
         verified += 1;
         current = next;
@@ -516,18 +572,18 @@ struct Client {
 }
 
 impl Client {
-    fn get(&self, path: &str) -> Result<Value, String> {
+    fn get(&self, path: &str) -> CliResult<Value> {
         let url = format!("{}{}", self.base, path);
         self.exchange(format!("GET {}", url), || ureq::get(&url).call())
     }
 
-    fn post(&self, path: &str, body: Value) -> Result<Value, String> {
+    fn post(&self, path: &str, body: Value) -> CliResult<Value> {
         let url = format!("{}{}", self.base, path);
         let request_line = format!("POST {} {}", url, body);
         self.exchange(request_line, || ureq::post(&url).send_json(body))
     }
 
-    fn step(&self, action: &str, args: Value) -> Result<Value, String> {
+    fn step(&self, action: &str, args: Value) -> CliResult<Value> {
         let health = self.get("/health")?;
         let cheat = (action == "cheat")
             .then(|| args.get("name").and_then(Value::as_str))
@@ -546,7 +602,7 @@ impl Client {
         self.post("/step", body)
     }
 
-    fn compatible_get(&self, path: &str) -> Result<Value, String> {
+    fn compatible_get(&self, path: &str) -> CliResult<Value> {
         let health = self.get("/health")?;
         validate_health(&health, None, None)?;
         self.get(path)
@@ -556,7 +612,7 @@ impl Client {
         &self,
         request_line: String,
         send: impl FnOnce() -> Result<ureq::Response, ureq::Error>,
-    ) -> Result<Value, String> {
+    ) -> CliResult<Value> {
         if self.verbose {
             eprintln!("spirescry: [{}] > {}", utc_clock(), request_line);
         }
@@ -580,20 +636,16 @@ impl Client {
 }
 
 impl ReplayTransport for Client {
-    fn get(&self, path: &str) -> Result<Value, String> {
+    fn get(&self, path: &str) -> CliResult<Value> {
         Client::get(self, path)
     }
 
-    fn post(&self, path: &str, body: Value) -> Result<Value, String> {
+    fn post(&self, path: &str, body: Value) -> CliResult<Value> {
         Client::post(self, path, body)
     }
 }
 
-fn validate_health(
-    health: &Value,
-    action: Option<&str>,
-    cheat: Option<&str>,
-) -> Result<(), String> {
+fn validate_health(health: &Value, action: Option<&str>, cheat: Option<&str>) -> CliResult<()> {
     let host_protocol = health
         .get("protocolVersion")
         .and_then(Value::as_u64)
@@ -609,7 +661,8 @@ fn validate_health(
         return Err(format!(
             "incompatible host protocol {} (CLI expects {}, build {})",
             host_protocol, PROTOCOL_VERSION, build
-        ));
+        )
+        .into());
     }
 
     if let Some(action) = action {
@@ -626,7 +679,8 @@ fn validate_health(
             return Err(format!(
                 "bad_request: host does not advertise '{}' (supported: {})",
                 action, supported
-            ));
+            )
+            .into());
         }
     }
 
@@ -644,7 +698,8 @@ fn validate_health(
             return Err(format!(
                 "bad_request: host does not advertise cheat '{}' (supported: {})",
                 cheat, supported
-            ));
+            )
+            .into());
         }
     }
 
@@ -679,23 +734,32 @@ fn query_component(value: &str) -> String {
         .collect()
 }
 
-fn handle(result: Result<ureq::Response, ureq::Error>) -> Result<Value, String> {
+fn handle(result: Result<ureq::Response, ureq::Error>) -> CliResult<Value> {
     let resp = match result {
         Ok(resp) => resp,
         // Bridge errors ride on 4xx/5xx with a JSON body — parse it.
         Err(ureq::Error::Status(_, resp)) => resp,
-        Err(ureq::Error::Transport(e)) => return Err(e.to_string()),
+        Err(ureq::Error::Transport(e)) => return Err(CliError::fatal(e.to_string())),
     };
     let value: Value = resp
         .into_json()
-        .map_err(|e| format!("non-json response: {}", e))?;
+        .map_err(|e| CliError::fatal(format!("non-json response: {}", e)))?;
+    parse_bridge_value(value)
+}
+
+fn parse_bridge_value(value: Value) -> CliResult<Value> {
     if value.get("ok").and_then(Value::as_bool) == Some(false) {
         let err = value
             .get("err")
             .and_then(Value::as_str)
             .unwrap_or("unknown");
         let msg = value.get("msg").and_then(Value::as_str).unwrap_or("");
-        return Err(format!("{}: {}", err, msg));
+        let rendered = format!("{}: {}", err, msg);
+        return if err == "not_ready" {
+            Err(CliError::transient(rendered))
+        } else {
+            Err(CliError::fatal(rendered))
+        };
     }
     Ok(value)
 }
@@ -736,18 +800,18 @@ mod tests {
     }
 
     impl ReplayTransport for ReplaySpy {
-        fn get(&self, path: &str) -> Result<Value, String> {
+        fn get(&self, path: &str) -> CliResult<Value> {
             self.gets.borrow_mut().push(path.to_string());
             match path {
                 "/health" => Ok(self.health.clone()),
                 "/obs" => Ok(json!({"phase":"main_menu", "runId":"none", "rev":1})),
-                _ => Err(format!("unexpected GET {path}")),
+                _ => Err(CliError::fatal(format!("unexpected GET {path}"))),
             }
         }
 
-        fn post(&self, _path: &str, _body: Value) -> Result<Value, String> {
+        fn post(&self, _path: &str, _body: Value) -> CliResult<Value> {
             self.posts.set(self.posts.get() + 1);
-            Err("unexpected POST".to_string())
+            Err(CliError::fatal("unexpected POST"))
         }
     }
 
@@ -1076,5 +1140,31 @@ mod tests {
 
         let cheat_err = validate_health(&value, Some("cheat"), Some("relic")).unwrap_err();
         assert!(cheat_err.contains("cheat 'relic'"), "{cheat_err}");
+    }
+
+    #[test]
+    fn bridge_not_ready_is_a_typed_transient_error() {
+        let error = parse_bridge_value(json!({
+            "ok": false,
+            "err": "not_ready",
+            "msg": "map intro animation"
+        }))
+        .unwrap_err();
+
+        assert!(matches!(error, CliError::Transient(_)), "{error}");
+        assert_eq!(error.exit_status(), 75);
+    }
+
+    #[test]
+    fn other_bridge_rejections_are_typed_fatal_errors() {
+        let error = parse_bridge_value(json!({
+            "ok": false,
+            "err": "bad_phase",
+            "msg": "not in combat"
+        }))
+        .unwrap_err();
+
+        assert!(matches!(error, CliError::Fatal(_)), "{error}");
+        assert_eq!(error.exit_status(), 1);
     }
 }
