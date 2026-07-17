@@ -614,6 +614,41 @@ def k2():
     to_menu()
 
 
+@case("C4 DECIMILLIPEDE last segment dies to end-turn Lightning")
+def c4():
+    # Exact #67/#68 regression: ReattachPower owns the segmented death
+    # flow, and the final lethal lands inside EndPlayerTurnAction rather
+    # than a played card.
+    to_map(seed="CIC2MILLI", character="DEFECT")
+    run("cheat", "combat", "DECIMILLIPEDE_ELITE")
+    d = bridge.wait_phase("combat", timeout=30)
+    assert len(d.get("enemies", [])) >= 3, d.get("enemies")
+    assert all("MILLIPEDE" in (e.get("model") or "") for e in d["enemies"]), d["enemies"]
+    run("cheat", "wound-enemies")
+
+    while True:
+        d = obs()
+        alive = [e for e in d["enemies"] if e["alive"]]
+        if len(alive) <= 1:
+            break
+        run("cheat", "card", "STRIKE_DEFECT")
+        run("cheat", "energy", "99")
+        run("play", "STRIKE_DEFECT", "--target", str(alive[0]["id"]))
+        time.sleep(0.5)
+        assert obs()["phase"] == "combat", "fight ended before the orb-passive lethal"
+
+    assert len(alive) == 1 and alive[0]["hp"][0] == 1, alive
+    result = run("end-turn")
+    assert result.get("ok") is True, result
+    bridge.wait_phase("rewards", timeout=25)
+    status, health = http("GET", "/health")
+    assert status == 200 and all(q["depth"] == 0 for q in health["queues"]), health
+    assert health["executorStuckMs"] < 8000, health
+    run("proceed")
+    bridge.wait_phase("map")
+    to_menu()
+
+
 # ---------- V: victory ----------
 
 @case("V1 cheat-driven full clear reaches a victory game_over")

@@ -100,12 +100,15 @@ public static class Handlers
                 Signals.Bump($"step:{action}");
             return r;
         });
-        return result.Ok
-            // The action is enqueued on the engine's action queue and
-            // resolves over the following frames — follow with
-            // /obs?since=<rev>&wait=<ms> to wake on the outcome.
+        if (!result.Ok)
+            return Response.Error(result.Err!, result.Msg ?? "", result.Status);
+        // The action is enqueued on the engine's action queue and
+        // resolves over the following frames — follow with
+        // /obs?since=<rev>&wait=<ms> to wake on the outcome. A success
+        // Msg is a note (e.g. "settled with victory cleanup").
+        return result.Msg is null
             ? Response.Json(new { ok = true, enqueued = action, rev = Signals.Revision })
-            : Response.Error(result.Err!, result.Msg ?? "");
+            : Response.Json(new { ok = true, enqueued = action, rev = Signals.Revision, note = result.Msg });
     }
 
     // The registry the cheats validate against, enumerable — sweeps drive

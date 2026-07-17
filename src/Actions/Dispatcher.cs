@@ -32,10 +32,17 @@ using CrystalMinigame = MegaCrit.Sts2.Core.Events.Custom.CrystalSphereEvent.Crys
 
 namespace Spirescry.Actions;
 
-public readonly record struct DispatchResult(bool Ok, string? Err = null, string? Msg = null)
+public readonly record struct DispatchResult(
+    bool Ok,
+    string? Err = null,
+    string? Msg = null,
+    int Status = 400)
 {
-    public static DispatchResult Success() => new(true);
-    public static DispatchResult Reject(string err, string msg) => new(false, err, msg);
+    // On success, Msg is an optional note for the response (e.g. "the
+    // action settled with victory cleanup") — not an error.
+    public static DispatchResult Success(string? msg = null) => new(true, null, msg, 200);
+    public static DispatchResult Reject(string err, string msg, int status = 400) =>
+        new(false, err, msg, status);
 }
 
 // Each verb validates its own phase, then acts through the same engine
@@ -517,10 +524,61 @@ public static class Dispatcher
     // Single owner of the enqueue-mode swap: GUI rides the synchronizer
     // (the queue drains on frames), headless enqueues directly and the
     // queue drains inline before this returns.
-    private static void Enqueue(RunManager rm, GameAction action)
+    //
+    // Returns a success note when the action's own resolution ended the combat out
+    // from under its queue bookkeeping: victory teardown clears the
+    // queues, so the engine's pop of the finished action finds nothing
+    // and throws even though every effect already settled. Any other
+    // mid-drain throw aborts the rest of the resolution chain with no
+    // executor left running — a shape the stuck-executor watchdog can
+    // never see — so announce the wedge here before rethrowing.
+    private static DispatchResult Enqueue(RunManager rm, GameAction action)
     {
-        if (RunMode.IsHeadless) rm.ActionQueueSet.EnqueueWithoutSynchronizing(action);
-        else rm.ActionQueueSynchronizer.RequestEnqueue(action);
+        if (!RunMode.IsHeadless)
+        {
+            rm.ActionQueueSynchronizer.RequestEnqueue(action);
+            return DispatchResult.Success();
+        }
+        return ResolveInline(action.GetType().Name,
+            () => rm.ActionQueueSet.EnqueueWithoutSynchronizing(action));
+    }
+
+    // Headless engine entry points drain synchronously. Victory teardown
+    // can therefore clear the queue before the just-finished action pops
+    // itself; that exact exception means the effect completed, while any
+    // other exception is a genuine abandoned-resolution wedge.
+    private static DispatchResult ResolveInline(string actionName, Action resolve)
+    {
+        var revisionBefore = Signals.Revision;
+        try
+        {
+            resolve();
+            return DispatchResult.Success();
+        }
+        catch (Exception ex)
+        {
+            var fault = ResolutionGuards.ClassifyInlineFault(
+                ex,
+                actionName,
+                CombatManager.Instance is { IsInProgress: true },
+                Signals.Revision != revisionBefore);
+            if (fault is InlineFaultKind.VictorySettled)
+            {
+                SafeLog.Info($"{actionName} settled by combat teardown ({ex.Message})");
+                return DispatchResult.Success(
+                    $"{actionName} fully settled with victory cleanup");
+            }
+
+            Signals.Bump($"wedge:{actionName}");
+            SafeLog.Error($"{actionName} died mid-resolution", ex);
+            var partial = fault is InlineFaultKind.Partial;
+            return DispatchResult.Reject(
+                partial ? "resolution_partial" : "resolution_failed",
+                partial
+                    ? $"{actionName} changed the world before {ex.GetType().Name}: {ex.Message}"
+                    : $"{actionName} failed before an observable change: {ex.GetType().Name}: {ex.Message}",
+                status: 500);
+        }
     }
 
     // Engine calls that return Tasks must not block the main thread —
@@ -1416,8 +1474,16 @@ public static class Dispatcher
         var (target, err) = ResolveTarget(potion.TargetType, args, state, player);
         if (err is not null) return err.Value;
         // Some potions (Attack Potion, …) open a card pick mid-effect.
-        HeadlessPicker.Around(() => potion.EnqueueManualUse(target!));
-        return DispatchResult.Success();
+        var result = DispatchResult.Success();
+        HeadlessPicker.Around(() =>
+        {
+            if (RunMode.IsHeadless)
+                result = ResolveInline(potion.GetType().Name,
+                    () => potion.EnqueueManualUse(target!));
+            else
+                potion.EnqueueManualUse(target!);
+        });
+        return result;
     }
 
     // Discarding is legal anywhere a run is active (clears a slot for a
@@ -1435,9 +1501,8 @@ public static class Dispatcher
         if (slot < 0 || slot >= slots.Count || slots[slot] is null)
             return DispatchResult.Reject("bad_index", $"no potion in slot {slot}");
 
-        Enqueue(rm, new DiscardPotionGameAction(
+        return Enqueue(rm, new DiscardPotionGameAction(
             player, (uint)slot, CombatManager.Instance is { IsInProgress: true }));
-        return DispatchResult.Success();
     }
 
     private static DispatchResult Play(JsonElement args, CombatState state, Player player)
@@ -1477,15 +1542,16 @@ public static class Dispatcher
         // Headless: cards that ask for a hand/pile pick mid-resolution
         // await the deferred picker; the play action stays pending (phase
         // flips to hand_select) until pick-card resolves it.
+        var result = DispatchResult.Success();
         HeadlessPicker.Around(() =>
-            Enqueue(RunManager.Instance!, new PlayCardAction(card, target!)));
-        return DispatchResult.Success();
+            result = Enqueue(RunManager.Instance!, new PlayCardAction(card, target!)));
+        return result;
     }
 
     private static DispatchResult EndTurn(CombatState state, Player player)
     {
-        Enqueue(RunManager.Instance!, new EndPlayerTurnAction(player, state.RoundNumber));
-        return DispatchResult.Success();
+        return Enqueue(RunManager.Instance!,
+            new EndPlayerTurnAction(player, state.RoundNumber));
     }
 
     private static (Creature? target, DispatchResult? err) ResolveTarget(
