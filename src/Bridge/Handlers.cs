@@ -163,14 +163,17 @@ public static class Handlers
         {
             var runId = Signals.RefreshRunIdentity();
             var phaseBefore = PhaseDetector.Current().AsString();
+            var tickBefore = Signals.TickCount;
             if (ifRun is not null && ifRun != runId)
                 return (dispatch: DispatchResult.Reject("external_change",
                     $"run {ifRun} is gone — the live run is {runId}"),
-                    rev: Signals.Revision, runId, phaseBefore, startedRev: Signals.Revision);
+                    rev: Signals.Revision, runId, phaseBefore,
+                    startedRev: Signals.Revision, startedTick: tickBefore);
             if (ifRev is { } expectedRev && Signals.Revision != expectedRev)
                 return (dispatch: DispatchResult.Reject("stale_state",
                     $"rev moved {expectedRev}->{Signals.Revision} since you scried — rescry and decide again"),
-                    rev: Signals.Revision, runId, phaseBefore, startedRev: Signals.Revision);
+                    rev: Signals.Revision, runId, phaseBefore,
+                    startedRev: Signals.Revision, startedTick: tickBefore);
             var before = Signals.Revision;
             var r = Dispatcher.Dispatch(action, args);
             // Verbs that resolve inline within one phase (host-mode Neow
@@ -180,7 +183,8 @@ public static class Handlers
             if (r.Ok && Signals.Revision == before)
                 Signals.Bump($"step:{action}");
             runId = Signals.RefreshRunIdentity();
-            return (dispatch: r, rev: Signals.Revision, runId, phaseBefore, startedRev: before);
+            return (dispatch: r, rev: Signals.Revision, runId, phaseBefore,
+                startedRev: before, startedTick: tickBefore);
         });
         if (!result.dispatch.Ok)
             return Response.Error(
@@ -189,7 +193,8 @@ public static class Handlers
 
         if (followMs is { } follow)
             return await Follow(
-                action, result.startedRev, result.rev, result.phaseBefore, follow);
+                action, result.startedRev, result.rev, result.phaseBefore,
+                result.startedTick, follow);
 
         // A success Msg is a note (e.g. "settled with victory cleanup").
         return result.dispatch.Msg is null
@@ -205,33 +210,57 @@ public static class Handlers
         long startedRev,
         long acceptedRev,
         string phaseBefore,
+        long acceptedTick,
         int timeoutMs)
     {
         var deadline = DateTime.UtcNow.AddMilliseconds(timeoutMs);
         var since = acceptedRev;
+        string? candidateOutcome = null;
+        string? candidateState = null;
+        long candidateTick = acceptedTick;
+        var stableFrames = 0;
         while (true)
         {
             var probe = await MainThreadPump.Instance!.Run(FollowProbe.Capture);
-            if (!probe.Busy)
-                return FollowResponse(action, startedRev, acceptedRev, "settled", probe);
-            if (probe.HasDecision
-                && (probe.Phase != phaseBefore || FollowProbe.IsNestedDecision(probe.Phase)))
-                return FollowResponse(action, startedRev, acceptedRev, "next_decision", probe);
+            var outcome = FollowProbe.CandidateOutcome(probe, phaseBefore, acceptedRev);
+            if (outcome is not null)
+            {
+                if (probe.Headless)
+                    return FollowResponse(action, startedRev, acceptedRev, outcome, probe);
+
+                if (outcome == candidateOutcome
+                    && probe.StateKey == candidateState
+                    && probe.Tick > candidateTick)
+                    stableFrames++;
+                else
+                    stableFrames = 1;
+                candidateOutcome = outcome;
+                candidateState = probe.StateKey;
+                candidateTick = probe.Tick;
+
+                // A GUI click or reflected callback may enqueue its real
+                // work on a later frame without returning a Task. Require
+                // the same quiet/decision state across three distinct
+                // frames before claiming that follow reached a boundary.
+                if (stableFrames >= 3)
+                    return FollowResponse(
+                        action, startedRev, acceptedRev, candidateOutcome, probe);
+            }
+            else
+            {
+                candidateOutcome = null;
+                candidateState = null;
+                stableFrames = 0;
+            }
 
             var remaining = (int)Math.Max(0, (deadline - DateTime.UtcNow).TotalMilliseconds);
             if (remaining == 0)
                 return FollowResponse(action, startedRev, acceptedRev, "timeout", probe);
-            await Signals.WaitForChange(since, remaining);
+            if (!probe.Headless && outcome is not null)
+                await Signals.WaitForTick(probe.Tick, remaining);
+            else
+                await Signals.WaitForChange(since, remaining);
             since = Signals.Revision;
-
-            // Once something after acceptance changed, an actionable board
-            // is a next decision even when the coarse phase stayed the same
-            // (multi-page events are the common case).
-            probe = await MainThreadPump.Instance!.Run(FollowProbe.Capture);
-            if (!probe.Busy)
-                return FollowResponse(action, startedRev, acceptedRev, "settled", probe);
-            if (probe.HasDecision && probe.Rev > acceptedRev)
-                return FollowResponse(action, startedRev, acceptedRev, "next_decision", probe);
         }
     }
 
@@ -260,10 +289,13 @@ public static class Handlers
 
     private sealed record FollowProbe(
         long Rev,
+        long Tick,
         string RunId,
         string Phase,
+        bool Headless,
         bool Busy,
         bool HasDecision,
+        string StateKey,
         JsonObject Observation)
     {
         public static FollowProbe Capture()
@@ -277,6 +309,7 @@ public static class Handlers
             node["runId"] = runId;
             var legal = DecisionProjection.LegalVerbs(node, runId != "none");
             node["legal"] = JsonSerializer.SerializeToNode(legal);
+            var stateKey = node.ToJsonString();
 
             var rm = MegaCrit.Sts2.Core.Runs.RunManager.Instance;
             var busy = Signals.PendingAsyncCount > 0
@@ -284,8 +317,23 @@ public static class Handlers
                 || EngineQueues.All(rm).Any(queue => queue.depth > 0);
             var hasDecision = legal.Any(verb => verb is not ("abandon" or "potion-discard"));
             return new FollowProbe(
-                rev, runId, node["phase"]?.GetValue<string>() ?? "unknown",
-                busy, hasDecision, node);
+                rev, Signals.TickCount, runId,
+                node["phase"]?.GetValue<string>() ?? "unknown", RunMode.IsHeadless,
+                busy, hasDecision, stateKey, node);
+        }
+
+        public static string? CandidateOutcome(
+            FollowProbe probe, string phaseBefore, long acceptedRev)
+        {
+            if (!probe.Busy) return "settled";
+            if (!probe.HasDecision) return null;
+            if (probe.Phase != phaseBefore || IsNestedDecision(probe.Phase))
+                return "next_decision";
+            // Some events page within the same coarse phase while the
+            // event Task remains parked on the next choice.
+            return probe.Phase == "event" && probe.Rev > acceptedRev
+                ? "next_decision"
+                : null;
         }
 
         public static bool IsNestedDecision(string phase) => phase is
