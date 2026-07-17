@@ -158,7 +158,9 @@ def replay_event_path(ev, path):
         opts = d.get("options", [])
         if idx >= len(opts) or opts[idx].get("locked"):
             return None, f"path {path} option {idx} unavailable"
-        run("option", str(idx), ok=True)
+        result = run("option", str(idx), ok=True)
+        if "_err" in result:
+            return None, f"path {path} option {idx} rejected: {result['_err'][:120]}"
         time.sleep(0.4)
         d = settle_to_event_or_exit()
     return d, None
@@ -200,7 +202,10 @@ def explore_all_event_options(ev):
             current, err = replay_event_path(ev, path)
             if err:
                 return outcomes, clicked, locked, err
-            run("option", str(idx), ok=True)
+            result = run("option", str(idx), ok=True)
+            if "_err" in result:
+                return outcomes, clicked, locked, (
+                    f"path {path} option {idx} rejected: {result['_err'][:120]}")
             time.sleep(0.4)
             clicked += 1
             after = settle_to_event_or_exit()

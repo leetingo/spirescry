@@ -212,6 +212,8 @@ def cards(log=print, only=None):
     to reject as unplayable rather than fault."""
     failures = {}
     skipped = []
+    playable_attempts = 0
+    playable_executed = 0
     entries = sorted(model_entries("card"), key=lambda e: (
         POOL_CHARACTER.get(e.get("pool"), "IRONCLAD"), e["model"]))
     if only is not None:
@@ -264,9 +266,14 @@ def cards(log=print, only=None):
                 res = bridge.cli("play", card)
                 if res.returncode == 0:
                     failures[card] = "unplayable card was accepted"
+                elif f"not_playable: {card}:" not in res.stderr:
+                    failures[card] = (
+                        "unplayable card rejected with wrong error: "
+                        f"{res.stderr.strip()[:100]}")
                 else:
                     skipped.append(card)  # rejected cleanly — by design
                 continue
+            playable_attempts += 1
             rev = d["rev"]
             args = ["play", card]
             if mine.get("target") == "anyenemy":
@@ -279,7 +286,7 @@ def cards(log=print, only=None):
             res = bridge.cli(*args)
             if res.returncode != 0:
                 err = res.stderr.strip()
-                if "not_playable:" in err:
+                if f"not_playable: {card}:" in err:
                     # Some cards require a state the single-player atomic
                     # sandbox cannot generically manufacture (empty draw
                     # pile, multiplayer handshake, only attacks in hand).
@@ -290,6 +297,7 @@ def cards(log=print, only=None):
                     failures[card] = f"play: {err[:110]}"
                 continue
             plays_in_fight += 1
+            playable_executed += 1
             ph = resolve_pickers()
             w = wedge_events(rev)
             if w:
@@ -312,6 +320,16 @@ def cards(log=print, only=None):
         if (i + 1) % 50 == 0:
             log(f"  ...{i + 1}/{len(entries)} ({len(failures)} failures)")
     log(f"  cleanly rejected by card legality: {len(skipped)}")
+    # A named legality rejection is valid for cards that require a state the
+    # generic sandbag cannot manufacture, but it must not let a broken play
+    # path turn the whole sweep green. Require the large majority of cards
+    # advertised as playable to actually enter the engine's play pipeline.
+    if only is None and playable_attempts:
+        ratio = playable_executed / playable_attempts
+        log(f"  playable cards executed: {playable_executed}/{playable_attempts} ({ratio:.1%})")
+        if ratio < 0.90:
+            failures["__coverage__"] = (
+                f"only {playable_executed}/{playable_attempts} playable cards executed")
     run("abandon", ok=True)
     if failures and only is None:
         first_pass = set(failures)
