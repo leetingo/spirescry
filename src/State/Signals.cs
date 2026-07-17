@@ -18,6 +18,7 @@ public static class Signals
     private static readonly object Gate = new();
     private static readonly List<(long rev, string type)> Log = new();
     private static readonly List<TaskCompletionSource<bool>> Waiters = new();
+    private static readonly HashSet<Task> PendingAsync = new();
     private static long _revision;
     private static string _lastPhase = "";
     private static object? _runStateRef;
@@ -41,6 +42,22 @@ public static class Signals
     public static long Revision { get { lock (Gate) return _revision; } }
 
     public static string RunId { get { lock (Gate) return _runId; } }
+
+    public static int PendingAsyncCount { get { lock (Gate) return PendingAsync.Count; } }
+
+    // Dispatcher fire-and-forget tasks are part of action settlement too.
+    // Tracking them closes the gap where GUI work had left the pump job but
+    // had not yet enqueued an engine action or changed phase.
+    public static void TrackAsync(Task task, string label)
+    {
+        lock (Gate) PendingAsync.Add(task);
+        _ = task.ContinueWith(_ =>
+        {
+            lock (Gate) PendingAsync.Remove(task);
+            Bump($"async:{label}");
+        }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
+    }
 
     // Call from a main-thread pump job immediately before reading state or
     // dispatching a verb. Tick also calls it, but Tick is only a notification

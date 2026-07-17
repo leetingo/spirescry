@@ -584,11 +584,14 @@ public static class Dispatcher
 
     // Engine calls that return Tasks must not block the main thread —
     // fire them and surface failures in the log.
-    private static void Fire(Task task, string context) =>
-        task.ContinueWith(t =>
+    private static void Fire(Task task, string context)
+    {
+        Signals.TrackAsync(task, context);
+        _ = task.ContinueWith(t =>
         {
             if (t.Exception is { } ex) SafeLog.Error(context, ex.InnerException ?? ex);
         }, TaskContinuationOptions.OnlyOnFaulted);
+    }
 
     // ---- main menu ----------------------------------------------------
 

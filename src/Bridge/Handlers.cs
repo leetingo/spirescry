@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using Spirescry.Actions;
 using Spirescry.State;
 using Spirescry.Threading;
@@ -92,6 +93,7 @@ public static class Handlers
         JsonElement args;
         long? ifRev = null;
         string? ifRun = null;
+        int? followMs = null;
         string? parseError = null;
         try
         {
@@ -132,6 +134,15 @@ public static class Handlers
                     else
                         ifRun = runEl.GetString();
                 }
+                if (doc.RootElement.TryGetProperty("follow", out var followEl))
+                {
+                    if (followEl.ValueKind != JsonValueKind.Number
+                        || !followEl.TryGetInt32(out var parsedFollow)
+                        || parsedFollow < 0 || parsedFollow > 60_000)
+                        parseError ??= "'follow' must be an integer in [0,60000]";
+                    else
+                        followMs = parsedFollow;
+                }
             }
         }
         catch (JsonException ex)
@@ -151,14 +162,15 @@ public static class Handlers
         var result = await MainThreadPump.Instance!.Run(() =>
         {
             var runId = Signals.RefreshRunIdentity();
+            var phaseBefore = PhaseDetector.Current().AsString();
             if (ifRun is not null && ifRun != runId)
                 return (dispatch: DispatchResult.Reject("external_change",
                     $"run {ifRun} is gone — the live run is {runId}"),
-                    rev: Signals.Revision, runId);
+                    rev: Signals.Revision, runId, phaseBefore, startedRev: Signals.Revision);
             if (ifRev is { } expectedRev && Signals.Revision != expectedRev)
                 return (dispatch: DispatchResult.Reject("stale_state",
                     $"rev moved {expectedRev}->{Signals.Revision} since you scried — rescry and decide again"),
-                    rev: Signals.Revision, runId);
+                    rev: Signals.Revision, runId, phaseBefore, startedRev: Signals.Revision);
             var before = Signals.Revision;
             var r = Dispatcher.Dispatch(action, args);
             // Verbs that resolve inline within one phase (host-mode Neow
@@ -168,22 +180,117 @@ public static class Handlers
             if (r.Ok && Signals.Revision == before)
                 Signals.Bump($"step:{action}");
             runId = Signals.RefreshRunIdentity();
-            return (dispatch: r, rev: Signals.Revision, runId);
+            return (dispatch: r, rev: Signals.Revision, runId, phaseBefore, startedRev: before);
         });
         if (!result.dispatch.Ok)
             return Response.Error(
                 result.dispatch.Err!, result.dispatch.Msg ?? "",
                 result.dispatch.Status, result.runId);
-        // The action is enqueued on the engine's action queue and
-        // resolves over the following frames — follow with
-        // /obs?since=<rev>&wait=<ms> to wake on the outcome. A success
-        // Msg is a note (e.g. "settled with victory cleanup").
+
+        if (followMs is { } follow)
+            return await Follow(
+                action, result.startedRev, result.rev, result.phaseBefore, follow);
+
+        // A success Msg is a note (e.g. "settled with victory cleanup").
         return result.dispatch.Msg is null
             ? Response.Json(new
                 { ok = true, enqueued = action, rev = result.rev, runId = result.runId })
             : Response.Json(new
                 { ok = true, enqueued = action, rev = result.rev,
                     runId = result.runId, note = result.dispatch.Msg });
+    }
+
+    private static async Task<Response> Follow(
+        string action,
+        long startedRev,
+        long acceptedRev,
+        string phaseBefore,
+        int timeoutMs)
+    {
+        var deadline = DateTime.UtcNow.AddMilliseconds(timeoutMs);
+        var since = acceptedRev;
+        while (true)
+        {
+            var probe = await MainThreadPump.Instance!.Run(FollowProbe.Capture);
+            if (!probe.Busy)
+                return FollowResponse(action, startedRev, acceptedRev, "settled", probe);
+            if (probe.HasDecision
+                && (probe.Phase != phaseBefore || FollowProbe.IsNestedDecision(probe.Phase)))
+                return FollowResponse(action, startedRev, acceptedRev, "next_decision", probe);
+
+            var remaining = (int)Math.Max(0, (deadline - DateTime.UtcNow).TotalMilliseconds);
+            if (remaining == 0)
+                return FollowResponse(action, startedRev, acceptedRev, "timeout", probe);
+            await Signals.WaitForChange(since, remaining);
+            since = Signals.Revision;
+
+            // Once something after acceptance changed, an actionable board
+            // is a next decision even when the coarse phase stayed the same
+            // (multi-page events are the common case).
+            probe = await MainThreadPump.Instance!.Run(FollowProbe.Capture);
+            if (!probe.Busy)
+                return FollowResponse(action, startedRev, acceptedRev, "settled", probe);
+            if (probe.HasDecision && probe.Rev > acceptedRev)
+                return FollowResponse(action, startedRev, acceptedRev, "next_decision", probe);
+        }
+    }
+
+    private static Response FollowResponse(
+        string action,
+        long startedRev,
+        long acceptedRev,
+        string outcome,
+        FollowProbe probe)
+    {
+        var node = new JsonObject
+        {
+            ["ok"] = true,
+            ["enqueued"] = action,
+            ["startedRev"] = startedRev,
+            ["acceptedRev"] = acceptedRev,
+            ["rev"] = probe.Rev,
+            ["runId"] = probe.RunId,
+            ["settled"] = outcome != "timeout",
+            ["outcome"] = outcome,
+            ["events"] = JsonSerializer.SerializeToNode(Signals.EventsSince(startedRev)),
+            ["obs"] = probe.Observation,
+        };
+        return new Response { Body = node.ToJsonString() };
+    }
+
+    private sealed record FollowProbe(
+        long Rev,
+        string RunId,
+        string Phase,
+        bool Busy,
+        bool HasDecision,
+        JsonObject Observation)
+    {
+        public static FollowProbe Capture()
+        {
+            var runId = Signals.RefreshRunIdentity();
+            var snapshot = Snapshotter.ForCurrentPhase(
+                compact: false, decision: true, knownCardTexts: []);
+            var node = JsonSerializer.SerializeToNode(snapshot)!.AsObject();
+            var rev = Signals.Revision;
+            node["rev"] = rev;
+            node["runId"] = runId;
+            var legal = DecisionProjection.LegalVerbs(node, runId != "none");
+            node["legal"] = JsonSerializer.SerializeToNode(legal);
+
+            var rm = MegaCrit.Sts2.Core.Runs.RunManager.Instance;
+            var busy = Signals.PendingAsyncCount > 0
+                || rm?.ActionExecutor?.CurrentlyRunningAction is not null
+                || EngineQueues.All(rm).Any(queue => queue.depth > 0);
+            var hasDecision = legal.Any(verb => verb is not ("abandon" or "potion-discard"));
+            return new FollowProbe(
+                rev, runId, node["phase"]?.GetValue<string>() ?? "unknown",
+                busy, hasDecision, node);
+        }
+
+        public static bool IsNestedDecision(string phase) => phase is
+            "card_select" or "hand_select" or "bundle_select"
+            or "card_reward" or "relic_reward";
     }
 
     // The registry the cheats validate against, enumerable — sweeps drive

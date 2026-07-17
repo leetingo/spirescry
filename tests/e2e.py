@@ -338,6 +338,50 @@ def p9():
     to_menu()
 
 
+@case("P10 follow waits for settlement or the next decision")
+def p10():
+    to_menu()
+    before = obs()
+    launched = run(
+        "new-run", "IRONCLAD", "--seed", "CIFOLLOW",
+        "--if-rev", str(before["rev"]), "--if-run", before["runId"],
+        "--follow", "5000",
+    )
+    assert launched["settled"] is True, launched
+    assert launched["outcome"] in ("settled", "next_decision"), launched
+    assert launched["acceptedRev"] <= launched["rev"], launched
+    assert launched["runId"] == launched["obs"]["runId"], launched
+    assert launched["obs"]["phase"] == "event", launched["obs"]
+    assert launched["obs"].get("legal"), launched["obs"]
+
+    for bad_follow in ("5000", -1, 60001):
+        status, d = http("POST", "/step", {
+            "action": "proceed", "args": {}, "follow": bad_follow,
+        })
+        assert status == 400 and d.get("err") == "bad_request", (bad_follow, d)
+        assert d.get("runId") == launched["runId"], d
+
+    run("proceed", "--follow", "5000")
+    d = bridge.wait_phase("map")
+    rest = next(point for point in d["graph"] if point["type"] == "restsite")
+    entered = run(
+        "cheat", "goto", str(rest["col"]), str(rest["row"]), "--follow", "5000")
+    assert entered["obs"]["phase"] == "rest_site", entered["obs"]
+    rest_obs = entered["obs"]
+    smith = next(option for option in rest_obs["options"]
+                 if "smith" in option["id"].lower() and option["enabled"])
+
+    picking = run("option", str(smith["idx"]), "--follow", "5000")
+    assert picking["outcome"] == "next_decision", picking
+    assert picking["obs"]["phase"] == "card_select", picking["obs"]
+    assert "pick-card" in picking["obs"]["legal"], picking["obs"]["legal"]
+
+    resolved = run("pick-card", "0", "--follow", "5000")
+    assert resolved["outcome"] == "settled", resolved
+    assert resolved["obs"]["phase"] == "rest_site", resolved["obs"]
+    to_menu()
+
+
 # ---------- R: run lifecycle ----------
 
 @case("R1 same seed, same world")
