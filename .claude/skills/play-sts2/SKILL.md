@@ -89,17 +89,25 @@ never report it as the source run's outcome or history.
 
 ## The ledger
 
-Keep a three-line ledger in your head across the turn, updated after
+Keep a six-line ledger in your head across the turn, updated after
 every followed action, instead of re-deriving from full JSON each read:
 
 ```
 you:    hp / block / energy / stars
+orbs:   slots / ordered queue / passive → evoke values  (Defect only)
+facing: left|right / who's behind          (surround fights only)
 threat: enemy hp / incoming damage × hits / stacks that gate damage
 turn:   cards played so far, once-per-turn triggers used, potions left
+run:    clean | polluted | reconstructed
 ```
 
 Arithmetic mistakes at the final turn kill runs; the ledger is where
-you catch them.
+you catch them. In surround fights (back-attack powers on the
+enemies), track which way you face after every targeted play — hits
+from behind are half again as hard, and each targeted card can turn
+you around. The `run` line is your integrity flag: it starts `clean`
+and only ever degrades (see the next two sections); carry it into
+your report.
 
 ## Wedge recovery
 
@@ -112,6 +120,28 @@ ladder; abandon is the last rung:
 3. The run advances → note the loss and keep playing.
 4. Every verb rejecting repeatedly → `spirescry abandon`, start fresh.
 
+### Fatal wedge — don't climb the ladder
+
+One signature is past recovery:
+
+```
+every enemy alive:false      +  phase still combat
+health: executor null, queues empty, executorStuckMs 0
+every verb → not_ready: player actions disabled
+```
+
+Nothing is running and nothing is queued — the engine died mid
+death-resolution and the win flow will never fire. Newer hosts announce
+this as a `wedge:DeadBoard` event after ~8 s; older hosts stay silent
+(the stuck-executor watchdog can't time an executor that's already
+gone). Either way, more verbs only pollute the evidence. Instead:
+
+1. Capture `obs`, `health`, the last verb you fired, and the exception
+   from the host log.
+2. Report a **technical abort**, distinct from a game loss — the
+   outcome is "host fault", not "died to X".
+3. `abandon`; if even that rejects, restart the host.
+
 ## Impossible observations
 
 First rule out takeover: compare `runId`, and look for a `run:<id>` event
@@ -123,6 +153,13 @@ puzzle to poll at. One rescry → `spirescry health` → use a currently
 `legal` escape verb if one exists → **mark the run polluted**. Keep playing
 only if the bridge still returns settled decisions; disclose the fault and
 treat conclusions drawn from the polluted state as suspect.
+
+A host restart ends the run, full stop. Rebuilding the same seed and
+deck via cheats yields a **reconstructed** run — a new run whose RNG
+streams, map history, and reward pools have already diverged. Play it
+if it's useful, but its outcome says nothing about the original: report
+"reconstructed after host fault; outcome not attributable to the
+original seed", never the seed's result.
 
 ## Verbs by phase
 
