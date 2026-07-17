@@ -20,6 +20,8 @@ public static class Signals
     private static readonly List<TaskCompletionSource<bool>> Waiters = new();
     private static long _revision;
     private static string _lastPhase = "";
+    private static object? _runStateRef;
+    private static string _runId = "none";
     private static GameAction? _watchedAction;
     private static DateTime _watchedSinceUtc;
     private static bool _wedgeAnnounced;
@@ -37,6 +39,27 @@ public static class Signals
     private static NOverlayStack? _stack;
 
     public static long Revision { get { lock (Gate) return _revision; } }
+
+    public static string RunId { get { lock (Gate) return _runId; } }
+
+    // Call from a main-thread pump job immediately before reading state or
+    // dispatching a verb. Tick also calls it, but Tick is only a notification
+    // path: optimistic guards must compare against the actual RunState in the
+    // same serialized job as dispatch, never against a prior frame's cache.
+    public static string RefreshRunIdentity()
+    {
+        var runState = RunManager.Instance?.DebugOnlyGetState();
+        string? changedTo = null;
+        lock (Gate)
+        {
+            if (ReferenceEquals(runState, _runStateRef)) return _runId;
+            _runStateRef = runState;
+            _runId = runState is null ? "none" : Guid.NewGuid().ToString("N")[..8];
+            changedTo = _runId;
+        }
+        Bump($"run:{changedTo}");
+        return changedTo;
+    }
 
     public static void Bump(string type)
     {
@@ -64,6 +87,7 @@ public static class Signals
     {
         EnsureSubscribed();
         WatchExecutor();
+        RefreshRunIdentity();
         var phase = PhaseDetector.Current().AsString();
         if (phase == _lastPhase) return;
         var from = _lastPhase;

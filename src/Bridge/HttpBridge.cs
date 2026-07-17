@@ -14,8 +14,9 @@ public sealed class Response
     public static Response Json(object payload, int status = 200) =>
         new() { Status = status, Body = JsonSerializer.Serialize(payload) };
 
-    public static Response Error(string code, string msg, int status = 400) =>
-        Json(new { ok = false, err = code, msg }, status);
+    public static Response Error(
+        string code, string msg, int status = 400, string? runId = null) =>
+        Json(new { ok = false, err = code, msg, runId = runId ?? Signals.RunId }, status);
 }
 
 // Loopback-only HTTP server. No auth: the bridge binds 127.0.0.1

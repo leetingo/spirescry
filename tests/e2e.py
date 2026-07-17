@@ -160,7 +160,8 @@ def b1():
     status, d = http("GET", "/health")
     assert status == 200 and d["ok"] is True, d
     for k in ("mod", "version", "buildHash", "protocolVersion",
-              "capabilities", "phase", "rev", "executorStuckMs", "queues"):
+              "capabilities", "phase", "rev", "runId",
+              "executorStuckMs", "queues"):
         assert k in d, f"health missing {k}: {sorted(d)}"
     caps = d["capabilities"]
     assert "end-turn" in caps["verbs"], caps
@@ -259,6 +260,46 @@ def p6():
 def p7():
     status, d = http("POST", "/step", {"action": "warp", "args": {}})
     assert status >= 400 and d.get("ok") is False, f"{status} {d}"
+    assert "runId" in d, d
+
+
+@case("P8 run identity and optimistic guards")
+def p8():
+    to_menu()
+    menu = obs()
+    assert menu["runId"] == "none", menu
+    launch(seed="CIGUARDS")
+    cur = obs()
+    run_id, rev = cur["runId"], cur["rev"]
+    assert run_id != "none", cur
+
+    status, d = http("POST", "/step", {
+        "action": "proceed", "args": {}, "ifRun": "replaced-run",
+    })
+    assert status == 400 and d.get("err") == "external_change", d
+    assert d.get("runId") == run_id, d
+
+    status, d = http("POST", "/step", {
+        "action": "proceed", "args": {}, "ifRun": run_id,
+        "ifRev": max(0, rev - 1),
+    })
+    assert status == 400 and d.get("err") == "stale_state", d
+    assert d.get("runId") == run_id, d
+
+    for bad in ({"ifRev": "1"}, {"ifRev": -1}, {"ifRun": ""}):
+        status, d = http("POST", "/step", {
+            "action": "proceed", "args": {}, **bad,
+        })
+        assert status == 400 and d.get("err") == "bad_request", (bad, d)
+        assert d.get("runId") == run_id, d
+
+    status, d = http("POST", "/step", {
+        "action": "proceed", "args": {}, "ifRun": run_id, "ifRev": rev,
+    })
+    assert status == 200 and d.get("ok") is True, d
+    assert d.get("runId") == run_id, d
+    bridge.wait_phase("map")
+    to_menu()
 
 
 # ---------- R: run lifecycle ----------
