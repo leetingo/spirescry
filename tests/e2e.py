@@ -167,7 +167,7 @@ def b1():
     caps = d["capabilities"]
     assert "end-turn" in caps["verbs"], caps
     assert "relic" in caps["cheats"], caps
-    assert isinstance(d["protocolVersion"], int), d["protocolVersion"]
+    assert d["protocolVersion"] == 2, d["protocolVersion"]
     build_hash = d["buildHash"]
     assert (build_hash == "unknown" or
             re.fullmatch(r"[0-9a-f]{7,12}(?:-dirty)?", build_hash)), build_hash

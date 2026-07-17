@@ -11,7 +11,7 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 use serde_json::{json, Value};
 
-const PROTOCOL_VERSION: u64 = 1;
+const PROTOCOL_VERSION: u64 = 2;
 
 #[derive(Parser)]
 #[command(name = "spirescry", version, about)]
@@ -1055,10 +1055,15 @@ mod tests {
 
     #[test]
     fn protocol_mismatch_names_both_versions_and_build() {
-        let err = validate_health(&health(2, &["play"], &[]), Some("play"), None).unwrap_err();
+        let old_protocol = PROTOCOL_VERSION - 1;
+        let err =
+            validate_health(&health(old_protocol, &["play"], &[]), Some("play"), None).unwrap_err();
 
-        assert!(err.contains("protocol 2"), "{err}");
-        assert!(err.contains("expects 1"), "{err}");
+        assert!(err.contains(&format!("protocol {old_protocol}")), "{err}");
+        assert!(
+            err.contains(&format!("expects {PROTOCOL_VERSION}")),
+            "{err}"
+        );
         assert!(err.contains("abc1234"), "{err}");
     }
 
