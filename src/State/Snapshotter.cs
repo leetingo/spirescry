@@ -771,17 +771,16 @@ public static class Snapshotter
         try
         {
             if (s.IsEmpty) return "";
-            // Card rendering injects these vars before formatting; power/
-            // potion texts arrive without them and the energyIcons
-            // formatter then fails the whole string, leaking raw
-            // {energyPrefix:energyIcons(1)} to the agent. Idempotent adds.
-            try
-            {
-                s.AddObj("energyPrefix", "");
-                s.AddObj("singleStarIcon", "[star]");
-            }
-            catch { }
-            var text = s.GetFormattedText();
+            // Formatting variables belong to this observation, not the
+            // shared model LocString. Copy its keys and existing variables
+            // before supplying card-pipeline defaults for power/potion text.
+            var local = new LocString(s.LocTable, s.LocEntryKey);
+            local.AddVariablesFrom(s);
+            if (!local.Variables.ContainsKey("energyPrefix"))
+                local.AddObj("energyPrefix", "");
+            if (!local.Variables.ContainsKey("singleStarIcon"))
+                local.AddObj("singleStarIcon", "[star]");
+            var text = local.GetFormattedText();
             // The host's GetFormattedText finalizer degrades hard failures
             // to the entry key; a key echo means the entry doesn't exist —
             // the GUI renders nothing there, so neither do we.

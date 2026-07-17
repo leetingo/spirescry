@@ -395,6 +395,28 @@ def c2():
     to_menu()
 
 
+@case("C3 power text expands energyPrefix without leaking format state")
+def c3():
+    d = into_combat(seed="CILOC")
+    run("cheat", "card", "FERAL")
+    d = obs()
+    feral = next(c for c in d["hand"] if c["model"] == "FERAL")
+    args = ["play", feral["model"]]
+    if feral["target"] == "anyenemy":
+        args += ["--target", str(alive_enemy(d)["id"])]
+    run(*args)
+    time.sleep(1)
+
+    d = obs()
+    power = next(p for p in d["you"]["powers"] if p["id"] == "FERAL_POWER")
+    description = power["description"]
+    assert "{energyPrefix" not in description, description
+    assert "[energy]" in description, description
+    assert next(p for p in obs()["you"]["powers"]
+                if p["id"] == "FERAL_POWER")["description"] == description
+    to_menu()
+
+
 # ---------- S: shop ----------
 
 @case("S1 shop: every buy kind, gold accounting, leave")
