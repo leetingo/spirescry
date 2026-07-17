@@ -148,17 +148,55 @@ rotate_log() {
 # it for an unrelated program. Capture both start time and command, and treat a
 # zombie as already stopped. All signals below are gated by this snapshot.
 process_snapshot() {
-    ps -p "$1" -o lstart= -o command= 2>/dev/null | sed -E 's/^[[:space:]]+//'
+    local snapshot snapshot_status
+    snapshot=""
+    if snapshot="$(ps -p "$1" -o lstart= -o command= 2>&1)"; then
+        snapshot="$(printf '%s\n' "$snapshot" | sed -E 's/^[[:space:]]+//')"
+        [ -n "$snapshot" ] || return 2
+        printf '%s\n' "$snapshot"
+        return 0
+    else
+        snapshot_status=$?
+    fi
+    # BSD/GNU ps use 1 for a well-formed query that selected no process.
+    # Invocation/permission failures use another status and stay unknown.
+    [ "$snapshot_status" = 1 ] && return 1
+    return 2
 }
 
-process_is_live() {
-    state="$(ps -p "$1" -o stat= 2>/dev/null | sed -E 's/^[[:space:]]+//')"
-    [ -n "$state" ] && [[ "$state" != Z* ]]
+process_state() {
+    local state state_status
+    state=""
+    if state="$(ps -p "$1" -o stat= 2>&1)"; then
+        state="$(printf '%s\n' "$state" | sed -E 's/^[[:space:]]+//')"
+        if [ -z "$state" ]; then
+            printf 'unknown\n'
+        elif [[ "$state" = Z* ]]; then
+            printf 'dead\n'
+        else
+            printf 'live\n'
+        fi
+        return 0
+    else
+        state_status=$?
+    fi
+    if [ "$state_status" = 1 ]; then
+        printf 'dead\n'
+    else
+        printf 'unknown\n'
+    fi
 }
 
 process_is_same() {
-    process_is_live "$1" || return 1
-    [ "$(process_snapshot "$1")" = "$2" ]
+    local observed_state current current_status
+    observed_state="$(process_state "$1")"
+    [ "$observed_state" = unknown ] && return 2
+    [ "$observed_state" = live ] || return 1
+    current=""
+    current_status=0
+    current="$(process_snapshot "$1")" || current_status=$?
+    [ "$current_status" = 2 ] && return 2
+    [ "$current_status" = 0 ] && [ "$current" = "$2" ]
 }
 
 is_this_host_snapshot() {
@@ -186,14 +224,26 @@ stop_exact_process() {
     target_snapshot="$2"
     target_label="$3"
 
-    process_is_same "$target_pid" "$target_snapshot" || return 0
+    same_status=0
+    process_is_same "$target_pid" "$target_snapshot" || same_status=$?
+    [ "$same_status" = 2 ] && \
+        die "cannot inspect $target_label PID $target_pid safely — refusing to signal it"
+    [ "$same_status" = 0 ] || return 0
     kill -TERM "$target_pid" 2>/dev/null || true
     sleep 1
-    if process_is_same "$target_pid" "$target_snapshot"; then
+    same_status=0
+    process_is_same "$target_pid" "$target_snapshot" || same_status=$?
+    [ "$same_status" = 2 ] && \
+        die "cannot re-check $target_label PID $target_pid after SIGTERM"
+    if [ "$same_status" = 0 ]; then
         kill -KILL "$target_pid" 2>/dev/null || true
         sleep 1
     fi
-    process_is_same "$target_pid" "$target_snapshot" && \
+    same_status=0
+    process_is_same "$target_pid" "$target_snapshot" || same_status=$?
+    [ "$same_status" = 2 ] && \
+        die "cannot re-check $target_label PID $target_pid after SIGKILL"
+    [ "$same_status" = 0 ] && \
         die "$target_label PID $target_pid survived SIGKILL (permissions?)"
     return 0
 }
@@ -222,8 +272,11 @@ launch_host() {
     step "launch host (bridge port $STS2_AGENT_PORT, log $log)"
     nohup dotnet "$HOST_DLL" > "$log" 2>&1 &
     host_pid=$!
-    host_snapshot="$(process_snapshot "$host_pid")" || host_snapshot=""
-    process_is_live "$host_pid" && is_this_host_snapshot "$host_snapshot" || \
+    host_snapshot_status=0
+    host_snapshot="$(process_snapshot "$host_pid")" || host_snapshot_status=$?
+    [ "$(process_state "$host_pid")" = live ] \
+        && [ "$host_snapshot_status" = 0 ] \
+        && is_this_host_snapshot "$host_snapshot" || \
         die "launched host PID $host_pid could not be identified"
     pidtmp="$(mktemp "${pidfile}.XXXXXX")"
     printf '%s\n%s\n' "$host_pid" "$host_snapshot" > "$pidtmp"
@@ -301,12 +354,16 @@ stop_game() {
         fi
 
         saved_snapshot="$(sed -n '2p' "$pidfile")"
-        if ! current_snapshot="$(process_snapshot "$host_pid")"; then
-            current_snapshot=""
-        fi
-        if ! process_is_live "$host_pid"; then
+        current_snapshot_status=0
+        current_snapshot="$(process_snapshot "$host_pid")" || current_snapshot_status=$?
+        current_state="$(process_state "$host_pid")"
+        if [ "$current_state" = unknown ]; then
+            die "cannot inspect PID $host_pid in $pidfile — refusing to signal or discard it"
+        elif [ "$current_state" = dead ]; then
             # A dead PID is an ordinary stale file and is safe to clean up.
             rm -f "$pidfile"
+        elif [ "$current_snapshot_status" != 0 ]; then
+            die "cannot read identity for live PID $host_pid in $pidfile — refusing to signal it"
         elif ! is_this_host_snapshot "$current_snapshot"; then
             die "PID $host_pid in $pidfile does not belong to this host — refusing to signal it"
         elif [ -z "$saved_snapshot" ]; then
@@ -327,8 +384,13 @@ stop_game() {
         host_pids="$(pgrep -f spirescry_host 2>/dev/null)" || host_pgrep_status=$?
         if [ "$host_pgrep_status" = 0 ]; then
             for candidate_pid in $host_pids; do
-                candidate_snapshot="$(process_snapshot "$candidate_pid")" || candidate_snapshot=""
-                if process_is_live "$candidate_pid" && is_this_host_snapshot "$candidate_snapshot"; then
+                candidate_snapshot_status=0
+                candidate_snapshot="$(process_snapshot "$candidate_pid")" || candidate_snapshot_status=$?
+                candidate_state="$(process_state "$candidate_pid")"
+                if [ "$candidate_state" = unknown ] \
+                    || { [ "$candidate_state" = live ] && [ "$candidate_snapshot_status" != 0 ]; }; then
+                    enumeration_failed=1
+                elif [ "$candidate_state" = live ] && is_this_host_snapshot "$candidate_snapshot"; then
                     stop_exact_process "$candidate_pid" "$candidate_snapshot" "host"
                     stopped=1
                 fi
@@ -340,8 +402,13 @@ stop_game() {
         game_pids="$(pgrep -f "$STS2_GAME_DIR" 2>/dev/null)" || game_pgrep_status=$?
         if [ "$game_pgrep_status" = 0 ]; then
             for candidate_pid in $game_pids; do
-                candidate_snapshot="$(process_snapshot "$candidate_pid")" || candidate_snapshot=""
-                if process_is_live "$candidate_pid" && is_this_game_snapshot "$candidate_snapshot"; then
+                candidate_snapshot_status=0
+                candidate_snapshot="$(process_snapshot "$candidate_pid")" || candidate_snapshot_status=$?
+                candidate_state="$(process_state "$candidate_pid")"
+                if [ "$candidate_state" = unknown ] \
+                    || { [ "$candidate_state" = live ] && [ "$candidate_snapshot_status" != 0 ]; }; then
+                    enumeration_failed=1
+                elif [ "$candidate_state" = live ] && is_this_game_snapshot "$candidate_snapshot"; then
                     stop_exact_process "$candidate_pid" "$candidate_snapshot" "game"
                     stopped=1
                 fi
