@@ -11,7 +11,7 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 use serde_json::{json, Value};
 
-const PROTOCOL_VERSION: u64 = 1;
+const PROTOCOL_VERSION: u64 = 2;
 
 #[derive(Parser)]
 #[command(name = "spirescry", version, about)]
@@ -132,6 +132,13 @@ enum Cmd {
     },
     /// Discard a potion by slot (anywhere in a run)
     PotionDiscard { slot: u32 },
+    /// Dump the current run's diagnostic reconstruction recipe
+    Runlog,
+    /// Re-drive and verify a saved diagnostic recipe from a clean menu
+    Replay {
+        /// JSON file saved from `spirescry runlog`
+        file: String,
+    },
 }
 
 fn main() -> ExitCode {
@@ -221,6 +228,8 @@ fn main() -> ExitCode {
             client.step("potion-use", args)
         }
         Cmd::PotionDiscard { slot } => client.step("potion-discard", json!({ "slot": slot })),
+        Cmd::Runlog => client.compatible_get("/runlog"),
+        Cmd::Replay { file } => replay(&client, file),
     };
     match result {
         Ok(v) => {
@@ -274,6 +283,225 @@ fn cheat_args(name: &str, values: &[String]) -> Result<Value, String> {
         _ => {}
     }
     Ok(args)
+}
+
+trait ReplayTransport {
+    fn get(&self, path: &str) -> Result<Value, String>;
+    fn post(&self, path: &str, body: Value) -> Result<Value, String>;
+}
+
+fn replay(client: &impl ReplayTransport, file: &str) -> Result<Value, String> {
+    let text = std::fs::read_to_string(file).map_err(|e| format!("read {}: {}", file, e))?;
+    let log: Value = serde_json::from_str(&text).map_err(|e| format!("parse {}: {}", file, e))?;
+    replay_value(client, &log)
+}
+
+fn replay_value(client: &impl ReplayTransport, log: &Value) -> Result<Value, String> {
+    if log.get("complete").and_then(Value::as_bool) != Some(true) {
+        return Err("runlog is incomplete (it must start with new-run, contain one RunId, and fingerprint every followed verb)".into());
+    }
+    let source_run_id = log
+        .get("runId")
+        .and_then(Value::as_str)
+        .filter(|id| *id != "none")
+        .ok_or("runlog has no source runId")?;
+    let verbs = log
+        .get("verbs")
+        .and_then(Value::as_array)
+        .ok_or("runlog has no verbs array")?;
+    if verbs
+        .first()
+        .and_then(|v| v.get("action"))
+        .and_then(Value::as_str)
+        != Some("new-run")
+    {
+        return Err("runlog does not start with new-run".into());
+    }
+    if let Some((idx, _)) = verbs
+        .iter()
+        .enumerate()
+        .find(|(_, verb)| verb.get("runId").and_then(Value::as_str) != Some(source_run_id))
+    {
+        return Err(format!("runlog crosses RunIds at verb {}", idx + 1));
+    }
+    if let Some((idx, _)) = verbs.iter().enumerate().find(|(_, verb)| {
+        !matches!(
+            verb.get("outcome").and_then(Value::as_str),
+            Some("settled" | "next_decision")
+        ) || verb
+            .get("fingerprint")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .is_none()
+    }) {
+        return Err(format!(
+            "runlog verb {} has no verifiable settled fingerprint",
+            idx + 1
+        ));
+    }
+
+    // Fail before the first state-changing request. A recipe can name a
+    // capability that is missing only near its end; discovering that after
+    // new-run would leave a partially reconstructed live run behind.
+    let health = client.get("/health")?;
+    validate_health(&health, None, None)?;
+    for (idx, verb) in verbs.iter().enumerate() {
+        let action = verb
+            .get("action")
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("verb {} has no action", idx + 1))?;
+        let cheat = if action == "cheat" {
+            Some(
+                verb.pointer("/args/name")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| format!("verb {} cheat has no args.name", idx + 1))?,
+            )
+        } else {
+            None
+        };
+        validate_health(&health, Some(action), cheat)?;
+    }
+
+    let mut current = client.get("/obs")?;
+    if current.get("phase").and_then(Value::as_str) != Some("main_menu")
+        || current.get("runId").and_then(Value::as_str) != Some("none")
+    {
+        return Err(format!(
+            "replay requires a clean main_menu with runId none; current phase={} runId={}",
+            current.get("phase").and_then(Value::as_str).unwrap_or("?"),
+            current.get("runId").and_then(Value::as_str).unwrap_or("?"),
+        ));
+    }
+
+    let seed = log.get("seed").and_then(Value::as_str);
+    let mut verified = 0usize;
+    for (idx, verb) in verbs.iter().enumerate() {
+        let action = verb
+            .get("action")
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("verb {} has no action", idx + 1))?;
+        let expected_phase = verb
+            .get("phaseBefore")
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("verb {} has no phaseBefore", idx + 1))?;
+        let actual_phase = current.get("phase").and_then(Value::as_str).unwrap_or("?");
+        if actual_phase != expected_phase {
+            return Err(format!(
+                "divergence at verb {} ({}): phase before was {}, reconstructed {}",
+                idx + 1,
+                action,
+                expected_phase,
+                actual_phase,
+            ));
+        }
+
+        let mut args = verb.get("args").cloned().unwrap_or_else(|| json!({}));
+        if action == "new-run" {
+            if let Some(seed) = seed {
+                args["seed"] = json!(seed);
+            }
+        }
+        let rev = current
+            .get("rev")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| format!("verb {} precondition has no rev", idx + 1))?;
+        let run_id = current
+            .get("runId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("verb {} precondition has no runId", idx + 1))?;
+        eprintln!("replay {}/{}: {} {}", idx + 1, verbs.len(), action, args);
+        let response = client.post(
+            "/step",
+            json!({
+                "action": action,
+                "args": args,
+                "ifRev": rev,
+                "ifRun": run_id,
+                "follow": 10_000,
+            }),
+        )?;
+        if response.get("settled").and_then(Value::as_bool) != Some(true) {
+            return Err(format!(
+                "divergence at verb {} ({}): reconstruction timed out",
+                idx + 1,
+                action,
+            ));
+        }
+        let next = response
+            .get("obs")
+            .cloned()
+            .ok_or_else(|| format!("verb {} follow response has no obs", idx + 1))?;
+
+        if let Some(expected) = verb.get("phaseAfter").and_then(Value::as_str) {
+            let actual = next.get("phase").and_then(Value::as_str).unwrap_or("?");
+            if actual != expected {
+                return Err(format!(
+                    "divergence at verb {} ({}): phase after was {}, reconstructed {}",
+                    idx + 1,
+                    action,
+                    expected,
+                    actual,
+                ));
+            }
+        }
+        let expected = verb
+            .get("fingerprint")
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("verb {} has no fingerprint", idx + 1))?;
+        let actual = state_fingerprint(&next);
+        if actual != expected {
+            return Err(format!(
+                "divergence at verb {} ({}): fingerprint {} != {}",
+                idx + 1,
+                action,
+                expected,
+                actual,
+            ));
+        }
+        verified += 1;
+        current = next;
+    }
+
+    Ok(json!({
+        "ok": true,
+        "kind": "diagnostic_reconstruction_result",
+        "sourceRunId": source_run_id,
+        "reconstructionRunId": current.get("runId").cloned().unwrap_or(Value::Null),
+        "verifiedFingerprints": verified,
+        "totalVerbs": verbs.len(),
+        "attribution": "the final observation belongs to the reconstruction, not the source run",
+        "reconstructedFinalObs": current,
+    }))
+}
+
+fn state_fingerprint(value: &Value) -> String {
+    let mut stable = value.clone();
+    remove_volatile(&mut stable);
+    let bytes = serde_json::to_vec(&stable).unwrap_or_default();
+    let mut hash: u64 = 14_695_981_039_346_656_037;
+    for byte in bytes {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(1_099_511_628_211);
+    }
+    format!("{hash:016x}")
+}
+
+fn remove_volatile(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            map.remove("rev");
+            map.remove("runId");
+            for child in map.values_mut() {
+                remove_volatile(child);
+            }
+        }
+        Value::Array(items) => {
+            for child in items {
+                remove_volatile(child);
+            }
+        }
+        _ => {}
+    }
 }
 
 // The HTTP side of every subcommand. --verbose traces round-trips on
@@ -348,6 +576,16 @@ impl Client {
             );
         }
         handle(result)
+    }
+}
+
+impl ReplayTransport for Client {
+    fn get(&self, path: &str) -> Result<Value, String> {
+        Client::get(self, path)
+    }
+
+    fn post(&self, path: &str, body: Value) -> Result<Value, String> {
+        Client::post(self, path, body)
     }
 }
 
@@ -466,6 +704,7 @@ fn handle(result: Result<ureq::Response, ureq::Error>) -> Result<Value, String> 
 mod tests {
     use super::*;
     use clap::Parser;
+    use std::cell::{Cell, RefCell};
 
     fn strings(values: &[&str]) -> Vec<String> {
         values.iter().map(|s| s.to_string()).collect()
@@ -477,6 +716,59 @@ mod tests {
             "buildHash": "abc1234",
             "protocolVersion": protocol,
             "capabilities": { "verbs": verbs, "cheats": cheats }
+        })
+    }
+
+    struct ReplaySpy {
+        health: Value,
+        gets: RefCell<Vec<String>>,
+        posts: Cell<usize>,
+    }
+
+    impl ReplaySpy {
+        fn new(health: Value) -> Self {
+            Self {
+                health,
+                gets: RefCell::new(Vec::new()),
+                posts: Cell::new(0),
+            }
+        }
+    }
+
+    impl ReplayTransport for ReplaySpy {
+        fn get(&self, path: &str) -> Result<Value, String> {
+            self.gets.borrow_mut().push(path.to_string());
+            match path {
+                "/health" => Ok(self.health.clone()),
+                "/obs" => Ok(json!({"phase":"main_menu", "runId":"none", "rev":1})),
+                _ => Err(format!("unexpected GET {path}")),
+            }
+        }
+
+        fn post(&self, _path: &str, _body: Value) -> Result<Value, String> {
+            self.posts.set(self.posts.get() + 1);
+            Err("unexpected POST".to_string())
+        }
+    }
+
+    fn replay_recipe(verbs: Vec<Value>) -> Value {
+        json!({
+            "complete": true,
+            "runId": "source-run",
+            "seed": "REPLAYTEST",
+            "verbs": verbs,
+        })
+    }
+
+    fn followed_verb(action: &str, args: Value) -> Value {
+        json!({
+            "runId": "source-run",
+            "action": action,
+            "args": args,
+            "phaseBefore": "main_menu",
+            "phaseAfter": "event",
+            "outcome": "settled",
+            "fingerprint": "0000000000000001",
         })
     }
 
@@ -608,7 +900,12 @@ mod tests {
         assert_eq!(bare.follow, Some(5000));
 
         let timed = Cli::try_parse_from([
-            "spirescry", "end-turn", "--follow", "8000", "--if-rev", "42",
+            "spirescry",
+            "end-turn",
+            "--follow",
+            "8000",
+            "--if-rev",
+            "42",
         ])
         .unwrap();
         assert_eq!(timed.follow, Some(8000));
@@ -616,6 +913,43 @@ mod tests {
 
         let off = Cli::try_parse_from(["spirescry", "end-turn"]).unwrap();
         assert_eq!(off.follow, None);
+    }
+
+    #[test]
+    fn replay_fingerprint_ignores_revision_and_run_identity_only() {
+        let a = json!({"phase":"map", "rev":1, "runId":"source", "hp":[50, 80]});
+        let b = json!({"phase":"map", "rev":900, "runId":"replay", "hp":[50, 80]});
+        let changed = json!({"phase":"map", "rev":1, "runId":"source", "hp":[49, 80]});
+
+        assert_eq!(state_fingerprint(&a), state_fingerprint(&b));
+        assert_ne!(state_fingerprint(&a), state_fingerprint(&changed));
+    }
+
+    #[test]
+    fn replay_protocol_mismatch_fails_before_obs_or_any_post() {
+        let spy = ReplaySpy::new(health(PROTOCOL_VERSION + 1, &["new-run"], &[]));
+        let recipe = replay_recipe(vec![followed_verb("new-run", json!({}))]);
+
+        let error = replay_value(&spy, &recipe).unwrap_err();
+
+        assert!(error.contains("incompatible host protocol"), "{error}");
+        assert_eq!(*spy.gets.borrow(), ["/health"]);
+        assert_eq!(spy.posts.get(), 0);
+    }
+
+    #[test]
+    fn replay_missing_late_capability_fails_before_obs_or_any_post() {
+        let spy = ReplaySpy::new(health(PROTOCOL_VERSION, &["new-run", "cheat"], &[]));
+        let recipe = replay_recipe(vec![
+            followed_verb("new-run", json!({})),
+            followed_verb("cheat", json!({"name":"gold", "value":100})),
+        ]);
+
+        let error = replay_value(&spy, &recipe).unwrap_err();
+
+        assert!(error.contains("does not advertise cheat 'gold'"), "{error}");
+        assert_eq!(*spy.gets.borrow(), ["/health"]);
+        assert_eq!(spy.posts.get(), 0);
     }
 
     #[test]
@@ -721,10 +1055,15 @@ mod tests {
 
     #[test]
     fn protocol_mismatch_names_both_versions_and_build() {
-        let err = validate_health(&health(2, &["play"], &[]), Some("play"), None).unwrap_err();
+        let old_protocol = PROTOCOL_VERSION - 1;
+        let err =
+            validate_health(&health(old_protocol, &["play"], &[]), Some("play"), None).unwrap_err();
 
-        assert!(err.contains("protocol 2"), "{err}");
-        assert!(err.contains("expects 1"), "{err}");
+        assert!(err.contains(&format!("protocol {old_protocol}")), "{err}");
+        assert!(
+            err.contains(&format!("expects {PROTOCOL_VERSION}")),
+            "{err}"
+        );
         assert!(err.contains("abc1234"), "{err}");
     }
 

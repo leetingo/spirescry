@@ -18,7 +18,7 @@ public static class Mod
 
     // Bumped whenever the bridge's request/response contract changes
     // shape — the CLI's detector for a host it doesn't understand.
-    public const int ProtocolVersion = 1;
+    public const int ProtocolVersion = 2;
 
     // The short git hash build.sh stamps via -p:SourceRevisionId (the
     // SDK appends it to InformationalVersion after a '+'). The stamp's

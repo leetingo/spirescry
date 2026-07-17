@@ -87,6 +87,13 @@ public static class Handlers
         });
     }
 
+    public static async Task<Response> GetRunLog() =>
+        await MainThreadPump.Instance!.Run(() =>
+        {
+            var liveRunId = Signals.RefreshRunIdentity();
+            return Response.Json(RunLog.Snapshot(liveRunId));
+        });
+
     public static async Task<Response> Step(string body)
     {
         string action;
@@ -168,12 +175,15 @@ public static class Handlers
                 return (dispatch: DispatchResult.Reject("external_change",
                     $"run {ifRun} is gone — the live run is {runId}"),
                     rev: Signals.Revision, runId, phaseBefore,
-                    startedRev: Signals.Revision, startedTick: tickBefore);
+                    startedRev: Signals.Revision, startedTick: tickBefore,
+                    logEntryId: (long?)null);
             if (ifRev is { } expectedRev && Signals.Revision != expectedRev)
                 return (dispatch: DispatchResult.Reject("stale_state",
                     $"rev moved {expectedRev}->{Signals.Revision} since you scried — rescry and decide again"),
                     rev: Signals.Revision, runId, phaseBefore,
-                    startedRev: Signals.Revision, startedTick: tickBefore);
+                    startedRev: Signals.Revision, startedTick: tickBefore,
+                    logEntryId: (long?)null);
+            var runIdBefore = runId;
             var before = Signals.Revision;
             var r = Dispatcher.Dispatch(action, args);
             // Verbs that resolve inline within one phase (host-mode Neow
@@ -183,8 +193,15 @@ public static class Handlers
             if (r.Ok && Signals.Revision == before)
                 Signals.Bump($"step:{action}");
             runId = Signals.RefreshRunIdentity();
+            long? logEntryId = null;
+            if (r.Ok)
+            {
+                var attributedRunId = action == "new-run" ? runId : runIdBefore;
+                logEntryId = RunLog.RecordAccepted(
+                    action, args, attributedRunId, phaseBefore, before, Signals.Revision);
+            }
             return (dispatch: r, rev: Signals.Revision, runId, phaseBefore,
-                startedRev: before, startedTick: tickBefore);
+                startedRev: before, startedTick: tickBefore, logEntryId);
         });
         if (!result.dispatch.Ok)
             return Response.Error(
@@ -194,7 +211,7 @@ public static class Handlers
         if (followMs is { } follow)
             return await Follow(
                 action, result.startedRev, result.rev, result.phaseBefore,
-                result.startedTick, follow);
+                result.startedTick, follow, result.logEntryId);
 
         // A success Msg is a note (e.g. "settled with victory cleanup").
         return result.dispatch.Msg is null
@@ -211,7 +228,8 @@ public static class Handlers
         long acceptedRev,
         string phaseBefore,
         long acceptedTick,
-        int timeoutMs)
+        int timeoutMs,
+        long? logEntryId)
     {
         var deadline = DateTime.UtcNow.AddMilliseconds(timeoutMs);
         var since = acceptedRev;
@@ -226,7 +244,8 @@ public static class Handlers
             if (outcome is not null)
             {
                 if (probe.Headless)
-                    return FollowResponse(action, startedRev, acceptedRev, outcome, probe);
+                    return FollowResponse(
+                        action, startedRev, acceptedRev, outcome, probe, logEntryId);
 
                 if (outcome == candidateOutcome
                     && probe.StateKey == candidateState
@@ -244,7 +263,7 @@ public static class Handlers
                 // frames before claiming that follow reached a boundary.
                 if (stableFrames >= 3)
                     return FollowResponse(
-                        action, startedRev, acceptedRev, candidateOutcome, probe);
+                        action, startedRev, acceptedRev, candidateOutcome, probe, logEntryId);
             }
             else
             {
@@ -255,7 +274,8 @@ public static class Handlers
 
             var remaining = (int)Math.Max(0, (deadline - DateTime.UtcNow).TotalMilliseconds);
             if (remaining == 0)
-                return FollowResponse(action, startedRev, acceptedRev, "timeout", probe);
+                return FollowResponse(
+                    action, startedRev, acceptedRev, "timeout", probe, logEntryId);
             if (!probe.Headless && outcome is not null)
                 await Signals.WaitForTick(probe.Tick, remaining);
             else
@@ -269,8 +289,11 @@ public static class Handlers
         long startedRev,
         long acceptedRev,
         string outcome,
-        FollowProbe probe)
+        FollowProbe probe,
+        long? logEntryId)
     {
+        if (logEntryId is { } id)
+            RunLog.RecordOutcome(id, outcome, probe.Observation);
         var node = new JsonObject
         {
             ["ok"] = true,

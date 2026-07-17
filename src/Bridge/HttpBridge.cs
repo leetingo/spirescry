@@ -91,6 +91,7 @@ public sealed class HttpBridge
             {
                 ("GET", "/health") => await Handlers.Health(),
                 ("GET", "/models") => await Handlers.Models(req.QueryString["kind"]),
+                ("GET", "/runlog") => await Handlers.GetRunLog(),
                 ("GET", "/obs") => await Handlers.Obs(
                     req.QueryString["since"], req.QueryString["wait"],
                     req.QueryString["compact"], req.QueryString["decision"],

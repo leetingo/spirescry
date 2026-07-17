@@ -117,6 +117,17 @@ side on stderr; both stamp the same UTC clock, so the two logs line up.
 (engine-headless: `spirescry-headless.log`), foreground included; the
 previous boot's log survives at `.log.1`.
 
+**Diagnostic reconstruction.** `spirescry runlog > run.json` records the
+current run's seed and accepted bridge verbs; every entry is attributed to
+one `runId`. A recipe is complete only when every verb used follow, reached
+`settled` or `next_decision`, and recorded a state fingerprint. From a clean
+`main_menu` (`runId: none`), `spirescry replay run.json` re-drives that recipe
+with CAS guards and follow settlement, checking every recorded state
+fingerprint and stopping at the first divergence.
+This is a debugging aid, not authoritative replay recording: the output is
+explicitly a new reconstruction with its own `runId`, and its final state
+must never be attributed to the source run.
+
 ## Three ways to run, one bridge
 
 ```sh
@@ -250,9 +261,10 @@ but not a hard memory barrier.
 
 ## Non-goals
 
-Remote access or auth (loopback only), multiplayer, replay recording, a
-TUI. For those, this project's bigger sibling exists; spirescry stays the
-minimal single-player agent interface.
+Remote access or auth (loopback only), multiplayer, authoritative replay
+recording or run-history recovery, a TUI. The runlog above is only a
+verified diagnostic recipe; spirescry remains the minimal single-player
+agent interface.
 
 ---
 
