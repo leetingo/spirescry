@@ -218,6 +218,25 @@ internal static class Tests
         Equal("pick-card,skip,abandon", string.Join(',', legal));
     }
 
+    public static void DecisionUnavailableTransitionsDoNotAdvertiseActions()
+    {
+        foreach (var phase in new[] { "event", "rewards" })
+        {
+            var snapshot = System.Text.Json.Nodes.JsonNode.Parse($$"""
+                {
+                  "phase":"{{phase}}",
+                  "available":false,
+                  "options":[{"idx":0}],
+                  "rewards":[{"idx":0}]
+                }
+                """)!.AsObject();
+
+            var legal = DecisionProjection.LegalVerbs(snapshot, runActive: false);
+
+            Equal("", string.Join(',', legal));
+        }
+    }
+
     private static void Equal(object? expected, object? actual)
     {
         if (!Equals(expected, actual))

@@ -266,6 +266,40 @@ def p7():
 @case("P8 run identity and optimistic guards")
 def p8():
     to_menu()
+    menu = obs()
+    assert menu["runId"] == "none", menu
+    launch(seed="CIGUARDS")
+    cur = obs()
+    run_id, rev = cur["runId"], cur["rev"]
+    assert run_id != "none", cur
+
+    status, d = http("POST", "/step", {
+        "action": "proceed", "args": {}, "ifRun": "replaced-run",
+    })
+    assert status == 400 and d.get("err") == "external_change", d
+    assert d.get("runId") == run_id, d
+
+    status, d = http("POST", "/step", {
+        "action": "proceed", "args": {}, "ifRun": run_id,
+        "ifRev": max(0, rev - 1),
+    })
+    assert status == 400 and d.get("err") == "stale_state", d
+    assert d.get("runId") == run_id, d
+
+    for bad in ({"ifRev": "1"}, {"ifRev": -1}, {"ifRun": ""}):
+        status, d = http("POST", "/step", {
+            "action": "proceed", "args": {}, **bad,
+        })
+        assert status == 400 and d.get("err") == "bad_request", (bad, d)
+        assert d.get("runId") == run_id, d
+
+    status, d = http("POST", "/step", {
+        "action": "proceed", "args": {}, "ifRun": run_id, "ifRev": rev,
+    })
+    assert status == 200 and d.get("ok") is True, d
+    assert d.get("runId") == run_id, d
+    bridge.wait_phase("map")
+    to_menu()
 
 
 @case("P9 decision projection is stable and caller-scoped")
@@ -301,40 +335,6 @@ def p9():
     cached = run("obs", "--decision", "--known-card", known)
     assert all(c.get("description") is None
                for c in cached["hand"] if c["textKey"] == known), cached["hand"]
-    to_menu()
-    menu = obs()
-    assert menu["runId"] == "none", menu
-    launch(seed="CIGUARDS")
-    cur = obs()
-    run_id, rev = cur["runId"], cur["rev"]
-    assert run_id != "none", cur
-
-    status, d = http("POST", "/step", {
-        "action": "proceed", "args": {}, "ifRun": "replaced-run",
-    })
-    assert status == 400 and d.get("err") == "external_change", d
-    assert d.get("runId") == run_id, d
-
-    status, d = http("POST", "/step", {
-        "action": "proceed", "args": {}, "ifRun": run_id,
-        "ifRev": max(0, rev - 1),
-    })
-    assert status == 400 and d.get("err") == "stale_state", d
-    assert d.get("runId") == run_id, d
-
-    for bad in ({"ifRev": "1"}, {"ifRev": -1}, {"ifRun": ""}):
-        status, d = http("POST", "/step", {
-            "action": "proceed", "args": {}, **bad,
-        })
-        assert status == 400 and d.get("err") == "bad_request", (bad, d)
-        assert d.get("runId") == run_id, d
-
-    status, d = http("POST", "/step", {
-        "action": "proceed", "args": {}, "ifRun": run_id, "ifRev": rev,
-    })
-    assert status == 200 and d.get("ok") is True, d
-    assert d.get("runId") == run_id, d
-    bridge.wait_phase("map")
     to_menu()
 
 

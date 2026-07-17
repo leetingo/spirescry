@@ -43,6 +43,7 @@ internal static class DecisionProjection
                 }
                 break;
             case "event":
+                if (snapshot["available"]?.GetValue<bool>() == false) break;
                 if (Any(snapshot, "options", option =>
                     option["locked"]?.GetValue<bool>() != true
                     && option["chosen"]?.GetValue<bool>() != true))
@@ -67,6 +68,7 @@ internal static class DecisionProjection
                 if (snapshot["proceedAvailable"]?.GetValue<bool>() == true) Add("proceed");
                 break;
             case "rewards":
+                if (snapshot["available"]?.GetValue<bool>() == false) break;
                 if (HasItems(snapshot, "rewards")) Add("pick-reward");
                 Add("proceed");
                 break;
