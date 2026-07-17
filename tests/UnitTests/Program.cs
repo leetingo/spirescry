@@ -156,6 +156,13 @@ internal static class Tests
         Equal(InlineFaultKind.Failed, ResolutionGuards.ClassifyInlineFault(
             new InvalidOperationException("some other queue failure"),
             "EndPlayerTurnAction", combatInProgress: false, revisionChanged: false));
+
+        Equal(InlineFaultKind.VictorySettled, ResolutionGuards.ClassifyInlineFault(
+            new AggregateException(pop),
+            "EndPlayerTurnAction", combatInProgress: false, revisionChanged: false));
+        Equal(InlineFaultKind.Failed, ResolutionGuards.ClassifyInlineFault(
+            new AggregateException(new InvalidOperationException("some other queue failure")),
+            "EndPlayerTurnAction", combatInProgress: false, revisionChanged: false));
     }
 
     public static void InlineFaultClassificationDistinguishesPartialFromFailed()

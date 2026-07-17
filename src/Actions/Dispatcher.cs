@@ -554,6 +554,7 @@ public static class Dispatcher
         try
         {
             resolve();
+            ClearFaultedCompletedCombatExecutor();
             return DispatchResult.Success();
         }
         catch (Exception ex)
@@ -565,6 +566,14 @@ public static class Dispatcher
                 Signals.Revision != revisionBefore);
             if (fault is InlineFaultKind.VictorySettled)
             {
+                // Victory teardown clears the queues before the completed
+                // action pops itself. The executor then retains its faulted
+                // completion task even though combat and its effects finished;
+                // StartCombatInternal observes that same task in the next
+                // room and faults before the new fight can start. Normalize
+                // the already-empty bookkeeping at this exact known-success
+                // boundary. Other inline faults still become wedges below.
+                ClearFaultedCompletedCombatExecutor();
                 SafeLog.Info($"{actionName} settled by combat teardown ({ex.Message})");
                 return DispatchResult.Success(
                     $"{actionName} fully settled with victory cleanup");
@@ -580,6 +589,38 @@ public static class Dispatcher
                     : $"{actionName} failed before an observable change: {ex.GetType().Name}: {ex.Message}",
                 status: 500);
         }
+    }
+
+    private static void ClearFaultedCompletedCombatExecutor()
+    {
+        var rm = RunManager.Instance;
+        if (CombatManager.Instance is { IsInProgress: true }
+            || rm?.DebugOnlyGetState()?.CurrentRoom is not CombatRoom { IsPreFinished: true })
+            return;
+
+        var executor = rm.ActionExecutor;
+        if (executor?.CurrentlyRunningAction is not EndPlayerTurnAction
+            || Reflect.FieldValue(executor, "_queueTaskCompletionSource")
+                is not TaskCompletionSource<bool> completion
+            || !completion.Task.IsFaulted
+            || completion.Task.Exception is not { } completionError
+            || ResolutionGuards.ClassifyInlineFault(
+                completionError,
+                "EndPlayerTurnAction",
+                combatInProgress: false,
+                revisionChanged: false) is not InlineFaultKind.VictorySettled
+            || EngineQueues.All(rm).Any(queue => queue.depth > 0))
+            return;
+
+        // ActionExecutor stores its last run in this completion source.
+        // The engine logs the stale-pop exception via RunSafely, but leaves
+        // the faulted task here; the next StartCombatInternal awaits it and
+        // faults before registering the new fight. Clear only this completed,
+        // faulted EndPlayerTurnAction state. ActionQueueSet.Reset is not safe
+        // between rooms because it also deletes every player queue.
+        Reflect.SetField(executor, "_queueTaskCompletionSource", null);
+        Reflect.SetPropertyOrBackingField(executor, "CurrentlyRunningAction", null);
+        SafeLog.Info("cleared faulted victory EndPlayerTurnAction executor state");
     }
 
     // Engine calls that return Tasks must not block the main thread —
@@ -1443,6 +1484,12 @@ public static class Dispatcher
 
     private static DispatchResult CombatVerb(string action, JsonElement args)
     {
+        // A hand/card picker owns combat input until its completion source is
+        // resolved. CombatManager remains in progress underneath, so checking
+        // it alone would accept play/end-turn/potion-use and let a second
+        // picker overwrite the first HeadlessPicker frame (#31).
+        if (RequirePhase(Phase.Combat) is { } phaseErr) return phaseErr;
+
         var combat = CombatManager.Instance;
         if (combat is null || !combat.IsInProgress)
             return DispatchResult.Reject("bad_phase", "not in combat");
@@ -1507,6 +1554,12 @@ public static class Dispatcher
         var player = rs is null ? null : LocalContext.GetMe(rs);
         if (rm is null || player is null)
             return DispatchResult.Reject("not_ready", "no run in progress");
+        // Outside combat, discarding remains legal in every run phase. During
+        // combat, however, a hand/card picker temporarily owns input even
+        // though CombatManager still reports an in-progress fight.
+        if (CombatManager.Instance is { IsInProgress: true }
+            && RequirePhase(Phase.Combat) is { } phaseErr)
+            return phaseErr;
         var slots = player.PotionSlots;
         if (slot < 0 || slot >= slots.Count || slots[slot] is null)
             return DispatchResult.Reject("bad_index", $"no potion in slot {slot}");

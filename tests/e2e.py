@@ -862,6 +862,60 @@ def c5():
     to_menu()
 
 
+@case("C6 an active hand picker retains exclusive combat input")
+def c6():
+    # Regression for #31. A delayed picker owns the player-choice context;
+    # accepting another picker-opening combat action here overwrites the
+    # first completion source and crosses the engine's context stack.
+    into_combat(seed="CINESTEDPICK", character="SILENT")
+    run("cheat", "card", "TOOLS_OF_THE_TRADE")
+    run("cheat", "potion", "FLEX_POTION")
+    potion_slot = obs()["potions"][0]["slot"]
+    run("cheat", "energy", "99")
+    run("play", "TOOLS_OF_THE_TRADE")
+    run("end-turn")
+    first = bridge.wait_phase("hand_select", timeout=25)
+    assert first.get("cards"), first
+
+    run("cheat", "card", "ARMAMENTS")
+    run("cheat", "energy", "99")
+    err = reject(["play", "ARMAMENTS"], "bad_phase")
+    assert "hand_select" in err, err
+    err = reject(["potion-discard", str(potion_slot)], "bad_phase")
+    assert "hand_select" in err, err
+
+    still_first = obs()
+    assert still_first["phase"] == "hand_select", still_first
+    assert [c["model"] for c in still_first["cards"]] == [
+        c["model"] for c in first["cards"]
+    ], (first, still_first)
+    run("pick-card", str(still_first["cards"][0]["idx"]))
+    time.sleep(0.5)
+    assert obs()["phase"] == "combat", obs()
+    to_menu()
+
+
+@case("C7 a victory teardown cannot poison the next combat")
+def c7():
+    # Regression for the M1 batch failure: Soul Nexus ends inside an
+    # EndPlayerTurnAction whose victory cleanup clears the queue before the
+    # action pops itself. The next combat must not re-observe that stale task.
+    import parity
+    import sweeps
+
+    sweeps.fresh_run("CIPAIRTEARDOWN")
+    for encounter in ("SOUL_NEXUS_ELITE", "SPINY_TOAD_NORMAL"):
+        sweeps.settle_to_map()
+        run("cheat", "combat", encounter)
+        combat = bridge.wait_phase(
+            "combat", timeout=20, raise_on_timeout=False)
+        assert combat is not None and combat.get("enemies"), (
+            encounter, obs())
+        parity.kill_current_combat()
+        sweeps.settle_to_map()
+    to_menu()
+
+
 # ---------- V: victory ----------
 
 @case("V1 cheat-driven full clear reaches a victory game_over")
