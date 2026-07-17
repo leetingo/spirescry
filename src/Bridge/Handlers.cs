@@ -66,21 +66,23 @@ public static class Handlers
         var wait = int.TryParse(waitStr, out var w) ? Math.Clamp(w, 0, 60_000) : 0;
         var compact = compactStr is "1" or "true";
         var decision = decisionStr is "1" or "true";
-        var changed = since < 0 || wait == 0 || await Signals.WaitForChange(since, wait);
+        if (since >= 0 && wait > 0)
+            await Signals.WaitForChange(since, wait);
 
         return await MainThreadPump.Instance!.Run(() =>
         {
             var runId = Signals.RefreshRunIdentity();
             var snapshot = Snapshotter.ForCurrentPhase(compact, decision, knownCards ?? []);
             var node = JsonSerializer.SerializeToNode(snapshot)!.AsObject();
-            node["rev"] = Signals.Revision;
+            var revision = Signals.Revision;
+            node["rev"] = revision;
             node["runId"] = runId;
             if (decision)
                 node["legal"] = JsonSerializer.SerializeToNode(
                     DecisionProjection.LegalVerbs(node, runId != "none"));
             if (since >= 0)
             {
-                node["changed"] = changed;
+                node["changed"] = revision > since;
                 node["events"] = JsonSerializer.SerializeToNode(Signals.EventsSince(since));
             }
             return new Response { Body = node.ToJsonString() };
@@ -163,7 +165,7 @@ public static class Handlers
             return await MainThreadPump.Instance!.Run(() =>
             {
                 var runId = Signals.RefreshRunIdentity();
-                return Response.Error("bad_request", parseError, runId: runId);
+                return Response.Error(RejectionCodes.BadRequest, parseError, runId: runId);
             });
 
         var result = await MainThreadPump.Instance!.Run(() =>
@@ -172,13 +174,13 @@ public static class Handlers
             var phaseBefore = PhaseDetector.Current().AsString();
             var tickBefore = Signals.TickCount;
             if (ifRun is not null && ifRun != runId)
-                return (dispatch: DispatchResult.Reject("external_change",
+                return (dispatch: DispatchResult.Reject(RejectionCodes.ExternalChange,
                     $"run {ifRun} is gone — the live run is {runId}"),
                     rev: Signals.Revision, runId, phaseBefore,
                     startedRev: Signals.Revision, startedTick: tickBefore,
                     logEntryId: (long?)null);
             if (ifRev is { } expectedRev && Signals.Revision != expectedRev)
-                return (dispatch: DispatchResult.Reject("stale_state",
+                return (dispatch: DispatchResult.Reject(RejectionCodes.StaleState,
                     $"rev moved {expectedRev}->{Signals.Revision} since you scried — rescry and decide again"),
                     rev: Signals.Revision, runId, phaseBefore,
                     startedRev: Signals.Revision, startedTick: tickBefore,
@@ -397,7 +399,7 @@ public static class Handlers
             _ => null,
         });
         return entries is null
-            ? Response.Error("bad_request",
+            ? Response.Error(RejectionCodes.BadRequest,
                 "kind must be card|relic|potion|event|encounter|character")
             : Response.Json(new { ok = true, kind, entries });
     }

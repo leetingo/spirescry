@@ -5,6 +5,19 @@ using System.Runtime.CompilerServices;
 
 namespace Godot;
 
+public enum Error
+{
+    Ok, Failed, Unavailable, Unconfigured, Unauthorized, ParameterRangeError,
+    OutOfMemory, FileNotFound, FileBadDrive, FileBadPath, FileNoPermission,
+    FileAlreadyInUse, FileCantOpen, FileCantWrite, FileCantRead, FileUnrecognized,
+    FileCorrupt, FileMissingDependencies, FileEof, CantOpen, CantCreate, QueryFailed,
+    AlreadyInUse, Locked, Timeout, CantConnect, CantResolve, ConnectionError,
+    CantAcquireResource, CantFork, InvalidData, InvalidParameter, AlreadyExists,
+    DoesNotExist, DatabaseCantRead, DatabaseCantWrite, CompilationFailed,
+    MethodNotFound, LinkFailed, ScriptFailed, CyclicLink, InvalidDeclaration,
+    DuplicateSymbol, ParseError, Busy, Skip, Help, Bug,
+}
+
 // StringName wraps string. Must be a class (not struct) to match real Godot's
 // declaration — sts2 references StringName via class-typed fields/parameters.
 public sealed class StringName : IDisposable

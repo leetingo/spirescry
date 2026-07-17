@@ -88,8 +88,38 @@ Verbs: `new-run`,
 `pick-relic`, `confirm`, `skip`, `buy`, `leave`, `play`, `end-turn`,
 `potion-use`, `potion-discard`, `cheat` — each valid in its own phase.
 Errors ride on 4xx/5xx as `{"ok": false, "err": "<code>", "msg": "..."}`
-with codes that say what to change (`bad_phase`, `not_enough_energy`,
-`bad_target`, `not_ready`, …).
+with a stable machine-readable vocabulary:
+
+| Code | Meaning |
+| --- | --- |
+| `bad_request` | The verb or arguments are malformed or unsupported. |
+| `bad_phase` | The verb does not apply to the current phase. |
+| `bad_index` | An index or named item is absent from the current observation. |
+| `bad_target` | The requested map/combat target is not legal now. |
+| `bad_state` | The request needs another decision or state change; waiting alone cannot make this same request valid. |
+| `not_ready` | A transient engine/UI window; waiting and retrying can make the same request valid. |
+| `not_playable` | The chosen card, potion, relic, or option is currently prohibited by game rules. |
+| `not_enough_gold` | The purchase exceeds current gold. |
+| `not_enough_energy` | The card exceeds current energy. |
+| `not_enough_stars` | The card exceeds current stars. |
+| `run_exists` | `new-run` was requested while a run is already loaded. |
+| `stale_state` | `--if-rev` no longer matches; rescry before deciding. |
+| `external_change` | `--if-run` names a run that is no longer live. |
+| `resolution_partial` | An inline engine action faulted after observable state changed. |
+| `resolution_failed` | An inline engine action faulted before observable state changed. |
+| `not_found` | The HTTP route does not exist. |
+| `internal` | The bridge hit an invariant or unexpected implementation failure. |
+
+The CLI prints failures on stderr and exits `75` (`EX_TEMPFAIL`) only for
+`not_ready`; every other bridge rejection, local validation error, transport
+failure, or malformed response exits `1`. Success exits `0`. Callers should
+branch on the exit status, not parse the rendered error text.
+
+**Combat targets.** `play <model> --target <id>` and
+`potion-use <slot> --target <id>` take the combat ID shown on an enemy in the
+current observation. An enemy-targeted card or potion auto-targets when
+exactly one enemy is alive; with multiple living enemies an explicit target
+is required. Self, ally, and untargeted effects do not need an enemy ID.
 
 Health, observations, and step responses carry a `runId`: `none` between
 runs and a fresh token whenever the engine replaces its live `RunState`.
@@ -105,10 +135,22 @@ overlay stack) plus a per-tick phase diff as the safety net; a `/step`
 accepted without either (in-phase inline mutations — reward claims, shop
 buys) bumps it itself. `obs?since=` responses name the events behind the
 bump (`phase:map->combat`, `action:PlayCardAction`, `enqueued:...`,
-`step:buy`, `wedge:...`). No sleep-polling anywhere.
+`step:buy`, `wedge:...`). The server clamps `wait` to `0..60000` ms. Omitting
+`--wait` (or passing `0`) is a no-wait poll; pass a positive value explicitly
+when the caller should park for a change.
 
-**`GET /health`** adds live introspection: the currently executing engine
-action and its state, `executorStuckMs`, and per-queue depth/paused flags.
+The event log retains the latest 64 revision events. After a burst larger
+than that, an old `--since` still returns immediately with `changed: true`
+and the authoritative current observation, but `events` contains only the
+retained suffix and may not begin at `since + 1`. Treat it as a wake-up and
+diagnostic trail, not a durable replay log. No sleep-polling anywhere.
+
+**`GET /health`** returns identity and compatibility fields (`ok`, `mod`,
+`version`, `buildHash`, `protocolVersion`, and advertised verb/cheat
+`capabilities`), the current `phase`, `rev`, and `runId`, plus live executor
+diagnostics. `executor` is `null` or `ActionType:State`, `executorStuckMs` is
+the time spent on that same action, and each `queues` entry reports its
+`owner`, `depth`, and `paused` state.
 
 **Tracing a session.** `STS2_AGENT_HTTP_LOG=1` on the host makes the
 bridge log one line per request — verb, status, `rev` movement, wall
@@ -140,6 +182,8 @@ must never be attributed to the source run.
 # 3. pure .NET host — no game binary, no Godot engine, no Steam
 ./build.sh headless-setup   # one-time: deps + IL patch + loc tables + build
 ./build.sh host
+# Keep the host attached to this terminal/task (still logs to $TMPDIR):
+./build.sh host --foreground
 
 ./build.sh stop             # stops whichever is running
 ```
@@ -151,6 +195,11 @@ the engine's model-layer test entry points (`RunState.CreateForTest`,
 deferred `ICardSelector`s, a virtual rewards flow). Same protocol either
 way — in host mode actions also resolve inline, so `/step` returns with
 the effect already applied.
+
+`host --foreground` execs the host in the invoking process instead of
+starting a background child. Use it in CI, sandboxes, and agent runners that
+reap detached children; its lifetime then matches the terminal or task, and
+its output is still copied to `$TMPDIR/spirescry-host.log`.
 
 Host-mode differences: saves don't persist (runs are test-mode), card
 pickers auto-resolve once max cards are picked (`confirm` covers partial
@@ -176,9 +225,10 @@ picks), and text comes from tables extracted out of your local install's
   clicks a cell, `option 0/1` picks the divination tool).
 - **Reproducibility**: `new-run --seed --ascension`.
 - **Dev cheats** for single-point verification:
-  `cheat goto|gold|hp|stars|energy|heal|wound-enemies|event|combat|card|card-upgraded|relic|potion`
+  `cheat goto|gold|hp|stars|energy|heal|wound-enemies|event|combat|card|card-upgraded|relic|potion|async-fault`
   — jump anywhere on the act map, end fights fast, force any event or
-  encounter by model id, and graft content into the run. `models
+  encounter by model id, graft content into the run, or deliberately fault
+  tracked async work to verify the failure event stream. `models
   card|relic|potion|event|encounter|character` enumerates the current
   game build instead of baking ids into tests.
 

@@ -10,6 +10,23 @@ using CrystalMinigame = MegaCrit.Sts2.Core.Events.Custom.CrystalSphereEvent.Crys
 
 namespace Spirescry.State;
 
+// TreasureRoom.Enter primes relic picking before the GUI chest is clicked.
+// The headless host gates that engine callback so merely entering/observing
+// the room cannot reveal rewards; a bridge verb opens the gate explicitly.
+public static class HeadlessTreasure
+{
+    private static int _openDepth;
+
+    public static bool CanBeginRelicPicking => _openDepth > 0;
+
+    public static void Open(Action beginRelicPicking)
+    {
+        _openDepth++;
+        try { beginRelicPicking(); }
+        finally { _openDepth--; }
+    }
+}
+
 // The real GUI/headless boundary is completion ownership: every pending
 // player choice is a TaskCompletionSource the engine awaits, and someone
 // must hold it. In GUI boots the engine's own screens hold it (the bridge

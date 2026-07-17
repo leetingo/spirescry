@@ -72,7 +72,6 @@ run, obs = bridge.run, bridge.obs
 
 CASES = []
 LOG_PATH = None  # set in main() when --boot
-ROSTER = []  # collected by P5, consumed by R2
 # The pinned parity seed (see F1): full path coverage — shop with
 # potions (one opens a mid-combat picker in the boss fight), treasure,
 # smith. SPIRECI2/SPIRECI3 also pass, with less potion coverage.
@@ -117,18 +116,53 @@ def host_log():
 
 
 def to_menu():
-    bridge.run("abandon", ok=True)
+    bridge.run("abandon", allow_fail=True)
     bridge.wait_phase("main_menu", timeout=15)
 
 
 def launch(character="IRONCLAD", seed=None):
     to_menu()
-    args = ["new-run", character] + (["--seed", seed] if seed else [])
-    for attempt in range(3):
-        bridge.run(*args, ok=attempt > 0)
-        if bridge.wait_phase("event", timeout=30, raise_on_timeout=False):
-            return
-    raise AssertionError(f"new-run {character} never reached the Neow event")
+    bridge.launch_run(character=character, seed=seed)
+
+
+def character_roster():
+    to_menu()
+    err = reject(["new-run", "NOT_A_CHARACTER"], "bad_request")
+    names = [n for n in re.findall(r"[A-Z][A-Z_]{3,}", err)
+             if n != "NOT_A_CHARACTER"]
+    assert "IRONCLAD" in names, f"roster not in the rejection: {err}"
+    return list(dict.fromkeys(names))
+
+
+def run_test_script(script, *args):
+    completed = subprocess.run(
+        [sys.executable, os.path.join(REPO, "tests", script), *args])
+    assert completed.returncode == 0, \
+        f"{script} exited {completed.returncode}"
+
+
+def settle_to_map(max_steps=40):
+    for _ in range(max_steps):
+        d = obs()
+        phase = d.get("phase")
+        if phase == "map":
+            return d
+        if phase in ("main_menu", "game_over"):
+            raise AssertionError(f"run ended while settling to map: {phase}")
+        if phase == "event":
+            options = [option for option in d.get("options", [])
+                       if not option.get("locked") and not option.get("chosen")]
+            if options:
+                run("option", str(options[0]["idx"]), allow_fail=True)
+            else:
+                run("proceed", allow_fail=True)
+        else:
+            error = bridge.resolve_transient_phase(
+                d, claim_reward_tiles=True, claim_card_reward=True,
+                claim_relic_reward=True)
+            assert error is None, f"{phase}: {error}"
+        time.sleep(0.5)
+    raise AssertionError(f"world would not settle to map: {obs().get('phase')}")
 
 
 def to_map(seed=None, character="IRONCLAD"):
@@ -229,6 +263,27 @@ def p3():
     to_menu()
 
 
+@case("P3b no-wait since reports change honestly")
+def p3b():
+    to_menu()
+    cur = obs()["rev"]
+
+    t0 = time.monotonic()
+    unchanged = run("obs", "--since", str(cur))
+    assert time.monotonic() - t0 < 1, "omitted --wait unexpectedly parked"
+    assert unchanged.get("changed") is False, unchanged
+    assert unchanged.get("events") == [], unchanged.get("events")
+
+    explicit = run("obs", "--since", str(cur), "--wait", "0")
+    assert explicit.get("changed") is False, explicit
+
+    launch(seed="CIP3B")
+    advanced = run("obs", "--since", str(cur), "--wait", "0")
+    assert advanced.get("changed") is True, advanced
+    assert advanced.get("events"), "advanced rev returned no events"
+    to_menu()
+
+
 @case("P4 unknown routes 404")
 def p4():
     for method, path in (("GET", "/nope"), ("POST", "/obs"), ("GET", "/step")):
@@ -239,13 +294,7 @@ def p4():
 
 @case("P5 bad character is rejected with the roster")
 def p5():
-    to_menu()
-    err = reject(["new-run", "NOT_A_CHARACTER"], "bad_request")
-    names = [n for n in re.findall(r"[A-Z][A-Z_]{3,}", err)
-             if n != "NOT_A_CHARACTER"]
-    assert "IRONCLAD" in names, f"roster not in the rejection: {err}"
-    ROSTER[:] = list(dict.fromkeys(names))
-    print(f"    roster: {ROSTER}")
+    print(f"    roster: {character_roster()}")
 
 
 @case("P6 unknown cheat lists the surface")
@@ -446,6 +495,22 @@ def p11():
     to_menu()
 
 
+@case("P12 asynchronous verb faults wake observation waiters")
+def p12():
+    to_menu()
+    accepted = run("cheat", "async-fault")
+    t0 = time.monotonic()
+    changed = run("obs", "--since", str(accepted["rev"]), "--wait", "2000")
+    took = time.monotonic() - t0
+    fault_events = [
+        event for event in changed.get("events", [])
+        if event["type"].startswith("async_fault:forced-async-fault:")
+    ]
+    assert changed.get("changed") is True, changed
+    assert fault_events, changed.get("events")
+    assert took < 1.5, f"fault event did not wake parked obs ({took:.2f}s)"
+
+
 # ---------- R: run lifecycle ----------
 
 @case("R1 same seed, same world")
@@ -466,8 +531,7 @@ def r1():
 
 @case("R2 every character boots and fights")
 def r2():
-    assert ROSTER, "P5 did not collect a roster"
-    for c in ROSTER:
+    for c in character_roster():
         launch(character=c, seed="CICHAR")
         p = obs().get("player") or {}
         missing = [k for k in ("hp", "gold", "deck", "relics") if k not in p]
@@ -500,6 +564,16 @@ def r3():
     to_map(seed="CIR3")
     run("abandon")
     bridge.wait_phase("main_menu")
+
+
+@case("R3b pre-combat abandon tolerates missing combat manager", boot_only=True)
+def r3b():
+    to_map(seed="CIR3B")
+    before = len(host_log())
+    run("abandon")
+    bridge.wait_phase("main_menu")
+    teardown_log = host_log()[before:]
+    assert "abandon combat reset" not in teardown_log, teardown_log[-1000:]
 
 
 @case("R4 mid-combat abandon doesn't poison the next combat")
@@ -557,15 +631,14 @@ def c1():
         args = ["play", c["model"]]
         if c["target"] == "anyenemy":
             args += ["--target", str(alive_enemy(d)["id"])]
-        run(*args, ok=True)
+        run(*args, allow_fail=True)
         time.sleep(0.8)
     else:
         raise AssertionError("never ran out of energy in 8 plays")
 
     # Leave through the real death pipeline (R4 covers the mid-combat
     # abandon path directly).
-    import parity
-    parity.kill_current_combat()
+    bridge.kill_current_combat()
     bridge.wait_phase("rewards")
     run("proceed")
     bridge.wait_phase("map")
@@ -665,7 +738,7 @@ def s1():
 @case("W1 skip: card reward and treasure walk away clean")
 def w1():
     d = into_combat(seed="CISKIP")
-    run("cheat", "wound-enemies", ok=True)
+    run("cheat", "wound-enemies", allow_fail=True)
     atk = next(c for c in d["hand"] if c["target"] == "anyenemy")
     run("play", atk["model"], "--target", str(alive_enemy(d)["id"]))
     d = bridge.wait_phase("rewards")
@@ -688,10 +761,62 @@ def w1():
     relics0 = len(obs()["player"]["relics"])
     run("cheat", "goto", str(tre["col"]), str(tre["row"]))
     d = bridge.wait_phase("treasure")
-    assert d.get("relics"), "treasure offered no relics"
-    run("skip")
+    assert d.get("chestOpened") is False and not d.get("relics"), d
+    run("skip")  # opens the chest; observation stays read-only
+    assert obs().get("relics"), "opened treasure offered no relics"
+    run("skip")  # declines the visible offer
     time.sleep(1)
     assert len(obs()["player"]["relics"]) == relics0, "skip still granted a relic"
+    to_menu()
+
+
+@case("W2 CLI skip selects among multiple card reward alternatives")
+def w2():
+    d = into_combat(seed="CISKIPALT")
+    run("cheat", "relic", "PAELS_WING")
+    assert any(r["model"] == "PAELS_WING" for r in obs()["you"]["relics"]), \
+        "Pael's Wing was not obtained"
+
+    run("cheat", "wound-enemies", allow_fail=True)
+    atk = next(c for c in d["hand"] if c["target"] == "anyenemy")
+    run("play", atk["model"], "--target", str(alive_enemy(d)["id"]))
+    rewards = bridge.wait_phase("rewards")
+    card_tile = next(t for t in rewards["rewards"] if t["type"] == "card")
+    deck0 = len(obs()["player"]["deck"])
+    run("pick-reward", str(card_tile["idx"]))
+    offered = bridge.wait_phase("card_reward")
+    alternatives = offered.get("alternatives", [])
+    assert len(alternatives) >= 2, alternatives
+
+    reject(["skip"], "bad_request")
+    run("skip", str(alternatives[-1]["idx"]))
+    bridge.wait_phase("rewards", "map")
+    assert len(obs()["player"]["deck"]) == deck0, "alternative skip added a card"
+    to_menu()
+
+
+@case("W3 treasure observation is read-only until a verb opens the chest")
+def w3():
+    to_map(seed="CITREASUREOBS")
+    tre = next((p for p in obs()["graph"] if p["type"] == "treasure"), None)
+    assert tre, "seed CITREASUREOBS grew no treasure — re-pin the seed"
+    run("cheat", "goto", str(tre["col"]), str(tre["row"]))
+
+    first = bridge.wait_phase("treasure")
+    second = obs()
+    assert first["chestOpened"] is False and second["chestOpened"] is False
+    assert first["relics"] == [] and second["relics"] == []
+    assert first["player"]["gold"] == second["player"]["gold"], \
+        "observing the closed chest changed gold"
+
+    relics0 = len(first["player"]["relics"])
+    run("pick-relic", "0")  # first verb opens the headless chest
+    opened = obs()
+    assert opened["chestOpened"] is True and opened["relics"], opened
+    run("pick-relic", "0")  # second selects from the now-visible offer
+    assert len(obs()["player"]["relics"]) == relics0 + 1
+    run("proceed")
+    bridge.wait_phase("map")
     to_menu()
 
 
@@ -862,11 +987,78 @@ def c5():
     to_menu()
 
 
+@case("C6 an active hand picker retains exclusive combat input")
+def c6():
+    # Regression for #31. A delayed picker owns the player-choice context;
+    # accepting another picker-opening combat action here overwrites the
+    # first completion source and crosses the engine's context stack.
+    into_combat(seed="CINESTEDPICK", character="SILENT")
+    run("cheat", "card", "TOOLS_OF_THE_TRADE")
+    run("cheat", "potion", "FLEX_POTION")
+    potion_slot = obs()["potions"][0]["slot"]
+    run("cheat", "energy", "99")
+    run("play", "TOOLS_OF_THE_TRADE")
+    run("end-turn")
+    first = bridge.wait_phase("hand_select", timeout=25)
+    assert first.get("cards"), first
+
+    run("cheat", "card", "ARMAMENTS")
+    run("cheat", "energy", "99")
+    err = reject(["play", "ARMAMENTS"], "bad_phase")
+    assert "hand_select" in err, err
+    err = reject(["potion-discard", str(potion_slot)], "bad_phase")
+    assert "hand_select" in err, err
+
+    still_first = obs()
+    assert still_first["phase"] == "hand_select", still_first
+    assert [c["model"] for c in still_first["cards"]] == [
+        c["model"] for c in first["cards"]
+    ], (first, still_first)
+    run("pick-card", str(still_first["cards"][0]["idx"]))
+    time.sleep(0.5)
+    assert obs()["phase"] == "combat", obs()
+    to_menu()
+
+
+@case("C7 a victory teardown cannot poison the next combat")
+def c7():
+    # Regression for the M1 batch failure: Soul Nexus ends inside an
+    # EndPlayerTurnAction whose victory cleanup clears the queue before the
+    # action pops itself. The next combat must not re-observe that stale task.
+    to_map(seed="CIPAIRTEARDOWN")
+    for encounter in ("SOUL_NEXUS_ELITE", "SPINY_TOAD_NORMAL"):
+        settle_to_map()
+        run("cheat", "combat", encounter)
+        combat = bridge.wait_phase(
+            "combat", timeout=20, raise_on_timeout=False)
+        assert combat is not None and combat.get("enemies"), (
+            encounter, obs())
+        bridge.kill_current_combat()
+        settle_to_map()
+    to_menu()
+
+
+@case("C8 an incomplete selection is fatal, not transient")
+def c8():
+    d = to_map(seed="CIBADSTATE")
+    rest = next(point for point in d["graph"] if point["type"] == "restsite")
+    run("cheat", "goto", str(rest["col"]), str(rest["row"]))
+    d = bridge.wait_phase("rest_site")
+    smith = next(option for option in d["options"]
+                 if "smith" in option["id"].lower() and option["enabled"])
+    run("option", str(smith["idx"]))
+    bridge.wait_phase("card_select")
+
+    rejected = bridge.cli("confirm")
+    assert rejected.returncode == 1, rejected
+    assert "spirescry: bad_state:" in rejected.stderr, rejected.stderr
+    to_menu()
+
+
 # ---------- V: victory ----------
 
 @case("V1 cheat-driven full clear reaches a victory game_over")
 def v1():
-    import parity
     launch(seed="CIVICT")
     run("proceed")
     bridge.wait_phase("map")
@@ -875,9 +1067,9 @@ def v1():
         if d["phase"] != "map":
             break
         boss = next(p for p in d["graph"] if p["type"] == "boss")
-        run("cheat", "goto", str(boss["col"]), str(boss["row"]), ok=True)
+        run("cheat", "goto", str(boss["col"]), str(boss["row"]), allow_fail=True)
         bridge.wait_phase("combat", timeout=30)
-        parity.kill_current_combat()
+        bridge.kill_current_combat()
         # walk whatever follows — reward tiles, transition events,
         # pickers — until the next act's map or the victory screen
         for _ in range(40):
@@ -885,30 +1077,17 @@ def v1():
             ph = d["phase"]
             if ph in ("map", "game_over"):
                 break
-            if ph == "rewards":
-                tiles = d.get("rewards", [])
-                if tiles:
-                    run("pick-reward", str(tiles[0]["idx"]), ok=True)
-                else:
-                    run("proceed", ok=True)
-            elif ph == "relic_reward":
-                run("pick-relic", "0", ok=True)
-            elif ph == "card_reward":
-                run("skip", ok=True)
-            elif ph in ("card_select", "hand_select", "bundle_select"):
-                run("pick-card", "0", ok=True)
-                run("confirm", ok=True)
-            elif ph == "event":
+            if ph == "event":
                 opts = [x for x in d.get("options", [])
                         if not x.get("locked") and not x.get("chosen")]
                 if opts:
-                    run("option", str(opts[0]["idx"]), ok=True)
+                    run("option", str(opts[0]["idx"]), allow_fail=True)
                 else:
-                    run("proceed", ok=True)
-            elif ph == "combat":
-                parity.kill_current_combat()
+                    run("proceed", allow_fail=True)
             else:
-                run("proceed", ok=True)
+                error = bridge.resolve_transient_phase(
+                    d, claim_reward_tiles=True, claim_relic_reward=True)
+                assert error is None, f"{ph}: {error}"
             time.sleep(0.8)
         if obs()["phase"] == "game_over":
             break
@@ -926,39 +1105,32 @@ def v1():
 
 @case("E1 every event responds (every option unless --quick)")
 def e1():
-    import eventsweep
-    bad = eventsweep.sweep(all_options=not ARGS.quick)
-    assert not bad, f"{len(bad)} events misbehaved: {bad}"
+    args = []
+    if not ARGS.quick:
+        args.append("--all-options")
+    run_test_script("eventsweep.py", *args)
 
 
 # ---------- M: exhaustive content sweeps ----------
 
 @case("M1 bestiary: every encounter loads, fights, resolves", deep=True)
 def m1():
-    import sweeps
-    bad = sweeps.encounters()
-    assert not bad, f"{len(bad)} encounters misbehaved: {bad}"
+    run_test_script("sweeps.py", "encounters")
 
 
 @case("M2 every playable card executes; legality rejects cleanly", deep=True)
 def m2():
-    import sweeps
-    bad = sweeps.cards()
-    assert not bad, f"{len(bad)} cards misbehaved: {bad}"
+    run_test_script("sweeps.py", "cards")
 
 
 @case("M3 every potion procures and drinks", deep=True)
 def m3():
-    import sweeps
-    bad = sweeps.potions()
-    assert not bad, f"{len(bad)} potions misbehaved: {bad}"
+    run_test_script("sweeps.py", "potions")
 
 
 @case("M4 every legal relic obtain hook lands", deep=True)
 def m4():
-    import sweeps
-    bad = sweeps.relics()
-    assert not bad, f"{len(bad)} relics misbehaved: {bad}"
+    run_test_script("sweeps.py", "relics")
 
 
 @case("M5 delayed card effects expose their picker")
@@ -985,16 +1157,13 @@ def m5():
 
 @case("F1 act-1 parity loop")
 def f1():
-    import parity
-    parity.KEYS.clear()
     # Pinned seed: the pre-merge run wants the same map/shop/boss every
     # time. Re-pin via env after a game update reshuffles what the seed
     # generates.
-    parity.drive(seed=os.environ.get("SPIRESCRY_PARITY_SEED", PARITY_SEED))
+    args = ["--seed", os.environ.get("SPIRESCRY_PARITY_SEED", PARITY_SEED)]
     if ARGS.keys_out:
-        json.dump(parity.KEYS, open(ARGS.keys_out, "w"),
-                  indent=1, sort_keys=True)
-        print(f"    key sets -> {ARGS.keys_out}")
+        args.extend(["--keys-out", ARGS.keys_out])
+    run_test_script("parity.py", *args)
 
 
 # ---------- H: audit trail ----------

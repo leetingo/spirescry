@@ -13,6 +13,7 @@ using System.Reflection;
 using HarmonyLib;
 using MegaCrit.Sts2.Core.Modding;
 using MegaCrit.Sts2.Core.Models;
+using MegaCrit.Sts2.Core.Multiplayer.Game;
 using MegaCrit.Sts2.Core.Saves;
 using MegaCrit.Sts2.Core.TestSupport;
 using Spirescry.Bridge;
@@ -203,6 +204,7 @@ internal static class HeadlessBoot
         // that hangs on the first combat action is worse than not starting.
         PatchCmdWait();
         VerifyQueueWaitIlPatch();
+        PatchTreasureChestGate();
 
         // Cosmetic — a missing one loses a label or a particle, not liveness.
         try
@@ -261,6 +263,20 @@ internal static class HeadlessBoot
 
     private static bool SkipReattachFadeOutVoid() => false;
 
+    private static void PatchTreasureChestGate()
+    {
+        var method = typeof(TreasureRoomRelicSynchronizer).GetMethod(
+            nameof(TreasureRoomRelicSynchronizer.BeginRelicPicking),
+            BindingFlags.Public | BindingFlags.Instance)
+            ?? throw new InvalidOperationException(
+                "TreasureRoomRelicSynchronizer.BeginRelicPicking not found");
+        _harmony!.Patch(method, prefix: Local(nameof(BeginRelicPickingPrefix)));
+        HostLog.Info("gated treasure relic offers behind an explicit verb");
+    }
+
+    private static bool BeginRelicPickingPrefix() =>
+        HeadlessTreasure.CanBeginRelicPicking;
+
     // Custom reward offers (event trades like THE_FUTURE_OF_POTIONS) run
     // RewardsCmd.OfferCustom → RewardsSet.Offer, which shows the GUI
     // rewards screen and validates completion against it — headless that
@@ -271,15 +287,11 @@ internal static class HeadlessBoot
     // combat/treasure Offer() paths stay untouched.
     private static void RerouteCustomRewards()
     {
-        var m = typeof(MegaCrit.Sts2.Core.Commands.RewardsCmd)
-            .GetMethod("OfferCustom", BindingFlags.Public | BindingFlags.Static);
-        if (m is null)
-        {
-            HostLog.Info("RewardsCmd.OfferCustom not found — custom reward offers unsupported");
-            return;
-        }
-        _harmony!.Patch(m, prefix: Local(nameof(OfferCustomPrefix)));
-        HostLog.Info("rerouted custom reward offers to the headless stand-in");
+        Reroute(
+            typeof(MegaCrit.Sts2.Core.Commands.RewardsCmd), "OfferCustom",
+            BindingFlags.Public | BindingFlags.Static, nameof(OfferCustomPrefix),
+            "RewardsCmd.OfferCustom not found — custom reward offers unsupported",
+            "rerouted custom reward offers to the headless stand-in");
     }
 
     private static bool OfferCustomPrefix(
@@ -365,6 +377,41 @@ internal static class HeadlessBoot
         return null;
     }
 
+    private static int PatchMethodsAndSwallow(
+        IEnumerable<Type> types, BindingFlags flags,
+        Func<MethodInfo, bool> matches, bool completeFaultedTasks = false)
+    {
+        var patched = 0;
+        foreach (var t in types)
+        {
+            if (!t.IsClass) continue;
+            foreach (var m in t.GetMethods(flags))
+            {
+                if (!matches(m) || m.IsAbstract || m.IsGenericMethodDefinition) continue;
+                var finalizer = completeFaultedTasks
+                    && typeof(Task).IsAssignableFrom(m.ReturnType)
+                    ? SwallowTask : Swallow;
+                try { _harmony!.Patch(m, finalizer: finalizer); patched++; }
+                catch { }
+            }
+        }
+        return patched;
+    }
+
+    private static void Reroute(
+        Type type, string methodName, BindingFlags flags, string prefixName,
+        string missingLog, string successLog)
+    {
+        var method = type.GetMethod(methodName, flags);
+        if (method is null)
+        {
+            HostLog.Info(missingLog);
+            return;
+        }
+        _harmony!.Patch(method, prefix: Local(prefixName));
+        HostLog.Info(successLog);
+    }
+
     // Swallow-finalize every overload of the named methods on one type.
     private static void PatchFinalizersByName(string typeName, params string[] methods)
     {
@@ -372,12 +419,7 @@ internal static class HeadlessBoot
         if (t is null) return;
         var bf = BindingFlags.Public | BindingFlags.NonPublic
                  | BindingFlags.Instance | BindingFlags.Static;
-        foreach (var m in t.GetMethods(bf))
-        {
-            if (!methods.Contains(m.Name) || m.IsAbstract || m.IsGenericMethodDefinition) continue;
-            try { _harmony!.Patch(m, finalizer: Swallow); }
-            catch { }
-        }
+        PatchMethodsAndSwallow([t], bf, m => methods.Contains(m.Name));
     }
 
     // LocString.GetFormattedText faults bubble through Creature.LogName and
@@ -416,35 +458,18 @@ internal static class HeadlessBoot
     // missing tables; skipping it only degrades text.
     private static void PatchAddDetailsTo()
     {
-        foreach (var t in SafeTypes())
-        {
-            if (!t.IsClass) continue;
-            foreach (var m in t.GetMethods(AllDeclared))
-            {
-                if (m.Name != "AddDetailsTo" && m.Name != "AddLocVars") continue;
-                if (m.IsAbstract || m.IsGenericMethodDefinition) continue;
-                try { _harmony!.Patch(m, finalizer: Swallow); }
-                catch { }
-            }
-        }
+        PatchMethodsAndSwallow(
+            SafeTypes(), AllDeclared,
+            m => m.Name is "AddDetailsTo" or "AddLocVars");
     }
 
     // VFX entry points call into un-stubbed Godot APIs; purely visual.
     private static void PatchVfxPlay()
     {
         var names = new[] { "Play", "PlayAnim", "Animate", "Stop", "Show", "Pulse", "Trigger" };
-        foreach (var t in SafeTypes())
-        {
-            if (!t.IsClass) continue;
-            var ns = t.Namespace ?? "";
-            if (!ns.Contains(".Vfx") && !t.Name.EndsWith("Vfx")) continue;
-            foreach (var m in t.GetMethods(AllDeclared))
-            {
-                if (!names.Contains(m.Name) || m.IsAbstract || m.IsGenericMethodDefinition) continue;
-                try { _harmony!.Patch(m, finalizer: Swallow); }
-                catch { }
-            }
-        }
+        var types = SafeTypes().Where(t =>
+            (t.Namespace ?? "").Contains(".Vfx") || t.Name.EndsWith("Vfx"));
+        PatchMethodsAndSwallow(types, AllDeclared, m => names.Contains(m.Name));
     }
 
     // CardSelectCmd.FromChooseABundleScreen is UI-only (shows the bundle
@@ -452,15 +477,12 @@ internal static class HeadlessBoot
     // stand-in so Neow's card packs work without a scene tree.
     private static void RerouteBundleScreen()
     {
-        var m = typeof(MegaCrit.Sts2.Core.Commands.CardSelectCmd).GetMethod(
-            "FromChooseABundleScreen", BindingFlags.Public | BindingFlags.Static);
-        if (m is null)
-        {
-            HostLog.Info("FromChooseABundleScreen not found — bundle offers unsupported");
-            return;
-        }
-        _harmony!.Patch(m, prefix: Local(nameof(BundlePrefix)));
-        HostLog.Info("rerouted bundle offers to the headless stand-in");
+        Reroute(
+            typeof(MegaCrit.Sts2.Core.Commands.CardSelectCmd),
+            "FromChooseABundleScreen", BindingFlags.Public | BindingFlags.Static,
+            nameof(BundlePrefix),
+            "FromChooseABundleScreen not found — bundle offers unsupported",
+            "rerouted bundle offers to the headless stand-in");
     }
 
     private static bool BundlePrefix(
@@ -477,15 +499,12 @@ internal static class HeadlessBoot
     // source resumes the event.
     private static void RerouteCrystalSphere()
     {
-        var m = typeof(MegaCrit.Sts2.Core.Nodes.Events.Custom.CrystalSphere.NCrystalSphereScreen)
-            .GetMethod("ShowScreen", BindingFlags.Public | BindingFlags.Static);
-        if (m is null)
-        {
-            HostLog.Info("NCrystalSphereScreen.ShowScreen not found — crystal sphere unsupported");
-            return;
-        }
-        _harmony!.Patch(m, prefix: Local(nameof(CrystalPrefix)));
-        HostLog.Info("rerouted crystal sphere to the headless stand-in");
+        Reroute(
+            typeof(MegaCrit.Sts2.Core.Nodes.Events.Custom.CrystalSphere.NCrystalSphereScreen),
+            "ShowScreen", BindingFlags.Public | BindingFlags.Static,
+            nameof(CrystalPrefix),
+            "NCrystalSphereScreen.ShowScreen not found — crystal sphere unsupported",
+            "rerouted crystal sphere to the headless stand-in");
     }
 
     private static bool CrystalPrefix(
@@ -507,15 +526,9 @@ internal static class HeadlessBoot
         var t = typeof(AbstractModelSubtypes).Assembly
             .GetType("MegaCrit.Sts2.Core.Saves.Managers.ProgressSaveManager");
         if (t is null) return;
-        var patched = 0;
-        foreach (var m in t.GetMethods(
-            BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly))
-        {
-            if (m.IsAbstract || m.IsGenericMethodDefinition || m.IsSpecialName) continue;
-            var fin = typeof(Task).IsAssignableFrom(m.ReturnType) ? SwallowTask : Swallow;
-            try { _harmony!.Patch(m, finalizer: fin); patched++; }
-            catch { }
-        }
+        var patched = PatchMethodsAndSwallow(
+            [t], BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly,
+            m => !m.IsSpecialName, completeFaultedTasks: true);
         HostLog.Info($"swallowed {patched} progress-tracking methods");
     }
 
@@ -527,21 +540,13 @@ internal static class HeadlessBoot
     {
         var bf = BindingFlags.Public | BindingFlags.NonPublic
                  | BindingFlags.Instance | BindingFlags.DeclaredOnly;
-        var patched = 0;
-        foreach (var t in SafeTypes())
-        {
-            if (!t.IsClass || (t.Namespace ?? "").Contains("Models.Monsters") == false) continue;
-            foreach (var m in t.GetMethods(bf))
-            {
-                if (m.Name != "BeforeDeath" && m.Name != "BeforeRemovedFromRoom") continue;
-                if (m.IsAbstract || m.IsGenericMethodDefinition) continue;
-                // Task-returning hooks must not leave a null result behind —
-                // the engine awaits it.
-                var fin = typeof(Task).IsAssignableFrom(m.ReturnType) ? SwallowTask : Swallow;
-                try { _harmony!.Patch(m, finalizer: fin); patched++; }
-                catch { }
-            }
-        }
+        var types = SafeTypes().Where(t =>
+            (t.Namespace ?? "").Contains("Models.Monsters"));
+        // Task-returning hooks must not leave a null result behind —
+        // the engine awaits it.
+        var patched = PatchMethodsAndSwallow(
+            types, bf, m => m.Name is "BeforeDeath" or "BeforeRemovedFromRoom",
+            completeFaultedTasks: true);
         HostLog.Info($"swallowed {patched} monster flavor hooks");
     }
 
@@ -561,14 +566,9 @@ internal static class HeadlessBoot
                 t.GetField("_instance",
                     BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static)
                     ?.SetValue(null, inst);
-            var patched = 0;
-            foreach (var m in t.GetMethods(
-                BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly))
-            {
-                if (m.IsAbstract || m.IsGenericMethodDefinition || m.IsSpecialName) continue;
-                try { _harmony!.Patch(m, finalizer: Swallow); patched++; }
-                catch { }
-            }
+            var patched = PatchMethodsAndSwallow(
+                [t], BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly,
+                m => !m.IsSpecialName);
             HostLog.Info($"immunized {t.Name}: {patched} methods");
         }
         catch (Exception ex)
