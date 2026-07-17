@@ -228,7 +228,7 @@ fn main() -> ExitCode {
             client.step("potion-use", args)
         }
         Cmd::PotionDiscard { slot } => client.step("potion-discard", json!({ "slot": slot })),
-        Cmd::Runlog => client.get("/runlog"),
+        Cmd::Runlog => client.compatible_get("/runlog"),
         Cmd::Replay { file } => replay(&client, file),
     };
     match result {
@@ -285,9 +285,18 @@ fn cheat_args(name: &str, values: &[String]) -> Result<Value, String> {
     Ok(args)
 }
 
-fn replay(client: &Client, file: &str) -> Result<Value, String> {
+trait ReplayTransport {
+    fn get(&self, path: &str) -> Result<Value, String>;
+    fn post(&self, path: &str, body: Value) -> Result<Value, String>;
+}
+
+fn replay(client: &impl ReplayTransport, file: &str) -> Result<Value, String> {
     let text = std::fs::read_to_string(file).map_err(|e| format!("read {}: {}", file, e))?;
     let log: Value = serde_json::from_str(&text).map_err(|e| format!("parse {}: {}", file, e))?;
+    replay_value(client, &log)
+}
+
+fn replay_value(client: &impl ReplayTransport, log: &Value) -> Result<Value, String> {
     if log.get("complete").and_then(Value::as_bool) != Some(true) {
         return Err("runlog is incomplete (it must start with new-run, contain one RunId, and fingerprint every followed verb)".into());
     }
@@ -329,6 +338,28 @@ fn replay(client: &Client, file: &str) -> Result<Value, String> {
             "runlog verb {} has no verifiable settled fingerprint",
             idx + 1
         ));
+    }
+
+    // Fail before the first state-changing request. A recipe can name a
+    // capability that is missing only near its end; discovering that after
+    // new-run would leave a partially reconstructed live run behind.
+    let health = client.get("/health")?;
+    validate_health(&health, None, None)?;
+    for (idx, verb) in verbs.iter().enumerate() {
+        let action = verb
+            .get("action")
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("verb {} has no action", idx + 1))?;
+        let cheat = if action == "cheat" {
+            Some(
+                verb.pointer("/args/name")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| format!("verb {} cheat has no args.name", idx + 1))?,
+            )
+        } else {
+            None
+        };
+        validate_health(&health, Some(action), cheat)?;
     }
 
     let mut current = client.get("/obs")?;
@@ -548,6 +579,16 @@ impl Client {
     }
 }
 
+impl ReplayTransport for Client {
+    fn get(&self, path: &str) -> Result<Value, String> {
+        Client::get(self, path)
+    }
+
+    fn post(&self, path: &str, body: Value) -> Result<Value, String> {
+        Client::post(self, path, body)
+    }
+}
+
 fn validate_health(
     health: &Value,
     action: Option<&str>,
@@ -663,6 +704,7 @@ fn handle(result: Result<ureq::Response, ureq::Error>) -> Result<Value, String> 
 mod tests {
     use super::*;
     use clap::Parser;
+    use std::cell::{Cell, RefCell};
 
     fn strings(values: &[&str]) -> Vec<String> {
         values.iter().map(|s| s.to_string()).collect()
@@ -674,6 +716,59 @@ mod tests {
             "buildHash": "abc1234",
             "protocolVersion": protocol,
             "capabilities": { "verbs": verbs, "cheats": cheats }
+        })
+    }
+
+    struct ReplaySpy {
+        health: Value,
+        gets: RefCell<Vec<String>>,
+        posts: Cell<usize>,
+    }
+
+    impl ReplaySpy {
+        fn new(health: Value) -> Self {
+            Self {
+                health,
+                gets: RefCell::new(Vec::new()),
+                posts: Cell::new(0),
+            }
+        }
+    }
+
+    impl ReplayTransport for ReplaySpy {
+        fn get(&self, path: &str) -> Result<Value, String> {
+            self.gets.borrow_mut().push(path.to_string());
+            match path {
+                "/health" => Ok(self.health.clone()),
+                "/obs" => Ok(json!({"phase":"main_menu", "runId":"none", "rev":1})),
+                _ => Err(format!("unexpected GET {path}")),
+            }
+        }
+
+        fn post(&self, _path: &str, _body: Value) -> Result<Value, String> {
+            self.posts.set(self.posts.get() + 1);
+            Err("unexpected POST".to_string())
+        }
+    }
+
+    fn replay_recipe(verbs: Vec<Value>) -> Value {
+        json!({
+            "complete": true,
+            "runId": "source-run",
+            "seed": "REPLAYTEST",
+            "verbs": verbs,
+        })
+    }
+
+    fn followed_verb(action: &str, args: Value) -> Value {
+        json!({
+            "runId": "source-run",
+            "action": action,
+            "args": args,
+            "phaseBefore": "main_menu",
+            "phaseAfter": "event",
+            "outcome": "settled",
+            "fingerprint": "0000000000000001",
         })
     }
 
@@ -828,6 +923,33 @@ mod tests {
 
         assert_eq!(state_fingerprint(&a), state_fingerprint(&b));
         assert_ne!(state_fingerprint(&a), state_fingerprint(&changed));
+    }
+
+    #[test]
+    fn replay_protocol_mismatch_fails_before_obs_or_any_post() {
+        let spy = ReplaySpy::new(health(PROTOCOL_VERSION + 1, &["new-run"], &[]));
+        let recipe = replay_recipe(vec![followed_verb("new-run", json!({}))]);
+
+        let error = replay_value(&spy, &recipe).unwrap_err();
+
+        assert!(error.contains("incompatible host protocol"), "{error}");
+        assert_eq!(*spy.gets.borrow(), ["/health"]);
+        assert_eq!(spy.posts.get(), 0);
+    }
+
+    #[test]
+    fn replay_missing_late_capability_fails_before_obs_or_any_post() {
+        let spy = ReplaySpy::new(health(PROTOCOL_VERSION, &["new-run", "cheat"], &[]));
+        let recipe = replay_recipe(vec![
+            followed_verb("new-run", json!({})),
+            followed_verb("cheat", json!({"name":"gold", "value":100})),
+        ]);
+
+        let error = replay_value(&spy, &recipe).unwrap_err();
+
+        assert!(error.contains("does not advertise cheat 'gold'"), "{error}");
+        assert_eq!(*spy.gets.borrow(), ["/health"]);
+        assert_eq!(spy.posts.get(), 0);
     }
 
     #[test]
