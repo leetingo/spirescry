@@ -217,7 +217,7 @@ public static class Dispatcher
             return runErr;
         var creature = run.Player!.Creature;
         if (creature is null)
-            return DispatchResult.Reject(RejectionCodes.NotReady, "no local creature");
+            return DispatchResult.Reject(RejectionCodes.BadState, "no local creature");
         return Reflect.SetProperty(creature, "CurrentHp", hp(creature))
             ? DispatchResult.Success()
             : DispatchResult.Reject(RejectionCodes.Internal, "CurrentHp setter not found");
@@ -235,7 +235,7 @@ public static class Dispatcher
             playerCode: RejectionCodes.Internal) is { } runErr)
             return runErr;
         if (run.State.Map is null)
-            return DispatchResult.Reject(RejectionCodes.NotReady, "run state not available");
+            return DispatchResult.Reject(RejectionCodes.BadState, "run state not available");
 
         var target = Snapshotter.AllMapPoints(run.State.Map)
             .FirstOrDefault(p => p.coord.col == col && p.coord.row == row);
@@ -468,13 +468,13 @@ public static class Dispatcher
         out RunContext context,
         string stateMessage,
         string? playerMessage = null,
-        string playerCode = RejectionCodes.NotReady)
+        string playerCode = RejectionCodes.BadState)
     {
         context = default;
         var manager = RunManager.Instance;
         var state = manager?.DebugOnlyGetState();
         if (manager is null || state is null)
-            return DispatchResult.Reject(RejectionCodes.NotReady, stateMessage);
+            return DispatchResult.Reject(RejectionCodes.BadState, stateMessage);
 
         var player = LocalContext.GetMe(state);
         if (playerMessage is not null && player is null)
@@ -812,7 +812,8 @@ public static class Dispatcher
         if (RunMode.IsHeadless)
         {
             if (HeadlessCrystal.Entity is not { } entity)
-                return DispatchResult.Reject(RejectionCodes.NotReady, "no crystal sphere in progress");
+                return DispatchResult.Reject(RejectionCodes.BadState,
+                    "no crystal sphere in progress");
             var grid = entity.GridSize;
             if (col < 0 || col >= grid.X || row < 0 || row >= grid.Y
                 || entity.cells[col, row] is not { } cell)
@@ -853,7 +854,8 @@ public static class Dispatcher
         if (RunMode.IsHeadless)
         {
             if (HeadlessCrystal.Entity is not { } entity)
-                return DispatchResult.Reject(RejectionCodes.NotReady, "no crystal sphere in progress");
+                return DispatchResult.Reject(RejectionCodes.BadState,
+                    "no crystal sphere in progress");
             entity.SetTool(idx == 0
                 ? CrystalMinigame.CrystalSphereToolType.Small
                 : CrystalMinigame.CrystalSphereToolType.Big);
@@ -871,8 +873,11 @@ public static class Dispatcher
     {
         var ev = Screens.CurrentEvent();
         var opts = ev?.CurrentOptions;
-        if (ev is null || opts is null || opts.Count == 0 || ev.IsFinished)
-            return DispatchResult.Reject(RejectionCodes.NotReady, "no options to choose (event finished? try proceed)");
+        if (ev is null || opts is null)
+            return DispatchResult.Reject(RejectionCodes.NotReady, "event options not mounted yet — retry");
+        if (opts.Count == 0 || ev.IsFinished)
+            return DispatchResult.Reject(RejectionCodes.BadState,
+                "no options to choose (event finished? try proceed)");
         if (BadIdx(idx, opts.Count, "option") is { } err) return err;
         if (opts[idx].IsLocked)
             return DispatchResult.Reject(RejectionCodes.NotPlayable, $"option {idx} is locked");
@@ -968,7 +973,7 @@ public static class Dispatcher
                 if (NRestSiteRoom.Instance is { } restRoom)
                 {
                     if (restRoom.ProceedButton is not { Visible: true } restBtn)
-                        return DispatchResult.Reject(RejectionCodes.NotReady,
+                        return DispatchResult.Reject(RejectionCodes.BadState,
                             "proceed button not visible — choose an option first");
                     restBtn.ForceClick();
                     return DispatchResult.Success();
@@ -979,7 +984,7 @@ public static class Dispatcher
                 if (NRun.Instance?.TreasureRoom is { } chestRoom)
                 {
                     if (chestRoom.ProceedButton is not { Visible: true } chestBtn)
-                        return DispatchResult.Reject(RejectionCodes.NotReady,
+                        return DispatchResult.Reject(RejectionCodes.BadState,
                             "proceed button not visible — resolve the chest first (pick-relic / skip)");
                     chestBtn.ForceClick();
                     return DispatchResult.Success();
@@ -1089,7 +1094,7 @@ public static class Dispatcher
             return DispatchResult.Reject(RejectionCodes.NotEnoughGold,
                 $"{kind} idx {idx} costs {entry.Cost}");
         if (entry is MerchantPotionEntry && run.Player!.HasOpenPotionSlots != true)
-            return DispatchResult.Reject(RejectionCodes.NotReady, "no open potion slots");
+            return DispatchResult.Reject(RejectionCodes.BadState, "no open potion slots");
 
         // Card removal opens a deck-select sub-screen and the Task stays
         // pending until it's driven — poll /obs. Headless pre-arms the
@@ -1132,7 +1137,8 @@ public static class Dispatcher
                     {
                         var chest = Reflect.Field<NButton>(room, "_chestButton");
                         if (chest is null)
-                            return DispatchResult.Reject(RejectionCodes.NotReady, "chest button not found");
+                            return DispatchResult.Reject(RejectionCodes.BadState,
+                                "chest button not found");
                         chest.ForceClick();
                     }
                     var relics = sync.CurrentRelics;
@@ -1316,7 +1322,8 @@ public static class Dispatcher
         {
             case Phase.BundleSelect:
                 if (RunMode.IsHeadless)
-                    return DispatchResult.Reject(RejectionCodes.NotReady, "host bundle picks resolve on pick-card");
+                    return DispatchResult.Reject(RejectionCodes.BadState,
+                        "host bundle picks resolve on pick-card");
                 if (Screens.Top<NChooseABundleSelectionScreen>() is not { } bundleScreen)
                     return DispatchResult.Reject(RejectionCodes.NotReady, "bundle screen not mounted");
                 Reflect.Invoke(bundleScreen, "ConfirmSelection", new object?[] { null });
@@ -1324,7 +1331,7 @@ public static class Dispatcher
 
             case Phase.CardSelect or Phase.HandSelect when RunMode.IsHeadless:
                 return HeadlessPicker.Confirm() is { } msg
-                    ? DispatchResult.Reject(RejectionCodes.NotReady, msg)
+                    ? DispatchResult.Reject(RejectionCodes.BadState, msg)
                     : DispatchResult.Success();
 
             case Phase.CardSelect:
@@ -1340,7 +1347,7 @@ public static class Dispatcher
                     case NSimpleCardSelectScreen or NCombatPileCardSelectScreen:
                         var btn = Reflect.Field<NClickableControl>(screen, "_confirmButton");
                         if (btn is not { IsEnabled: true })
-                            return DispatchResult.Reject(RejectionCodes.NotReady,
+                            return DispatchResult.Reject(RejectionCodes.BadState,
                                 $"confirm not available — {count} selected, need {prefs.MinSelect}..{prefs.MaxSelect}");
                         btn.ForceClick();
                         return DispatchResult.Success();
@@ -1349,7 +1356,7 @@ public static class Dispatcher
                     // pick would resolve the selection.
                     case NDeckTransformSelectScreen:
                         if (count < prefs.MinSelect)
-                            return DispatchResult.Reject(RejectionCodes.NotReady,
+                            return DispatchResult.Reject(RejectionCodes.BadState,
                                 $"{count} selected, need {prefs.MinSelect} (pick-card first)");
                         Reflect.Invoke(screen, "CompleteSelection", new object?[] { null });
                         return DispatchResult.Success();
@@ -1360,7 +1367,7 @@ public static class Dispatcher
                     default:
                         var need = screen is NDeckCardSelectScreen ? prefs.MinSelect : prefs.MaxSelect;
                         if (count < need)
-                            return DispatchResult.Reject(RejectionCodes.NotReady,
+                            return DispatchResult.Reject(RejectionCodes.BadState,
                                 $"{count} selected, need {need} (pick-card first)");
                         Reflect.Invoke(screen, "CheckIfSelectionComplete");
                         return DispatchResult.Success();
@@ -1375,7 +1382,7 @@ public static class Dispatcher
                 {
                     var prefs = Screens.Prefs(hand);
                     var count = Screens.SelectedCards(hand).Count();
-                    return DispatchResult.Reject(RejectionCodes.NotReady,
+                    return DispatchResult.Reject(RejectionCodes.BadState,
                         $"confirm not available — {count} selected, need {prefs.MinSelect}..{prefs.MaxSelect}");
                 }
                 btn.ForceClick();
@@ -1405,7 +1412,8 @@ public static class Dispatcher
         {
             case Phase.CardReward when RunMode.IsHeadless:
                 if (!HeadlessRewards.InCardPick)
-                    return DispatchResult.Reject(RejectionCodes.NotReady, "no card reward pending");
+                    return DispatchResult.Reject(RejectionCodes.BadState,
+                        "no card reward pending");
                 // Skip is one of the reward's own "alternative" choices —
                 // mirrors the GUI branch below (its _extraOptions gate),
                 // not a separate decline path.
@@ -1456,7 +1464,8 @@ public static class Dispatcher
             case Phase.Treasure:
                 var sync = RunManager.Instance?.TreasureRoomRelicSynchronizer;
                 if (sync is null || sync.CurrentRelics is not { Count: > 0 })
-                    return DispatchResult.Reject(RejectionCodes.NotReady, "no relic offer to skip");
+                    return DispatchResult.Reject(RejectionCodes.BadState,
+                        "no relic offer to skip");
                 sync.SkipRelicLocally();
                 return DispatchResult.Success();
 

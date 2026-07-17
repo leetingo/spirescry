@@ -9,6 +9,7 @@ public static class RejectionCodes
     public const string BadPhase = "bad_phase";
     public const string BadIndex = "bad_index";
     public const string BadTarget = "bad_target";
+    public const string BadState = "bad_state";
     public const string NotReady = "not_ready";
     public const string NotPlayable = "not_playable";
     public const string NotEnoughGold = "not_enough_gold";
@@ -24,7 +25,7 @@ public static class RejectionCodes
 
     public static readonly string[] All =
     {
-        BadRequest, BadPhase, BadIndex, BadTarget, NotReady, NotPlayable,
+        BadRequest, BadPhase, BadIndex, BadTarget, BadState, NotReady, NotPlayable,
         NotEnoughGold, NotEnoughEnergy, NotEnoughStars, RunExists,
         StaleState, ExternalChange, ResolutionPartial, ResolutionFailed,
         NotFound, Internal,

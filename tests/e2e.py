@@ -916,6 +916,23 @@ def c7():
     to_menu()
 
 
+@case("C8 an incomplete selection is fatal, not transient")
+def c8():
+    d = to_map(seed="CIBADSTATE")
+    rest = next(point for point in d["graph"] if point["type"] == "restsite")
+    run("cheat", "goto", str(rest["col"]), str(rest["row"]))
+    d = bridge.wait_phase("rest_site")
+    smith = next(option for option in d["options"]
+                 if "smith" in option["id"].lower() and option["enabled"])
+    run("option", str(smith["idx"]))
+    bridge.wait_phase("card_select")
+
+    rejected = bridge.cli("confirm")
+    assert rejected.returncode == 1, rejected
+    assert "spirescry: bad_state:" in rejected.stderr, rejected.stderr
+    to_menu()
+
+
 # ---------- V: victory ----------
 
 @case("V1 cheat-driven full clear reaches a victory game_over")

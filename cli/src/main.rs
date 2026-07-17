@@ -1156,11 +1156,11 @@ mod tests {
     }
 
     #[test]
-    fn other_bridge_rejections_are_typed_fatal_errors() {
+    fn bad_state_bridge_rejections_are_typed_fatal_errors() {
         let error = parse_bridge_value(json!({
             "ok": false,
-            "err": "bad_phase",
-            "msg": "not in combat"
+            "err": "bad_state",
+            "msg": "pick more cards before confirming"
         }))
         .unwrap_err();
 
