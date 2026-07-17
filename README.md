@@ -41,7 +41,11 @@ in the event stream, or rejected with a reason.
 **`GET /obs`** returns a phase-shaped snapshot. Combat gets you
 (hp/block/energy/powers), hand, enemies (hp/block/powers/intents with
 damage × hits), potions, and pile contents; every out-of-combat phase
-carries a `player` footer (hp, gold, potions, relics, deck); the map gets
+carries a `player` footer (hp, gold, potions, relics, relicStates, deck);
+`player.relics` remains the stable ID-string list while `relicStates` adds
+`{model, counter, usedUp, description}` (`description` is `null` in compact
+mode). Combat's `you.relics` carries `{model, counter}` so every-N counters
+are visible where they tick. The map gets
 reachable nodes, the whole act graph, and the run seed; `game_over`
 reports outcome / seed / hp / gold plus where the run ended: `actNumber`
 (1-based), `actFloor` (within the act), `mapCoord` (`{col, row}`), and
