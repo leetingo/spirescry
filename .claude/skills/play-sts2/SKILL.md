@@ -39,40 +39,63 @@ auto-confirm at max picks — `confirm` accepts a partial pick.
 
 ## The loop
 
-1. `spirescry new-run IRONCLAD` (`--seed ABC123 --ascension 5`
-   reproduces a run). Landed when `obs` shows phase `event` — Neow
-   greets every run.
-2. **Scry**: `spirescry obs` → read `phase`, `rev`, and the board; decide.
-3. **Act**: fire one verb from the table below.
-4. **Wait**: `spirescry obs --since <rev> --wait 5000` with the rev you
-   scried in step 2 — it returns the instant the world changes, and its
-   `events` name what happened. `changed: false` means nothing did:
-   rescry and reassess. (A verb response prints a `rev` of its own — that
-   marks acceptance; keep waiting on the scried one.)
+1. Scry the clean menu with `spirescry obs --decision`, then launch with
+   both values it returned:
+   `spirescry new-run IRONCLAD --if-rev <rev> --if-run none --follow`
+   (`--seed ABC123 --ascension 5` reproduces a run). The followed `obs`
+   lands on phase `event` — Neow greets every run.
+2. **Scry**: use that fresh decision `obs`, or call
+   `spirescry obs --decision` → read `phase`, `rev`, `runId`,
+   `legal`, and the board; decide. `legal` comes from the targets and gates
+   visible in this exact snapshot and is safer than the orientation table;
+   dispatch still performs the final engine-side validation.
+3. **Act with both guards and follow**: fire one verb from `legal`, adding
+   `--if-rev <rev> --if-run <runId> --follow`. The response waits past
+   acceptance while tracked queues/tasks are busy and includes resolution
+   events plus a fresh decision `obs`; GUI-only callbacks must expose the
+   same boundary for three consecutive frames.
+4. Inspect `outcome`: `settled` means tracked work is quiet (and the GUI
+   boundary was stable for those frames), not proof that every opaque engine
+   continuation has completed;
+   `next_decision` means an effect parked on a picker/dialogue that now
+   needs one verb; `timeout` means the verb was accepted but has not
+   resolved — do not fire another verb, rescry and inspect `health`.
 5. Repeat 2–4 until `game_over`; report outcome, where it ended
    (`actNumber` / `actFloor` / `encounter.title`), and the seed, then
    `abandon` to return to the menu.
 
-One verb, then its wait — the wait's `events` naming your action is the
-confirmation, and the world changing (a card leaving your hand, hp
-moving) is the resolution. Batching verbs skips both checks and builds
-the next decision on a state you never confirmed.
+`stale_state` means the board changed after your scry: rescry and decide
+again. `external_change` means the engine replaced your run: stop; never
+continue using the old run's state. One verb per returned decision —
+batching skips the guards and builds the next choice on an unconfirmed
+world.
 
 Rejections name their fix: exit 75 (`not_ready`) → retry the same verb;
 `bad_phase` → rescry; `not_enough_energy` / `not_enough_stars` /
-`bad_target` / `bad_index` → decide differently. On long runs,
-`obs --compact` keeps snapshots small (piles and deck as counts, card
-prose dropped, `vars` kept).
+`bad_target` / `bad_index` → decide differently.
+
+Decision card text is caller-scoped, not consumed by GET order. Cache each
+visible card's `textKey` (it distinguishes upgrades, enchantments, and
+afflictions), then pass cached keys back as repeatable
+`obs --decision --known-card <key>` flags. Repeating an unqualified
+`obs --decision` deliberately returns the same text again.
+
+For a diagnostic checkpoint, save `spirescry runlog > run-<seed>.json`.
+`spirescry replay <file>` only runs from a clean `main_menu`, reconstructs
+a **new** guarded run, and rejects logs where any verb lacks a followed,
+settled fingerprint. It checks every fingerprint and stops at the first
+divergence. Its final board belongs to the reconstruction's new `runId`;
+never report it as the source run's outcome or history.
 
 ## The ledger
 
 Keep a three-line ledger in your head across the turn, updated after
-every wait, instead of re-deriving from full JSON each read:
+every followed action, instead of re-deriving from full JSON each read:
 
 ```
 you:    hp / block / energy / stars
 threat: enemy hp / incoming damage × hits / stacks that gate damage
-turn:   cards played so far, potions left
+turn:   cards played so far, once-per-turn triggers used, potions left
 ```
 
 Arithmetic mistakes at the final turn kill runs; the ledger is where
@@ -91,17 +114,22 @@ ladder; abandon is the last rung:
 
 ## Impossible observations
 
-Resources moving at a frozen `rev`, a claim that never lands, an effect
-whose promise doesn't match the world — that's a bridge fault, not a
-puzzle to poll at. One rescry → `spirescry health` → `proceed` out of
-the phase → **mark the run polluted**: keep playing if you can, but say
-so in your report and treat conclusions drawn from the polluted state
-as suspect. File what you saw.
+First rule out takeover: compare `runId`, and look for a `run:<id>` event
+you did not cause. A changed run is no longer yours.
+
+Resources moving at a frozen `rev`, a claim that never lands, or an effect
+whose promise disagrees with a `settled` board is a bridge fault, not a
+puzzle to poll at. One rescry → `spirescry health` → use a currently
+`legal` escape verb if one exists → **mark the run polluted**. Keep playing
+only if the bridge still returns settled decisions; disclose the fault and
+treat conclusions drawn from the polluted state as suspect.
 
 ## Verbs by phase
 
 Every phase outside combat also carries a `player` footer (hp, gold,
-potions, relics, deck — enchanted cards show `enchant`).
+potions, relics, deck — enchanted/afflicted cards are distinct). The table
+is orientation only; fire a verb only when the current `legal` array names
+it.
 
 | phase | you see | verbs |
 |---|---|---|
@@ -114,9 +142,10 @@ potions, relics, deck — enchanted cards show `enchant`).
 | `treasure`, `relic_reward` | relics on offer | `pick-relic <idx>`, `skip` |
 | `rewards` | reward tiles | `pick-reward <idx>`; `proceed` leaves, skipping the rest |
 | `card_reward` | cards on offer | `pick-card <idx>`, `skip` |
-| `card_select`, `hand_select` | picker cards with `cost` and `upgradedPreview` | `pick-card <idx>` (toggles), `confirm`, `skip` (if cancelable) |
-| `bundle_select` | card packs (e.g. Neow) | `pick-card <idx>` |
-| `crystal_sphere` | divination minigame | `map-move <col> <row>` picks a cell, `option 0`/`1` picks the tool |
+| `card_select` | picker cards with `cost` and `upgradedPreview` | `pick-card <idx>` (toggles), `confirm` when enough are selected, `skip` only when `cancelable` |
+| `hand_select` | cards currently selectable from hand | `pick-card <idx>`, `confirm` when enough are selected (no `skip`) |
+| `bundle_select` | card packs (e.g. Neow) | `pick-card <idx>`; GUI may then expose `confirm` |
+| `crystal_sphere` | divination minigame | `map-move <col> <row>` picks a cell, `option 0`/`1` picks the tool, `proceed` leaves |
 | `game_over` | `outcome`, `seed`, where the run ended: `actNumber`/`actFloor` (1-based), `mapCoord`, `encounter` (model + title). Legacy pair: `act` is the zero-based act index, `floor` the run-cumulative floor — prefer the 1-based fields in reports. | `abandon` → main menu |
 | any (in a run) | — | `potion-discard <slot>`, `abandon` |
 

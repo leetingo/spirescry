@@ -80,7 +80,9 @@ surface appears. The response distinguishes `outcome: settled`,
 `next_decision`, and `timeout`, and includes resolution events plus a fresh
 decision `obs`. GUI callbacks that do not return a task must also expose the
 same boundary across three consecutive frames; guard checks still happen
-atomically before dispatch.
+atomically before dispatch. This is a bounded settlement signal for work the
+bridge can observe, not a claim that every opaque engine continuation has
+completed.
 Verbs: `new-run`,
 `abandon`, `option`, `proceed`, `map-move`, `pick-reward`, `pick-card`,
 `pick-relic`, `confirm`, `skip`, `buy`, `leave`, `play`, `end-turn`,
