@@ -292,6 +292,9 @@ public static class Snapshotter
         if (rs is null || inv is null) return new { phase, available = false };
         var player = LocalContext.GetMe(rs);
 
+        // `cost` stays the gold amount for wire compatibility; `price`
+        // names it explicitly. Cards add playCost/starCost so their combat
+        // economy is visible before purchase without changing old clients.
         object CardEntry(MegaCrit.Sts2.Core.Entities.Merchant.MerchantCardEntry e, int i) => new
         {
             idx = i,
@@ -299,6 +302,9 @@ public static class Snapshotter
             title = e.CreationResult?.Card?.Title,
             description = e.CreationResult?.Card is { } c ? CardDescription(c) : null,
             cost = e.Cost,
+            price = e.Cost,
+            playCost = e.CreationResult?.Card?.EnergyCost.Canonical,
+            starCost = e.CreationResult?.Card is { } c2 ? StarCost(c2) : null,
             stocked = e.IsStocked,
             affordable = e.EnoughGold,
         };
@@ -310,6 +316,7 @@ public static class Snapshotter
             model,
             title = SafeText(title),
             cost = e.Cost,
+            price = e.Cost,
             stocked = e.IsStocked,
             affordable = e.EnoughGold,
         };
@@ -325,7 +332,13 @@ public static class Snapshotter
             potions = inv.PotionEntries
                 .Select((e, i) => StockEntry(e.Model?.Id.Entry, e.Model?.Title, e, i)).ToArray(),
             cardRemoval = inv.CardRemovalEntry is { } cr
-                ? new { cost = cr.Cost, used = cr.Used, affordable = cr.EnoughGold }
+                ? new
+                {
+                    cost = cr.Cost,
+                    price = cr.Cost,
+                    used = cr.Used,
+                    affordable = cr.EnoughGold,
+                }
                 : null,
         };
     }
@@ -519,18 +532,26 @@ public static class Snapshotter
         description = CardDescription(c),
     };
 
-    private static object SelectCardView(CardModel c, int i, bool selected) => new
+    private static object SelectCardView(CardModel c, int i, bool selected)
     {
-        idx = i,
-        model = c.Id.Entry,
-        title = c.Title,
-        cost = c.EnergyCost.Canonical,
-        starCost = StarCost(c),
-        upgraded = c.IsUpgraded,
-        selected,
-        description = CardDescription(c),
-        upgradedPreview = UpgradePreview(c),
-    };
+        var preview = UpgradePreview(c);
+        return new
+        {
+            idx = i,
+            model = c.Id.Entry,
+            title = c.Title,
+            cost = c.EnergyCost.Canonical,
+            starCost = StarCost(c),
+            upgraded = c.IsUpgraded,
+            selected,
+            description = CardDescription(c),
+            // Preserve upgradedPreview's string/null wire type; the added
+            // fields expose cost-only upgrades without nesting the string.
+            upgradedPreview = preview?.description,
+            upgradedPlayCost = preview?.playCost,
+            upgradedStarCost = preview?.starCost,
+        };
+    }
 
     // -1 = the card has no star cost (the second combat currency);
     // surface null so energy-only cards stay clean. X-star cards report
@@ -550,7 +571,7 @@ public static class Snapshotter
     // mutate a card's dynamic vars in place, so the upgraded numbers only
     // exist on an upgraded instance: build a throwaway twin from the
     // canonical model and replay the upgrades one level past the card.
-    private static string? UpgradePreview(CardModel c)
+    private static (string description, int playCost, int? starCost)? UpgradePreview(CardModel c)
     {
         if (!c.IsUpgradable) return null;
         try
@@ -558,17 +579,23 @@ public static class Snapshotter
             var twin = ModelDb.GetById<CardModel>(c.Id).ToMutable();
             for (var lvl = 0; lvl <= c.CurrentUpgradeLevel; lvl++)
                 twin.UpgradeInternal();
-            return CardDescription(twin);
+            return (CardDescription(twin), twin.EnergyCost.Canonical, StarCost(twin));
         }
         catch { return null; }
     }
 
-    private static object HandCardView(string? model, bool upgraded, int i) => new
-    {
-        idx = i,
-        model,
-        upgraded,
-    };
+    private static object HandCardView(CardModel? c, int i) => c is null
+        ? new { idx = i }
+        : (object)new
+        {
+            idx = i,
+            model = c.Id.Entry,
+            cost = c.EnergyCost.GetAmountToSpend(),
+            starCost = StarCost(c),
+            upgraded = c.IsUpgraded,
+            description = _compact ? null : CardText(c, PileType.Hand),
+            vars = CardVars(c),
+        };
 
     private static object MapSnapshot(string phase)
     {
@@ -598,6 +625,12 @@ public static class Snapshotter
         col = p.coord.col,
         row = p.coord.row,
         type = p.PointType.ToString().ToLowerInvariant(),
+        // Outgoing edges — route planning needs the graph's links, not
+        // just its nodes.
+        next = p.Children
+            .Where(ch => ch != null)
+            .Select(ch => new[] { ch.coord.col, ch.coord.row })
+            .ToArray(),
     };
 
     // BFS over the act map from its start points. The final act's second
@@ -816,10 +849,28 @@ public static class Snapshotter
                     type = i.IntentType.ToString().ToLowerInvariant(),
                     damage = i is AttackIntent a ? a.GetSingleDamage(state.Allies, enemy) : (int?)null,
                     hits = i is AttackIntent b ? b.Repeats : (int?)null,
+                    // The game's own hover text — defend/buff magnitudes
+                    // are hidden by design (the GUI shows none either),
+                    // but status-card intents name their payload here.
+                    description = IntentTip(i, state, enemy),
                 })
                 .ToArray();
         }
         catch { return []; }
+    }
+
+    private static string? IntentTip(AbstractIntent i, CombatState state, Creature enemy)
+    {
+        if (_compact) return null;
+        try
+        {
+            if (!i.HasIntentTip) return null;
+            var tip = i.GetHoverTip(state.Allies, enemy);
+            return string.IsNullOrEmpty(tip.Description)
+                ? null
+                : RichText.NormalizeIcons(tip.Description);
+        }
+        catch { return null; }
     }
 
     // Every grid picker (deck removal / upgrade / transform / enchant,
@@ -842,7 +893,7 @@ public static class Snapshotter
                 max = HeadlessPicker.MaxSelect,
                 selected = picked.Select(c => c.Id.Entry).ToArray(),
                 cards = HeadlessPicker.Candidates
-                    .Select((c, i) => HandCardView(c.Id.Entry, c.IsUpgraded, i)).ToArray(),
+                    .Select((c, i) => HandCardView(c, i)).ToArray(),
             };
         return new
         {
@@ -920,7 +971,7 @@ public static class Snapshotter
             max = prefs.MaxSelect,
             selected = selected.Select(c => c.Id.Entry).ToArray(),
             cards = hand.ActiveHolders.Select((h, i) =>
-                HandCardView(h.CardNode?.Model.Id.Entry, h.CardNode?.Model.IsUpgraded ?? false, i))
+                HandCardView(h.CardNode?.Model, i))
                 .ToArray(),
         };
     }
