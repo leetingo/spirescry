@@ -8,12 +8,14 @@ scratch="$(mktemp -d "${TMPDIR:-/tmp}/spirescry-stop-test.XXXXXX")"
 fakebin="$scratch/bin"
 mkdir -p "$fakebin"
 trap 'jobs -pr | xargs kill -9 2>/dev/null || true; rm -rf "$scratch"' EXIT
+real_ps="$(command -v ps)"
 
 # Keep these tests isolated from real hosts, games and bridge ports. `kill` is
 # intentionally not stubbed: the observable contract includes process safety.
 for command in pgrep pkill curl; do
     ln -s /usr/bin/false "$fakebin/$command"
 done
+ln -s "$real_ps" "$fakebin/ps"
 
 run_stop() {
     PATH="$fakebin:$PATH" \
@@ -55,6 +57,20 @@ if output="$(run_stop 2>&1)"; then
 fi
 assert_alive "$unrelated_pid"
 grep -q 'does not belong to this host' <<<"$output"
+
+# An environment that cannot inspect a live PID must fail honestly: it may
+# neither discard the launch record nor guess that the process has exited.
+ln -sf "$repo/tests/fixtures/pgrep-unavailable.sh" "$fakebin/ps"
+printf '%s\n%s\n' "$unrelated_pid" 'unverifiable snapshot' > "$pidfile"
+if output="$(run_stop 2>&1)"; then
+    echo "uninspectable PID unexpectedly reported success: $output" >&2
+    exit 1
+fi
+assert_alive "$unrelated_pid"
+[ -e "$pidfile" ]
+grep -q 'cannot inspect PID' <<<"$output"
+ln -sf "$real_ps" "$fakebin/ps"
+
 kill "$unrelated_pid"
 wait "$unrelated_pid" 2>/dev/null || true
 
