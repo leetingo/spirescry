@@ -73,7 +73,15 @@ exposes the clearer `price` alias. Card stock adds `playCost` and `starCost`;
 upgrade candidates keep the string `upgradedPreview` and add
 `upgradedPlayCost` / `upgradedStarCost` beside it.
 
-**`POST /step`** takes `{"action": ..., "args": ...}`. Verbs: `new-run`,
+**`POST /step`** takes `{"action": ..., "args": ...}`. Add
+`"follow": <ms>` (CLI: `--follow [ms]`) to wait past acceptance until
+the engine queues and tracked async work settle, or until a new decision
+surface appears. The response distinguishes `outcome: settled`,
+`next_decision`, and `timeout`, and includes resolution events plus a fresh
+decision `obs`. GUI callbacks that do not return a task must also expose the
+same boundary across three consecutive frames; guard checks still happen
+atomically before dispatch.
+Verbs: `new-run`,
 `abandon`, `option`, `proceed`, `map-move`, `pick-reward`, `pick-card`,
 `pick-relic`, `confirm`, `skip`, `buy`, `leave`, `play`, `end-turn`,
 `potion-use`, `potion-discard`, `cheat` — each valid in its own phase.

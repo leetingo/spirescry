@@ -34,6 +34,15 @@ struct Cli {
     /// Reject the verb if the live run id no longer matches
     #[arg(long, global = true)]
     if_run: Option<String>,
+    /// Wait for action settlement or the next decision (default 5000 ms)
+    #[arg(
+        long,
+        global = true,
+        value_name = "MS",
+        num_args = 0..=1,
+        default_missing_value = "5000"
+    )]
+    follow: Option<u32>,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -132,6 +141,7 @@ fn main() -> ExitCode {
         verbose: cli.verbose,
         if_rev: cli.if_rev,
         if_run: cli.if_run.clone(),
+        follow: cli.follow,
     };
     let result = match &cli.cmd {
         Cmd::Health => client.get("/health"),
@@ -274,6 +284,7 @@ struct Client {
     verbose: bool,
     if_rev: Option<u64>,
     if_run: Option<String>,
+    follow: Option<u32>,
 }
 
 impl Client {
@@ -300,6 +311,9 @@ impl Client {
         }
         if let Some(run) = &self.if_run {
             body["ifRun"] = json!(run);
+        }
+        if let Some(ms) = self.follow {
+            body["follow"] = json!(ms);
         }
         self.post("/step", body)
     }
@@ -574,6 +588,7 @@ mod tests {
             verbose: false,
             if_rev: Some(42),
             if_run: Some("run-1".to_string()),
+            follow: None,
         };
         let mut body = json!({ "action": "end-turn", "args": {} });
         if let Some(rev) = client.if_rev {
@@ -585,6 +600,22 @@ mod tests {
 
         assert_eq!(body["ifRev"], 42);
         assert_eq!(body["ifRun"], "run-1");
+    }
+
+    #[test]
+    fn parses_follow_with_default_or_explicit_timeout() {
+        let bare = Cli::try_parse_from(["spirescry", "end-turn", "--follow"]).unwrap();
+        assert_eq!(bare.follow, Some(5000));
+
+        let timed = Cli::try_parse_from([
+            "spirescry", "end-turn", "--follow", "8000", "--if-rev", "42",
+        ])
+        .unwrap();
+        assert_eq!(timed.follow, Some(8000));
+        assert_eq!(timed.if_rev, Some(42));
+
+        let off = Cli::try_parse_from(["spirescry", "end-turn"]).unwrap();
+        assert_eq!(off.follow, None);
     }
 
     #[test]
