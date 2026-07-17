@@ -538,6 +538,36 @@ def k1():
     to_menu()
 
 
+@case("K2 relic IDs stay compatible while rich state follows combat")
+def k2():
+    full_obs = to_map(seed="CIRELICSTATE")
+    run("cheat", "relic", "HAPPY_FLOWER")
+    full_obs = run("obs")
+    full = full_obs["player"]
+    assert "HAPPY_FLOWER" in full["relics"], \
+        f"relic IDs changed shape: {full['relics']}"
+    flower = next(r for r in full["relicStates"]
+                  if r["model"] == "HAPPY_FLOWER")
+    assert flower["counter"] == 0, f"initial HAPPY_FLOWER counter: {flower}"
+    assert flower["usedUp"] is False, f"fresh relic marked used-up: {flower}"
+    assert flower["description"], f"full relic description missing: {flower}"
+
+    compact = run("obs", "--compact")["player"]
+    compact_flower = next(r for r in compact["relicStates"]
+                          if r["model"] == "HAPPY_FLOWER")
+    assert compact_flower["description"] is None, \
+        f"compact relic prose was not elided: {compact_flower}"
+
+    monster = next(n for n in full_obs["graph"] if n["type"] == "monster")
+    run("cheat", "goto", str(monster["col"]), str(monster["row"]))
+    combat = bridge.wait_phase("combat", timeout=30)
+    combat_flower = next(r for r in combat["you"]["relics"]
+                         if r["model"] == "HAPPY_FLOWER")
+    assert isinstance(combat_flower["counter"], int), \
+        f"combat relic counter missing: {combat_flower}"
+    to_menu()
+
+
 # ---------- V: victory ----------
 
 @case("V1 cheat-driven full clear reaches a victory game_over")

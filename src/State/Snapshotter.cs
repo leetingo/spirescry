@@ -175,7 +175,10 @@ public static class Snapshotter
             hp = creature is null ? null : new[] { creature.CurrentHp, creature.MaxHp },
             gold = player.Gold,
             potions = PotionViews(player),
-            relics = player.Relics.Select(RelicStateView).ToArray(),
+            // Keep the original ID list stable for existing agents; rich,
+            // mutable state is additive so a schema upgrade is not required.
+            relics = player.Relics.Select(r => r.Id.Entry).ToArray(),
+            relicStates = player.Relics.Select(RelicStateView).ToArray(),
             deck = DeckView(player),
         };
     }
@@ -210,16 +213,13 @@ public static class Snapshotter
 
     // The GUI inventory badge's number: DisplayAmount, shown only for
     // relics that opt in. null = this relic keeps no visible count.
-    private static int? RelicCounter(MegaCrit.Sts2.Core.Models.RelicModel r)
-    {
-        try { return r.ShowCounter ? r.DisplayAmount : null; }
-        catch { return null; }
-    }
+    private static int? RelicCounter(RelicModel r) =>
+        r.ShowCounter ? r.DisplayAmount : null;
 
     // A relic's whole observable story: its count, whether a one-shot
     // already fired, and the text — the pickup offer was the only place
     // an agent could ever read it.
-    private static object RelicStateView(MegaCrit.Sts2.Core.Models.RelicModel r) => new
+    private static object RelicStateView(RelicModel r) => new
     {
         model = r.Id.Entry,
         counter = RelicCounter(r),
