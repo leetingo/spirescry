@@ -97,13 +97,13 @@ public sealed class HttpBridge
                     req.QueryString["compact"], req.QueryString["decision"],
                     req.QueryString.GetValues("known")),
                 ("POST", "/step") => await Handlers.Step(body),
-                _ => Response.Error("not_found", $"no route {req.HttpMethod} {path}", 404),
+                _ => Response.Error(RejectionCodes.NotFound, $"no route {req.HttpMethod} {path}", 404),
             };
         }
         catch (Exception ex)
         {
             SafeLog.Error("http handler error", ex);
-            resp = Response.Error("internal", ex.Message, 500);
+            resp = Response.Error(RejectionCodes.Internal, ex.Message, 500);
         }
         if (timer is not null)
             SafeLog.Info(

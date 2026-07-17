@@ -50,6 +50,11 @@ public readonly record struct DispatchResult(
 // entry points the UI uses. Must be called on the main thread.
 public static class Dispatcher
 {
+    private readonly record struct RunContext(
+        RunManager Manager,
+        RunState State,
+        Player? Player);
+
     // The complete verb and cheat surfaces, in dispatch order. /health
     // advertises them as capabilities so a CLI newer or older than the
     // host detects the skew up front instead of mid-run; the rejection
@@ -85,7 +90,7 @@ public static class Dispatcher
         "cheat" => Cheat(args),
         "potion-discard" => PotionDiscard(args),
         "play" or "end-turn" or "potion-use" => CombatVerb(action, args),
-        _ => DispatchResult.Reject("bad_request",
+        _ => DispatchResult.Reject(RejectionCodes.BadRequest,
             $"unknown action '{action}' (supported: {string.Join(", ", Verbs)})"),
     };
 
@@ -94,7 +99,7 @@ public static class Dispatcher
     private static DispatchResult Cheat(JsonElement args)
     {
         if (!TryGetString(args, "name", out var name))
-            return DispatchResult.Reject("bad_request", "missing args.name");
+            return DispatchResult.Reject(RejectionCodes.BadRequest, "missing args.name");
         return name switch
         {
             "goto" => CheatGoto(args),
@@ -110,7 +115,7 @@ public static class Dispatcher
             "potion" => CheatPotion(args),
             "stars" => SetCombatResource("Stars", args),
             "energy" => SetCombatResource("Energy", args),
-            var n => DispatchResult.Reject("bad_request",
+            var n => DispatchResult.Reject(RejectionCodes.BadRequest,
                 $"unknown cheat '{n}' (supported: {string.Join(", ", Cheats)})"),
         };
     }
@@ -121,45 +126,39 @@ public static class Dispatcher
     {
         if (RequirePhase(Phase.Map) is { } err) return err;
         if (!TryGetString(args, "id", out var id))
-            return DispatchResult.Reject("bad_request", "missing args.id (encounter model entry)");
+            return DispatchResult.Reject(RejectionCodes.BadRequest, "missing args.id (encounter model entry)");
         var model = ModelDb.AllEncounters.FirstOrDefault(e =>
             string.Equals(e.Id.Entry, id, StringComparison.OrdinalIgnoreCase));
         if (model is null)
-            return DispatchResult.Reject("bad_target",
+            return DispatchResult.Reject(RejectionCodes.BadTarget,
                 $"no encounter model '{id}' (known: {string.Join(",", ModelDb.AllEncounters.Select(e => e.Id.Entry))})");
-        var rm = RunManager.Instance;
-        var rs = rm?.DebugOnlyGetState();
-        if (rs is null)
-            return DispatchResult.Reject("not_ready", "run state not available");
+        if (RequireRunContext(out var run, "run state not available") is { } runErr)
+            return runErr;
 
         NMapScreen.Instance?.Close(animateOut: false);
         // The registry holds canonical prototypes; rooms want a run-scoped
         // mutable copy (same contract as the relic cheat).
-        var room = new CombatRoom(model.ToMutable(), rs);
-        if (RunMode.IsHeadless)
-            rm!.EnterRoom(room).GetAwaiter().GetResult();
-        else
-            Fire(rm!.EnterRoom(room), "cheat-combat");
+        var room = new CombatRoom(model.ToMutable(), run.State);
+        ResolveOrFire(run.Manager.EnterRoom(room), "cheat-combat");
         return DispatchResult.Success();
     }
 
     private static DispatchResult CheatPotion(JsonElement args)
     {
         if (!TryGetString(args, "id", out var id))
-            return DispatchResult.Reject("bad_request", "missing args.id");
-        var rs = RunManager.Instance?.DebugOnlyGetState();
-        var player = rs is null ? null : LocalContext.GetMe(rs);
-        if (player is null)
-            return DispatchResult.Reject("not_ready", "no run in progress");
+            return DispatchResult.Reject(RejectionCodes.BadRequest, "missing args.id");
+        if (RequireRunContext(
+            out var run, "no run in progress", "no run in progress") is { } runErr)
+            return runErr;
+        var player = run.Player!;
 
         var entry = id.ToUpperInvariant();
         var proto = ModelDb.AllPotions.FirstOrDefault(p => p.Id.Entry == entry);
         if (proto is null)
-            return DispatchResult.Reject("bad_request", $"no potion model '{entry}'");
+            return DispatchResult.Reject(RejectionCodes.BadRequest, $"no potion model '{entry}'");
 
         var procure = PotionCmd.TryToProcure(proto.ToMutable(), player);
-        if (RunMode.IsHeadless) procure.GetAwaiter().GetResult();
-        else Fire(procure, "cheat-potion");
+        ResolveOrFire(procure, "cheat-potion");
         return DispatchResult.Success();
     }
 
@@ -168,13 +167,15 @@ public static class Dispatcher
     private static DispatchResult SetCombatResource(string prop, JsonElement args)
     {
         if (!TryGetInt(args, "value", out var value))
-            return DispatchResult.Reject("bad_request", "missing args.value");
+            return DispatchResult.Reject(RejectionCodes.BadRequest, "missing args.value");
         if (CombatManager.Instance is not { IsInProgress: true })
-            return DispatchResult.Reject("bad_phase", "not in combat");
-        var rs = RunManager.Instance?.DebugOnlyGetState();
-        var pcs = (rs is null ? null : LocalContext.GetMe(rs))?.PlayerCombatState;
+            return DispatchResult.Reject(RejectionCodes.BadPhase, "not in combat");
+        if (RequireRunContext(
+            out var run, "no combat state", "no combat state") is { } runErr)
+            return runErr;
+        var pcs = run.Player!.PlayerCombatState;
         if (pcs is null)
-            return DispatchResult.Reject("not_ready", "no combat state");
+            return DispatchResult.Reject(RejectionCodes.NotReady, "no combat state");
         Reflect.SetPropertyOrBackingField(pcs, prop, Math.Max(0, value));
         return DispatchResult.Success();
     }
@@ -185,22 +186,18 @@ public static class Dispatcher
     {
         if (RequirePhase(Phase.Map) is { } err) return err;
         if (!TryGetString(args, "id", out var id))
-            return DispatchResult.Reject("bad_request", "missing args.id (event model entry)");
+            return DispatchResult.Reject(RejectionCodes.BadRequest, "missing args.id (event model entry)");
         var model = ModelDb.AllEvents.FirstOrDefault(e =>
             string.Equals(e.Id.Entry, id, StringComparison.OrdinalIgnoreCase));
         if (model is null)
-            return DispatchResult.Reject("bad_target",
+            return DispatchResult.Reject(RejectionCodes.BadTarget,
                 $"no event model '{id}' (known: {string.Join(",", ModelDb.AllEvents.Select(e => e.Id.Entry))})");
-        var rm = RunManager.Instance;
-        if (rm?.DebugOnlyGetState() is null)
-            return DispatchResult.Reject("not_ready", "run state not available");
+        if (RequireRunContext(out var run, "run state not available") is { } runErr)
+            return runErr;
 
         // The map screen would otherwise stay on top and mask the event.
         NMapScreen.Instance?.Close(animateOut: false);
-        if (RunMode.IsHeadless)
-            rm.EnterRoom(new EventRoom(model)).GetAwaiter().GetResult();
-        else
-            Fire(rm.EnterRoom(new EventRoom(model)), "cheat-event");
+        ResolveOrFire(run.Manager.EnterRoom(new EventRoom(model)), "cheat-event");
         return DispatchResult.Success();
     }
 
@@ -209,19 +206,21 @@ public static class Dispatcher
     private static DispatchResult CheatHp(JsonElement args)
     {
         if (!TryGetInt(args, "value", out var value))
-            return DispatchResult.Reject("bad_request", "missing args.value");
+            return DispatchResult.Reject(RejectionCodes.BadRequest, "missing args.value");
         return SetLocalHp(c => Math.Clamp(value, 1, c.MaxHp));
     }
 
     private static DispatchResult SetLocalHp(Func<Creature, int> hp)
     {
-        var rs = RunManager.Instance?.DebugOnlyGetState();
-        var creature = rs is null ? null : LocalContext.GetMe(rs)?.Creature;
+        if (RequireRunContext(
+            out var run, "no local creature", "no local creature") is { } runErr)
+            return runErr;
+        var creature = run.Player!.Creature;
         if (creature is null)
-            return DispatchResult.Reject("not_ready", "no local creature");
+            return DispatchResult.Reject(RejectionCodes.NotReady, "no local creature");
         return Reflect.SetProperty(creature, "CurrentHp", hp(creature))
             ? DispatchResult.Success()
-            : DispatchResult.Reject("internal", "CurrentHp setter not found");
+            : DispatchResult.Reject(RejectionCodes.Internal, "CurrentHp setter not found");
     }
 
     // map-move without the reachability check: jump to any node in the act.
@@ -229,35 +228,34 @@ public static class Dispatcher
     {
         if (RequirePhase(Phase.Map) is { } err) return err;
         if (!TryGetInt(args, "col", out var col) || !TryGetInt(args, "row", out var row))
-            return DispatchResult.Reject("bad_request", "missing args.col / args.row");
+            return DispatchResult.Reject(RejectionCodes.BadRequest, "missing args.col / args.row");
 
-        var rm = RunManager.Instance;
-        var rs = rm?.DebugOnlyGetState();
-        if (rm is null || rs?.Map is null)
-            return DispatchResult.Reject("not_ready", "run state not available");
-        var player = LocalContext.GetMe(rs);
-        if (player is null)
-            return DispatchResult.Reject("internal", "local player not found");
+        if (RequireRunContext(
+            out var run, "run state not available", "local player not found",
+            playerCode: RejectionCodes.Internal) is { } runErr)
+            return runErr;
+        if (run.State.Map is null)
+            return DispatchResult.Reject(RejectionCodes.NotReady, "run state not available");
 
-        var target = Snapshotter.AllMapPoints(rs.Map)
+        var target = Snapshotter.AllMapPoints(run.State.Map)
             .FirstOrDefault(p => p.coord.col == col && p.coord.row == row);
         if (target is null)
-            return DispatchResult.Reject("bad_target", $"no map node at {col},{row} (see obs.graph)");
+            return DispatchResult.Reject(RejectionCodes.BadTarget, $"no map node at {col},{row} (see obs.graph)");
 
-        return TravelTo(rm, rs, player, target);
+        return TravelTo(run.Manager, run.State, run.Player!, target);
     }
 
     private static DispatchResult CheatGold(JsonElement args)
     {
         if (!TryGetInt(args, "value", out var value))
-            return DispatchResult.Reject("bad_request", "missing args.value");
-        var rs = RunManager.Instance?.DebugOnlyGetState();
-        var player = rs is null ? null : LocalContext.GetMe(rs);
-        if (player is null)
-            return DispatchResult.Reject("not_ready", "no local player");
+            return DispatchResult.Reject(RejectionCodes.BadRequest, "missing args.value");
+        if (RequireRunContext(
+            out var run, "no local player", "no local player") is { } runErr)
+            return runErr;
+        var player = run.Player!;
         return Reflect.SetProperty(player, "Gold", Math.Max(0, value))
             ? DispatchResult.Success()
-            : DispatchResult.Reject("internal", "Gold setter not found");
+            : DispatchResult.Reject(RejectionCodes.Internal, "Gold setter not found");
     }
 
     private static DispatchResult CheatHeal() => SetLocalHp(c => c.MaxHp);
@@ -268,19 +266,21 @@ public static class Dispatcher
     private static DispatchResult CheatCard(JsonElement args)
     {
         if (!TryGetString(args, "id", out var id))
-            return DispatchResult.Reject("bad_request", "missing args.id");
-        var rs = RunManager.Instance?.DebugOnlyGetState();
-        var player = rs is null ? null : LocalContext.GetMe(rs);
-        if (player is null)
-            return DispatchResult.Reject("not_ready", "no run in progress");
+            return DispatchResult.Reject(RejectionCodes.BadRequest, "missing args.id");
+        if (RequireRunContext(
+            out var run, "no run in progress", "no run in progress") is { } runErr)
+            return runErr;
+        var player = run.Player!;
 
         var entry = id.ToUpperInvariant();
         var proto = ModelDb.AllCards.FirstOrDefault(c => c.Id.Entry == entry);
         if (proto is null)
-            return DispatchResult.Reject("bad_request", $"no card model '{entry}'");
+            return DispatchResult.Reject(RejectionCodes.BadRequest, $"no card model '{entry}'");
 
         var inCombat = CombatManager.Instance is { IsInProgress: true };
-        ICardScope scope = inCombat ? CombatManager.Instance!.DebugOnlyGetState()! : rs;
+        ICardScope scope = inCombat
+            ? CombatManager.Instance!.DebugOnlyGetState()!
+            : run.State;
         var card = scope.CreateCard(proto, player);
         var makeUpgraded = args.TryGetProperty("upgraded", out var upgraded)
             && upgraded.ValueKind == JsonValueKind.True;
@@ -292,26 +292,26 @@ public static class Dispatcher
             Reflect.Invoke(card, "FinalizeUpgradeInternal");
         }
         var add = CardPileCmd.Add(card, inCombat ? PileType.Hand : PileType.Deck);
-        if (RunMode.IsHeadless) add.GetAwaiter().GetResult();
-        else Fire(add, "cheat-card");
+        ResolveOrFire(add, "cheat-card");
         return DispatchResult.Success();
     }
 
     private static DispatchResult CheatRelic(JsonElement args)
     {
         if (!TryGetString(args, "id", out var id))
-            return DispatchResult.Reject("bad_request", "missing args.id");
-        var rs = RunManager.Instance?.DebugOnlyGetState();
-        var player = rs is null ? null : LocalContext.GetMe(rs);
-        if (player is null)
-            return DispatchResult.Reject("not_ready", "no run in progress");
+            return DispatchResult.Reject(RejectionCodes.BadRequest, "missing args.id");
+        if (RequireRunContext(
+            out var run, "no run in progress", "no run in progress") is { } runErr)
+            return runErr;
+        var rs = run.State;
+        var player = run.Player!;
 
         var entry = id.ToUpperInvariant();
         var proto = ModelDb.AllRelics.FirstOrDefault(r => r.Id.Entry == entry);
         if (proto is null)
-            return DispatchResult.Reject("bad_request", $"no relic model '{entry}'");
+            return DispatchResult.Reject(RejectionCodes.BadRequest, $"no relic model '{entry}'");
         if (!proto.IsAllowed(rs!))
-            return DispatchResult.Reject("not_playable",
+            return DispatchResult.Reject(RejectionCodes.NotPlayable,
                 $"relic '{entry}' is not allowed in this run");
 
         var relic = proto.ToMutable();
@@ -331,7 +331,7 @@ public static class Dispatcher
         // GUI screen that does not exist in the pure host.
         HeadlessPicker.Around(() => obtain = RelicCmd.Obtain(relic, player));
         if (obtain is null)
-            return DispatchResult.Reject("internal", "relic obtain did not start");
+            return DispatchResult.Reject(RejectionCodes.Internal, "relic obtain did not start");
         if (RunMode.IsHeadless
             && !HeadlessPicker.IsActive
             && !HeadlessBundle.IsActive
@@ -349,7 +349,7 @@ public static class Dispatcher
     {
         var combat = CombatManager.Instance;
         if (combat is null || !combat.IsInProgress)
-            return DispatchResult.Reject("bad_phase", "not in combat");
+            return DispatchResult.Reject(RejectionCodes.BadPhase, "not in combat");
         var state = combat.DebugOnlyGetState()!;
         foreach (var c in state.Enemies)
         {
@@ -368,7 +368,7 @@ public static class Dispatcher
     {
         var rm = RunManager.Instance;
         if (rm is null || rm.DebugOnlyGetState() is null)
-            return DispatchResult.Reject("bad_phase", "no run to abandon");
+            return DispatchResult.Reject(RejectionCodes.BadPhase, "no run to abandon");
         var game = NGame.Instance;
         if (!rm.IsAbandoned && !rm.IsGameOver)
         {
@@ -429,14 +429,14 @@ public static class Dispatcher
         var current = PhaseDetector.Current();
         return current == need
             ? null
-            : DispatchResult.Reject("bad_phase",
+            : DispatchResult.Reject(RejectionCodes.BadPhase,
                 $"requires phase {need.AsString()}, current is {current.AsString()}");
     }
 
     // Single owner of the bad_index reject shape — the grammar agents parse.
     private static DispatchResult? BadIdx(int idx, int count, string what) =>
         idx < 0 || idx >= count
-            ? DispatchResult.Reject("bad_index",
+            ? DispatchResult.Reject(RejectionCodes.BadIndex,
                 $"{what} idx {idx} out of range [0,{count - 1}]")
             : null;
 
@@ -460,15 +460,39 @@ public static class Dispatcher
         return true;
     }
 
+    // Single owner of the run singleton/state/local-player lookup. Callers
+    // that only need run-level state omit playerMessage; callers that need a
+    // local player choose whether its absence is still a readiness gap or an
+    // internal invariant violation without repeating the singleton preamble.
+    private static DispatchResult? RequireRunContext(
+        out RunContext context,
+        string stateMessage,
+        string? playerMessage = null,
+        string playerCode = RejectionCodes.NotReady)
+    {
+        context = default;
+        var manager = RunManager.Instance;
+        var state = manager?.DebugOnlyGetState();
+        if (manager is null || state is null)
+            return DispatchResult.Reject(RejectionCodes.NotReady, stateMessage);
+
+        var player = LocalContext.GetMe(state);
+        if (playerMessage is not null && player is null)
+            return DispatchResult.Reject(playerCode, playerMessage);
+
+        context = new RunContext(manager, state, player);
+        return null;
+    }
+
     // Shared travel tail — the gates every travel verb must pass, then the
     // engine's own vote enqueue.
     private static DispatchResult TravelTo(
         RunManager rm, RunState rs, Player player, MapPoint target)
     {
         if (LocalQueueBlocked(rm, player))
-            return DispatchResult.Reject("not_ready", "action queue is paused — retry");
+            return DispatchResult.Reject(RejectionCodes.NotReady, "action queue is paused — retry");
         if (MapIntroBlocksTravel())
-            return DispatchResult.Reject("not_ready", "map intro animation — retry");
+            return DispatchResult.Reject(RejectionCodes.NotReady, "map intro animation — retry");
         EnqueueMapVote(rm, rs, player, target.coord);
         return DispatchResult.Success();
     }
@@ -583,7 +607,7 @@ public static class Dispatcher
             SafeLog.Error($"{actionName} died mid-resolution", ex);
             var partial = fault is InlineFaultKind.Partial;
             return DispatchResult.Reject(
-                partial ? "resolution_partial" : "resolution_failed",
+                partial ? RejectionCodes.ResolutionPartial : RejectionCodes.ResolutionFailed,
                 partial
                     ? $"{actionName} changed the world before {ex.GetType().Name}: {ex.Message}"
                     : $"{actionName} failed before an observable change: {ex.GetType().Name}: {ex.Message}",
@@ -634,6 +658,16 @@ public static class Dispatcher
         }, TaskContinuationOptions.OnlyOnFaulted);
     }
 
+    // Model-layer tasks drain synchronously in the pure host; GUI tasks must
+    // be tracked without blocking the engine's main thread.
+    private static void ResolveOrFire(Task task, string context)
+    {
+        if (RunMode.IsHeadless)
+            task.GetAwaiter().GetResult();
+        else
+            Fire(task, context);
+    }
+
     // ---- main menu ----------------------------------------------------
 
     private static DispatchResult NewRun(JsonElement args)
@@ -641,14 +675,14 @@ public static class Dispatcher
         if (RequirePhase(Phase.MainMenu) is { } err) return err;
 
         if (!TryGetString(args, "character", out var entry))
-            return DispatchResult.Reject("bad_request", "missing args.character");
+            return DispatchResult.Reject(RejectionCodes.BadRequest, "missing args.character");
 
         var character = ModelDb.AllCharacters.FirstOrDefault(c =>
             string.Equals(c.Id.Entry, entry, StringComparison.OrdinalIgnoreCase));
         if (character is null)
         {
             var known = string.Join(",", ModelDb.AllCharacters.Select(c => c.Id.Entry));
-            return DispatchResult.Reject("bad_request", $"unknown character '{entry}' (known: {known})");
+            return DispatchResult.Reject(RejectionCodes.BadRequest, $"unknown character '{entry}' (known: {known})");
         }
 
         // A saved run gets preloaded into RunManager some time after boot
@@ -665,7 +699,7 @@ public static class Dispatcher
                 && priorState.CurrentRoom is null
                 && CombatManager.Instance is not { IsInProgress: true };
             if (!parked)
-                return DispatchResult.Reject("run_exists",
+                return DispatchResult.Reject(RejectionCodes.RunExists,
                     "a run is loaded — if you just called new-run, poll /obs; otherwise call abandon first");
             SafeLog.Info("clearing a parked boot launch and relaunching");
             Reflect.SetPropertyOrBackingField(prior, "State", null);
@@ -687,7 +721,7 @@ public static class Dispatcher
         if (game.MainMenu is not { } menu
             || Reflect.FieldValue(menu, "_singleplayerButton")
                 is not NClickableControl { IsEnabled: true })
-            return DispatchResult.Reject("not_ready", "main menu not ready — retry");
+            return DispatchResult.Reject(RejectionCodes.NotReady, "main menu not ready — retry");
 
         Fire(game.StartNewSingleplayerRun(
             character,
@@ -748,7 +782,7 @@ public static class Dispatcher
         catch (Exception ex)
         {
             var root = ex.GetBaseException();
-            return DispatchResult.Reject("internal",
+            return DispatchResult.Reject(RejectionCodes.Internal,
                 $"headless new-run failed: {root.GetType().Name}: {root.Message}");
         }
     }
@@ -758,13 +792,13 @@ public static class Dispatcher
     private static DispatchResult Option(JsonElement args)
     {
         if (!TryGetInt(args, "idx", out var idx))
-            return DispatchResult.Reject("bad_request", "missing args.idx");
+            return DispatchResult.Reject(RejectionCodes.BadRequest, "missing args.idx");
         return PhaseDetector.Current() switch
         {
             Phase.Event => EventOption(idx),
             Phase.RestSite => RestOption(idx),
             Phase.CrystalSphere => CrystalTool(idx),
-            var p => DispatchResult.Reject("bad_phase",
+            var p => DispatchResult.Reject(RejectionCodes.BadPhase,
                 $"option is valid in event/rest_site/crystal_sphere, current is {p.AsString()}"),
         };
     }
@@ -778,20 +812,20 @@ public static class Dispatcher
         if (RunMode.IsHeadless)
         {
             if (HeadlessCrystal.Entity is not { } entity)
-                return DispatchResult.Reject("not_ready", "no crystal sphere in progress");
+                return DispatchResult.Reject(RejectionCodes.NotReady, "no crystal sphere in progress");
             var grid = entity.GridSize;
             if (col < 0 || col >= grid.X || row < 0 || row >= grid.Y
                 || entity.cells[col, row] is not { } cell)
-                return DispatchResult.Reject("bad_target", $"no cell at {col},{row} (see obs.cells)");
+                return DispatchResult.Reject(RejectionCodes.BadTarget, $"no cell at {col},{row} (see obs.cells)");
             entity.CellClicked(cell).GetAwaiter().GetResult();
             return DispatchResult.Success();
         }
 
         if (Screens.Crystal() is not { } screen)
-            return DispatchResult.Reject("not_ready", "crystal sphere screen not mounted");
+            return DispatchResult.Reject(RejectionCodes.NotReady, "crystal sphere screen not mounted");
         var uiCell = FindCrystalCell(Screens.CrystalCellContainer(screen), col, row);
         if (uiCell is null)
-            return DispatchResult.Reject("bad_target", $"no cell at {col},{row} (see obs.cells)");
+            return DispatchResult.Reject(RejectionCodes.BadTarget, $"no cell at {col},{row} (see obs.cells)");
         if (Reflect.Invoke(screen, "OnCellClicked", uiCell) is Task cellTask) Fire(cellTask, "crystal-click");
         return DispatchResult.Success();
     }
@@ -814,12 +848,12 @@ public static class Dispatcher
     private static DispatchResult CrystalTool(int idx)
     {
         if (idx is not (0 or 1))
-            return DispatchResult.Reject("bad_index", "tool idx: 0 = small divination, 1 = big");
+            return DispatchResult.Reject(RejectionCodes.BadIndex, "tool idx: 0 = small divination, 1 = big");
 
         if (RunMode.IsHeadless)
         {
             if (HeadlessCrystal.Entity is not { } entity)
-                return DispatchResult.Reject("not_ready", "no crystal sphere in progress");
+                return DispatchResult.Reject(RejectionCodes.NotReady, "no crystal sphere in progress");
             entity.SetTool(idx == 0
                 ? CrystalMinigame.CrystalSphereToolType.Small
                 : CrystalMinigame.CrystalSphereToolType.Big);
@@ -827,7 +861,7 @@ public static class Dispatcher
         }
 
         if (Screens.Crystal() is not { } screen)
-            return DispatchResult.Reject("not_ready", "crystal sphere screen not mounted");
+            return DispatchResult.Reject(RejectionCodes.NotReady, "crystal sphere screen not mounted");
         Reflect.Invoke(screen, idx == 0 ? "SetSmallDivination" : "SetBigDivination",
             new object?[] { null });
         return DispatchResult.Success();
@@ -838,10 +872,10 @@ public static class Dispatcher
         var ev = Screens.CurrentEvent();
         var opts = ev?.CurrentOptions;
         if (ev is null || opts is null || opts.Count == 0 || ev.IsFinished)
-            return DispatchResult.Reject("not_ready", "no options to choose (event finished? try proceed)");
+            return DispatchResult.Reject(RejectionCodes.NotReady, "no options to choose (event finished? try proceed)");
         if (BadIdx(idx, opts.Count, "option") is { } err) return err;
         if (opts[idx].IsLocked)
-            return DispatchResult.Reject("not_playable", $"option {idx} is locked");
+            return DispatchResult.Reject(RejectionCodes.NotPlayable, $"option {idx} is locked");
 
         // Headless: an option that opens a deck picker (transform,
         // upgrade, …) awaits a card selection with no screen to serve it —
@@ -856,10 +890,10 @@ public static class Dispatcher
         var room = NRestSiteRoom.Instance;
         var opts = Screens.RestOptions();
         if (opts is null)
-            return DispatchResult.Reject("not_ready", "rest site not mounted");
+            return DispatchResult.Reject(RejectionCodes.NotReady, "rest site not mounted");
         if (BadIdx(idx, opts.Count, "option") is { } err) return err;
         if (!opts[idx].IsEnabled)
-            return DispatchResult.Reject("not_playable", $"option {idx} is disabled");
+            return DispatchResult.Reject(RejectionCodes.NotPlayable, $"option {idx} is disabled");
 
         if (room is not null)
         {
@@ -893,7 +927,9 @@ public static class Dispatcher
                 // room model directly (some events, e.g. Neow, end on a
                 // dialogue page and never flip IsFinished). The finale event
                 // is the exception: its exit is the win.
-                if (RunManager.Instance?.DebugOnlyGetState()?.CurrentRoom is { IsVictoryRoom: true })
+                if (RequireRunContext(out var eventRun, "run state not available") is { } eventErr)
+                    return eventErr;
+                if (eventRun.State.CurrentRoom is { IsVictoryRoom: true })
                     return EnterNextActHeadless();
                 return ExitRoomToMap("event proceed");
 
@@ -906,8 +942,10 @@ public static class Dispatcher
                     // A beaten boss doesn't return to this act's map — the
                     // run moves on (the GUI's transition screen makes this
                     // same engine call).
-                    var rs2 = RunManager.Instance?.DebugOnlyGetState();
-                    if (rs2?.CurrentMapPoint?.PointType == MapPointType.Boss)
+                    if (RequireRunContext(out var rewardsRun, "run state not available") is { } rewardsErr)
+                        return rewardsErr;
+                    var rs2 = rewardsRun.State;
+                    if (rs2.CurrentMapPoint?.PointType == MapPointType.Boss)
                     {
                         if (rs2.CurrentRoom is { } bossRoom) Fire(bossRoom.Exit(rs2), "boss exit");
                         // First boss of a two-boss act exits back to the map
@@ -920,7 +958,7 @@ public static class Dispatcher
                     return ExitRoomToMap("rewards proceed");
                 }
                 if (Screens.Top<NRewardsScreen>() is not { } screen)
-                    return DispatchResult.Reject("not_ready", "rewards screen not mounted");
+                    return DispatchResult.Reject(RejectionCodes.NotReady, "rewards screen not mounted");
                 // A debug override left set short-circuits the handler.
                 RunManager.Instance!.debugAfterCombatRewardsOverride = null;
                 Reflect.Invoke(screen, "OnProceedButtonPressed", new object?[] { null });
@@ -930,7 +968,7 @@ public static class Dispatcher
                 if (NRestSiteRoom.Instance is { } restRoom)
                 {
                     if (restRoom.ProceedButton is not { Visible: true } restBtn)
-                        return DispatchResult.Reject("not_ready",
+                        return DispatchResult.Reject(RejectionCodes.NotReady,
                             "proceed button not visible — choose an option first");
                     restBtn.ForceClick();
                     return DispatchResult.Success();
@@ -941,7 +979,7 @@ public static class Dispatcher
                 if (NRun.Instance?.TreasureRoom is { } chestRoom)
                 {
                     if (chestRoom.ProceedButton is not { Visible: true } chestBtn)
-                        return DispatchResult.Reject("not_ready",
+                        return DispatchResult.Reject(RejectionCodes.NotReady,
                             "proceed button not visible — resolve the chest first (pick-relic / skip)");
                     chestBtn.ForceClick();
                     return DispatchResult.Success();
@@ -961,12 +999,12 @@ public static class Dispatcher
                     return DispatchResult.Success();
                 }
                 if (Screens.Crystal() is not { } sphere)
-                    return DispatchResult.Reject("not_ready", "crystal sphere screen not mounted");
+                    return DispatchResult.Reject(RejectionCodes.NotReady, "crystal sphere screen not mounted");
                 Reflect.Invoke(sphere, "OnProceedButtonPressed", new object?[] { null });
                 return DispatchResult.Success();
 
             case var p:
-                return DispatchResult.Reject("bad_phase",
+                return DispatchResult.Reject(RejectionCodes.BadPhase,
                     $"proceed is valid in event/rewards/rest_site/treasure/crystal_sphere, current is {p.AsString()}");
         }
     }
@@ -983,7 +1021,7 @@ public static class Dispatcher
         }
         catch (Exception ex)
         {
-            return DispatchResult.Reject("internal",
+            return DispatchResult.Reject(RejectionCodes.Internal,
                 $"act transition failed: {ex.GetType().Name}: {ex.Message}");
         }
     }
@@ -992,10 +1030,10 @@ public static class Dispatcher
     // cleanup), then force a fresh MapRoom so PhaseDetector reads map.
     private static DispatchResult ExitRoomToMap(string label, bool exitRoom = true)
     {
-        var rm = RunManager.Instance;
-        var rs = rm?.DebugOnlyGetState();
-        if (rm is null || rs is null)
-            return DispatchResult.Reject("not_ready", "run state not available");
+        if (RequireRunContext(out var run, "run state not available") is { } runErr)
+            return runErr;
+        var rm = run.Manager;
+        var rs = run.State;
         try
         {
             if (exitRoom && rs.CurrentRoom is { } room) Fire(room.Exit(rs), label);
@@ -1005,7 +1043,7 @@ public static class Dispatcher
         }
         catch (Exception ex)
         {
-            return DispatchResult.Reject("internal",
+            return DispatchResult.Reject(RejectionCodes.Internal,
                 $"headless {label} failed: {ex.GetType().Name}: {ex.Message}");
         }
     }
@@ -1019,19 +1057,21 @@ public static class Dispatcher
             ? Screens.CurrentEvent() as FakeMerchant
             : null;
         if (phase != Phase.Shop && fakeMerchant is null)
-            return DispatchResult.Reject("bad_phase",
+            return DispatchResult.Reject(RejectionCodes.BadPhase,
                 $"buy requires shop/fake merchant, current is {phase.AsString()}");
         if (!TryGetString(args, "kind", out var kind))
-            return DispatchResult.Reject("bad_request", "missing args.kind");
+            return DispatchResult.Reject(RejectionCodes.BadRequest, "missing args.kind");
         if (kind is not ("card" or "colorless" or "relic" or "potion" or "card_removal"))
-            return DispatchResult.Reject("bad_request",
+            return DispatchResult.Reject(RejectionCodes.BadRequest,
                 $"unknown kind '{kind}' (card, colorless, relic, potion, card_removal)");
         TryGetInt(args, "idx", out var idx);
 
-        var rs = RunManager.Instance?.DebugOnlyGetState();
-        var inv = fakeMerchant?.Inventory ?? Screens.ShopInventory(rs);
-        if (rs is null || inv is null)
-            return DispatchResult.Reject("not_ready", "shop inventory not available");
+        if (RequireRunContext(
+            out var run, "shop inventory not available", "shop inventory not available") is { } runErr)
+            return runErr;
+        var inv = fakeMerchant?.Inventory ?? Screens.ShopInventory(run.State);
+        if (inv is null)
+            return DispatchResult.Reject(RejectionCodes.NotReady, "shop inventory not available");
 
         MerchantEntry? entry = kind switch
         {
@@ -1042,14 +1082,14 @@ public static class Dispatcher
             _ => inv.CardRemovalEntry,
         };
         if (entry is null)
-            return DispatchResult.Reject("bad_index", $"no {kind} at idx {idx}");
+            return DispatchResult.Reject(RejectionCodes.BadIndex, $"no {kind} at idx {idx}");
         if (!entry.IsStocked)
-            return DispatchResult.Reject("bad_index", $"{kind} idx {idx} is sold out");
+            return DispatchResult.Reject(RejectionCodes.BadIndex, $"{kind} idx {idx} is sold out");
         if (!entry.EnoughGold)
-            return DispatchResult.Reject("not_enough_gold",
+            return DispatchResult.Reject(RejectionCodes.NotEnoughGold,
                 $"{kind} idx {idx} costs {entry.Cost}");
-        if (entry is MerchantPotionEntry && LocalContext.GetMe(rs)?.HasOpenPotionSlots != true)
-            return DispatchResult.Reject("not_ready", "no open potion slots");
+        if (entry is MerchantPotionEntry && run.Player!.HasOpenPotionSlots != true)
+            return DispatchResult.Reject(RejectionCodes.NotReady, "no open potion slots");
 
         // Card removal opens a deck-select sub-screen and the Task stays
         // pending until it's driven — poll /obs. Headless pre-arms the
@@ -1076,7 +1116,7 @@ public static class Dispatcher
     private static DispatchResult PickRelic(JsonElement args)
     {
         if (!TryGetInt(args, "idx", out var idx))
-            return DispatchResult.Reject("bad_request", "missing args.idx");
+            return DispatchResult.Reject(RejectionCodes.BadRequest, "missing args.idx");
         switch (PhaseDetector.Current())
         {
             case Phase.Treasure:
@@ -1084,7 +1124,7 @@ public static class Dispatcher
                     var room = NRun.Instance?.TreasureRoom;
                     var sync = RunManager.Instance?.TreasureRoomRelicSynchronizer;
                     if (sync is null || (room is null && !RunMode.IsHeadless))
-                        return DispatchResult.Reject("not_ready", "treasure room not mounted");
+                        return DispatchResult.Reject(RejectionCodes.NotReady, "treasure room not mounted");
                     // The chest must be opened before picking or the room
                     // never wires its exit. (Headless: the treasure snapshot
                     // opens the chest through the room model instead.)
@@ -1092,12 +1132,12 @@ public static class Dispatcher
                     {
                         var chest = Reflect.Field<NButton>(room, "_chestButton");
                         if (chest is null)
-                            return DispatchResult.Reject("not_ready", "chest button not found");
+                            return DispatchResult.Reject(RejectionCodes.NotReady, "chest button not found");
                         chest.ForceClick();
                     }
                     var relics = sync.CurrentRelics;
                     if (relics is null || relics.Count == 0)
-                        return DispatchResult.Reject("not_ready",
+                        return DispatchResult.Reject(RejectionCodes.NotReady,
                             "chest opening — poll /obs, then pick-relic again");
                     if (BadIdx(idx, relics.Count, "relic") is { } err) return err;
                     // The award itself lives in the GUI's collection node
@@ -1129,14 +1169,14 @@ public static class Dispatcher
                     var screen = Screens.Top<NChooseARelicSelection>();
                     var holders = screen is null ? null : Screens.RelicHolders(screen);
                     if (screen is null || holders is null || holders.Count == 0)
-                        return DispatchResult.Reject("not_ready", "relic row not wired yet — retry");
+                        return DispatchResult.Reject(RejectionCodes.NotReady, "relic row not wired yet — retry");
                     if (BadIdx(idx, holders.Count, "relic") is { } err) return err;
                     Reflect.Invoke(screen, "SelectHolder", holders[idx]);
                     return DispatchResult.Success();
                 }
 
             case var p:
-                return DispatchResult.Reject("bad_phase",
+                return DispatchResult.Reject(RejectionCodes.BadPhase,
                     $"pick-relic is valid in treasure/relic_reward, current is {p.AsString()}");
         }
     }
@@ -1147,20 +1187,20 @@ public static class Dispatcher
     {
         if (RequirePhase(Phase.Rewards) is { } err) return err;
         if (!TryGetInt(args, "idx", out var idx))
-            return DispatchResult.Reject("bad_request", "missing args.idx");
+            return DispatchResult.Reject(RejectionCodes.BadRequest, "missing args.idx");
 
         if (RunMode.IsHeadless)
             return HeadlessRewards.PickReward(idx) is { } msg
-                ? DispatchResult.Reject("bad_index", msg)
+                ? DispatchResult.Reject(RejectionCodes.BadIndex, msg)
                 : DispatchResult.Success();
 
         var screen = Screens.Top<NRewardsScreen>();
         var buttons = screen is null ? null : Screens.RewardButtons(screen);
         if (buttons is null)
-            return DispatchResult.Reject("not_ready", "rewards screen not mounted");
+            return DispatchResult.Reject(RejectionCodes.NotReady, "rewards screen not mounted");
         if (BadIdx(idx, buttons.Count, "reward") is { } idxErr) return idxErr;
         if (Screens.ClaimableReward(buttons[idx]) is not { } btn)
-            return DispatchResult.Reject("bad_index", $"reward idx {idx} is not claimable (already taken?)");
+            return DispatchResult.Reject(RejectionCodes.BadIndex, $"reward idx {idx} is not claimable (already taken?)");
 
         // The button's own async claim path; for card tiles the Task stays
         // pending until the pushed sub-screen is driven — poll /obs.
@@ -1171,14 +1211,14 @@ public static class Dispatcher
     private static DispatchResult PickCard(JsonElement args)
     {
         if (!TryGetInt(args, "idx", out var idx))
-            return DispatchResult.Reject("bad_request", "missing args.idx");
+            return DispatchResult.Reject(RejectionCodes.BadRequest, "missing args.idx");
         return PhaseDetector.Current() switch
         {
             Phase.CardReward => PickRewardCard(idx),
             Phase.CardSelect => PickGridCard(idx),
             Phase.HandSelect => PickHandCard(idx),
             Phase.BundleSelect => PickBundle(idx),
-            var p => DispatchResult.Reject("bad_phase",
+            var p => DispatchResult.Reject(RejectionCodes.BadPhase,
                 $"pick-card is valid in card_reward/card_select/hand_select/bundle_select, current is {p.AsString()}"),
         };
     }
@@ -1189,14 +1229,14 @@ public static class Dispatcher
     {
         if (RunMode.IsHeadless)
             return HeadlessBundle.Pick(idx) is { } msg
-                ? DispatchResult.Reject("bad_index", msg)
+                ? DispatchResult.Reject(RejectionCodes.BadIndex, msg)
                 : DispatchResult.Success();
 
         if (Screens.Top<NChooseABundleSelectionScreen>() is not { } screen)
-            return DispatchResult.Reject("not_ready", "bundle screen not mounted");
+            return DispatchResult.Reject(RejectionCodes.NotReady, "bundle screen not mounted");
         var nodes = Screens.BundleNodes(screen);
         if (nodes is null || nodes.Count == 0)
-            return DispatchResult.Reject("not_ready", "bundle row not wired yet — retry");
+            return DispatchResult.Reject(RejectionCodes.NotReady, "bundle row not wired yet — retry");
         if (BadIdx(idx, nodes.Count, "bundle") is { } err) return err;
         Reflect.Invoke(screen, "OnBundleClicked", nodes[idx]);
         return DispatchResult.Success();
@@ -1206,13 +1246,13 @@ public static class Dispatcher
     {
         if (RunMode.IsHeadless)
             return HeadlessRewards.PickCard(idx) is { } msg
-                ? DispatchResult.Reject("bad_index", msg)
+                ? DispatchResult.Reject(RejectionCodes.BadIndex, msg)
                 : DispatchResult.Success();
 
         var screen = Screens.Top<NCardRewardSelectionScreen>();
         var holders = screen is null ? null : Screens.CardHolders(screen);
         if (screen is null || holders is null || holders.Count == 0)
-            return DispatchResult.Reject("not_ready", "card row not wired yet — retry");
+            return DispatchResult.Reject(RejectionCodes.NotReady, "card row not wired yet — retry");
         if (BadIdx(idx, holders.Count, "card") is { } err) return err;
 
         Reflect.Invoke(screen, "SelectCard", holders[idx]);
@@ -1227,7 +1267,7 @@ public static class Dispatcher
     {
         if (RunMode.IsHeadless)
             return HeadlessPicker.Pick(idx) is { } msg
-                ? DispatchResult.Reject("bad_index", msg)
+                ? DispatchResult.Reject(RejectionCodes.BadIndex, msg)
                 : DispatchResult.Success();
 
         // Choose-a-card overlays resolve on the pick itself.
@@ -1235,7 +1275,7 @@ public static class Dispatcher
         {
             var chooseHolders = Screens.CardHolders(choose);
             if (chooseHolders is null || chooseHolders.Count == 0)
-                return DispatchResult.Reject("not_ready", "card row not wired yet — retry");
+                return DispatchResult.Reject(RejectionCodes.NotReady, "card row not wired yet — retry");
             if (BadIdx(idx, chooseHolders.Count, "card") is { } chooseErr) return chooseErr;
             Reflect.Invoke(choose, "SelectHolder", chooseHolders[idx]);
             return DispatchResult.Success();
@@ -1244,7 +1284,7 @@ public static class Dispatcher
         var screen = Screens.Top<NCardGridSelectionScreen>();
         var cards = screen is null ? null : Screens.GridCards(screen);
         if (screen is null || cards is null || cards.Count == 0)
-            return DispatchResult.Reject("not_ready", "card grid not wired yet — retry");
+            return DispatchResult.Reject(RejectionCodes.NotReady, "card grid not wired yet — retry");
         if (BadIdx(idx, cards.Count, "card") is { } err) return err;
 
         Reflect.Invoke(screen, "OnCardClicked", cards[idx]);
@@ -1257,13 +1297,13 @@ public static class Dispatcher
     {
         if (RunMode.IsHeadless)
             return HeadlessPicker.Pick(idx) is { } msg
-                ? DispatchResult.Reject("bad_index", msg)
+                ? DispatchResult.Reject(RejectionCodes.BadIndex, msg)
                 : DispatchResult.Success();
 
         var hand = NPlayerHand.Instance;
         var holders = hand?.ActiveHolders;
         if (hand is null || holders is null || holders.Count == 0)
-            return DispatchResult.Reject("not_ready", "no selectable cards in hand — retry");
+            return DispatchResult.Reject(RejectionCodes.NotReady, "no selectable cards in hand — retry");
         if (BadIdx(idx, holders.Count, "card") is { } err) return err;
 
         Reflect.Invoke(hand, "OnHolderPressed", holders[idx]);
@@ -1276,22 +1316,22 @@ public static class Dispatcher
         {
             case Phase.BundleSelect:
                 if (RunMode.IsHeadless)
-                    return DispatchResult.Reject("not_ready", "host bundle picks resolve on pick-card");
+                    return DispatchResult.Reject(RejectionCodes.NotReady, "host bundle picks resolve on pick-card");
                 if (Screens.Top<NChooseABundleSelectionScreen>() is not { } bundleScreen)
-                    return DispatchResult.Reject("not_ready", "bundle screen not mounted");
+                    return DispatchResult.Reject(RejectionCodes.NotReady, "bundle screen not mounted");
                 Reflect.Invoke(bundleScreen, "ConfirmSelection", new object?[] { null });
                 return DispatchResult.Success();
 
             case Phase.CardSelect or Phase.HandSelect when RunMode.IsHeadless:
                 return HeadlessPicker.Confirm() is { } msg
-                    ? DispatchResult.Reject("not_ready", msg)
+                    ? DispatchResult.Reject(RejectionCodes.NotReady, msg)
                     : DispatchResult.Success();
 
             case Phase.CardSelect:
             {
                 var screen = Screens.Top<NCardGridSelectionScreen>();
                 if (screen is null)
-                    return DispatchResult.Reject("not_ready", "selection screen not mounted");
+                    return DispatchResult.Reject(RejectionCodes.NotReady, "selection screen not mounted");
                 var prefs = Screens.Prefs(screen);
                 var count = Screens.SelectedCards(screen).Count();
                 switch (screen)
@@ -1300,7 +1340,7 @@ public static class Dispatcher
                     case NSimpleCardSelectScreen or NCombatPileCardSelectScreen:
                         var btn = Reflect.Field<NClickableControl>(screen, "_confirmButton");
                         if (btn is not { IsEnabled: true })
-                            return DispatchResult.Reject("not_ready",
+                            return DispatchResult.Reject(RejectionCodes.NotReady,
                                 $"confirm not available — {count} selected, need {prefs.MinSelect}..{prefs.MaxSelect}");
                         btn.ForceClick();
                         return DispatchResult.Success();
@@ -1309,7 +1349,7 @@ public static class Dispatcher
                     // pick would resolve the selection.
                     case NDeckTransformSelectScreen:
                         if (count < prefs.MinSelect)
-                            return DispatchResult.Reject("not_ready",
+                            return DispatchResult.Reject(RejectionCodes.NotReady,
                                 $"{count} selected, need {prefs.MinSelect} (pick-card first)");
                         Reflect.Invoke(screen, "CompleteSelection", new object?[] { null });
                         return DispatchResult.Success();
@@ -1320,7 +1360,7 @@ public static class Dispatcher
                     default:
                         var need = screen is NDeckCardSelectScreen ? prefs.MinSelect : prefs.MaxSelect;
                         if (count < need)
-                            return DispatchResult.Reject("not_ready",
+                            return DispatchResult.Reject(RejectionCodes.NotReady,
                                 $"{count} selected, need {need} (pick-card first)");
                         Reflect.Invoke(screen, "CheckIfSelectionComplete");
                         return DispatchResult.Success();
@@ -1335,7 +1375,7 @@ public static class Dispatcher
                 {
                     var prefs = Screens.Prefs(hand);
                     var count = Screens.SelectedCards(hand).Count();
-                    return DispatchResult.Reject("not_ready",
+                    return DispatchResult.Reject(RejectionCodes.NotReady,
                         $"confirm not available — {count} selected, need {prefs.MinSelect}..{prefs.MaxSelect}");
                 }
                 btn.ForceClick();
@@ -1343,7 +1383,7 @@ public static class Dispatcher
             }
 
             case var p:
-                return DispatchResult.Reject("bad_phase",
+                return DispatchResult.Reject(RejectionCodes.BadPhase,
                     $"confirm is valid in bundle_select/card_select/hand_select, current is {p.AsString()}");
         }
     }
@@ -1354,7 +1394,7 @@ public static class Dispatcher
     {
         idx = TryGetInt(args, "idx", out var i) ? i : (count == 1 ? 0 : -1);
         return idx < 0 || idx >= count
-            ? DispatchResult.Reject("bad_request",
+            ? DispatchResult.Reject(RejectionCodes.BadRequest,
                 $"multiple alternatives — pass args.idx in [0,{count - 1}] (see obs.alternatives)")
             : null;
     }
@@ -1365,17 +1405,17 @@ public static class Dispatcher
         {
             case Phase.CardReward when RunMode.IsHeadless:
                 if (!HeadlessRewards.InCardPick)
-                    return DispatchResult.Reject("not_ready", "no card reward pending");
+                    return DispatchResult.Reject(RejectionCodes.NotReady, "no card reward pending");
                 // Skip is one of the reward's own "alternative" choices —
                 // mirrors the GUI branch below (its _extraOptions gate),
                 // not a separate decline path.
                 var headlessAlts = HeadlessRewards.Alternatives();
                 if (headlessAlts.Count == 0)
-                    return DispatchResult.Reject("bad_request", "this card reward cannot be skipped");
+                    return DispatchResult.Reject(RejectionCodes.BadRequest, "this card reward cannot be skipped");
                 if (ResolveAltIdx(args, headlessAlts.Count, out var headlessAltIdx) is { } headlessErr)
                     return headlessErr;
                 return HeadlessRewards.PickCard(headlessAltIdx, alternative: true) is { } altMsg
-                    ? DispatchResult.Reject("bad_index", altMsg)
+                    ? DispatchResult.Reject(RejectionCodes.BadIndex, altMsg)
                     : DispatchResult.Success();
 
             case Phase.CardSelect when RunMode.IsHeadless:
@@ -1389,19 +1429,19 @@ public static class Dispatcher
 
             case Phase.BundleSelect:
                 if (Screens.Top<NChooseABundleSelectionScreen>() is not { } bundleScr)
-                    return DispatchResult.Reject("not_ready", "bundle screen not mounted");
+                    return DispatchResult.Reject(RejectionCodes.NotReady, "bundle screen not mounted");
                 Reflect.Invoke(bundleScr, "CancelSelection", new object?[] { null });
                 return DispatchResult.Success();
 
             case Phase.CardReward:
                 if (Screens.Top<NCardRewardSelectionScreen>() is not { } cardScreen)
-                    return DispatchResult.Reject("not_ready", "card reward screen not mounted");
+                    return DispatchResult.Reject(RejectionCodes.NotReady, "card reward screen not mounted");
                 // Skip is one of the screen's "alternative" choices; picking
                 // alternative j resolves the screen's completion source just
                 // like a card click does.
                 var extras = Screens.ExtraOptions(cardScreen);
                 if (extras.Count == 0)
-                    return DispatchResult.Reject("bad_request", "this card reward cannot be skipped");
+                    return DispatchResult.Reject(RejectionCodes.BadRequest, "this card reward cannot be skipped");
                 if (ResolveAltIdx(args, extras.Count, out var altIdx) is { } altErr)
                     return altErr;
                 Reflect.Invoke(cardScreen, "OnAlternateRewardSelected", altIdx);
@@ -1409,14 +1449,14 @@ public static class Dispatcher
 
             case Phase.RelicReward:
                 if (Screens.Top<NChooseARelicSelection>() is not { } relicScreen)
-                    return DispatchResult.Reject("not_ready", "relic reward screen not mounted");
+                    return DispatchResult.Reject(RejectionCodes.NotReady, "relic reward screen not mounted");
                 Reflect.Invoke(relicScreen, "OnSkipButtonReleased", new object?[] { null });
                 return DispatchResult.Success();
 
             case Phase.Treasure:
                 var sync = RunManager.Instance?.TreasureRoomRelicSynchronizer;
                 if (sync is null || sync.CurrentRelics is not { Count: > 0 })
-                    return DispatchResult.Reject("not_ready", "no relic offer to skip");
+                    return DispatchResult.Reject(RejectionCodes.NotReady, "no relic offer to skip");
                 sync.SkipRelicLocally();
                 return DispatchResult.Success();
 
@@ -1424,22 +1464,22 @@ public static class Dispatcher
                 if (Screens.Top<NChooseACardSelectionScreen>() is { } chooseSel)
                 {
                     if (!Screens.ChooseSkipEnabled(chooseSel))
-                        return DispatchResult.Reject("bad_request", "this selection cannot be skipped");
+                        return DispatchResult.Reject(RejectionCodes.BadRequest, "this selection cannot be skipped");
                     Reflect.Invoke(chooseSel, "OnSkipButtonReleased", new object?[] { null });
                     return DispatchResult.Success();
                 }
                 if (Screens.Top<NCardGridSelectionScreen>() is not { } sel)
-                    return DispatchResult.Reject("not_ready", "selection screen not mounted");
+                    return DispatchResult.Reject(RejectionCodes.NotReady, "selection screen not mounted");
                 // Only the deck pickers have a close button, gated by
                 // prefs.Cancelable (shop removal is; rest-site upgrade isn't).
                 if (sel is NSimpleCardSelectScreen or NCombatPileCardSelectScreen
                     || !Screens.Prefs(sel).Cancelable)
-                    return DispatchResult.Reject("bad_request", "this selection cannot be skipped");
+                    return DispatchResult.Reject(RejectionCodes.BadRequest, "this selection cannot be skipped");
                 Reflect.Invoke(sel, "CloseSelection", new object?[] { null });
                 return DispatchResult.Success();
 
             case var p:
-                return DispatchResult.Reject("bad_phase",
+                return DispatchResult.Reject(RejectionCodes.BadPhase,
                     $"skip is valid in card_reward/card_select/bundle_select/relic_reward/treasure, current is {p.AsString()}");
         }
     }
@@ -1449,7 +1489,7 @@ public static class Dispatcher
     private static DispatchResult MapMove(JsonElement args)
     {
         if (!TryGetInt(args, "col", out var col) || !TryGetInt(args, "row", out var row))
-            return DispatchResult.Reject("bad_request", "missing args.col / args.row");
+            return DispatchResult.Reject(RejectionCodes.BadRequest, "missing args.col / args.row");
 
         // Crystal-sphere minigame: map-move doubles as the cell click.
         if (PhaseDetector.Current() == Phase.CrystalSphere)
@@ -1457,27 +1497,24 @@ public static class Dispatcher
 
         if (RequirePhase(Phase.Map) is { } err) return err;
 
-        var rm = RunManager.Instance;
-        var rs = rm?.DebugOnlyGetState();
-        if (rm is null || rs is null)
-            return DispatchResult.Reject("not_ready", "run state not available");
-        var player = LocalContext.GetMe(rs);
-        if (player is null)
-            return DispatchResult.Reject("internal", "local player not found");
+        if (RequireRunContext(
+            out var run, "run state not available", "local player not found",
+            playerCode: RejectionCodes.Internal) is { } runErr)
+            return runErr;
 
-        var reachable = Snapshotter.NextPoints(rs).ToList();
+        var reachable = Snapshotter.NextPoints(run.State).ToList();
         if (reachable.Count == 0)
-            return DispatchResult.Reject("not_ready", "no reachable map nodes");
+            return DispatchResult.Reject(RejectionCodes.NotReady, "no reachable map nodes");
         var target = reachable.FirstOrDefault(p =>
             p.coord.col == col && p.coord.row == row);
         if (target is null)
         {
             var legal = string.Join(" ", reachable.Select(p => $"{p.coord.col},{p.coord.row}"));
-            return DispatchResult.Reject("bad_target",
+            return DispatchResult.Reject(RejectionCodes.BadTarget,
                 $"node {col},{row} not reachable; reachable col,row: [{legal}]");
         }
 
-        return TravelTo(rm, rs, player, target);
+        return TravelTo(run.Manager, run.State, run.Player!, target);
     }
 
     // ---- combat ----------------------------------------------------------
@@ -1492,19 +1529,19 @@ public static class Dispatcher
 
         var combat = CombatManager.Instance;
         if (combat is null || !combat.IsInProgress)
-            return DispatchResult.Reject("bad_phase", "not in combat");
+            return DispatchResult.Reject(RejectionCodes.BadPhase, "not in combat");
 
         var state = combat.DebugOnlyGetState()!;
         var player = LocalContext.GetMe(state);
         if (player is null)
-            return DispatchResult.Reject("internal", "local player not found in combat");
+            return DispatchResult.Reject(RejectionCodes.Internal, "local player not found in combat");
 
         // Same gates the UI uses to decide whether input registers.
         if (state.CurrentSide != CombatSide.Player)
-            return DispatchResult.Reject("not_ready",
+            return DispatchResult.Reject(RejectionCodes.NotReady,
                 $"current side is {state.CurrentSide.ToString().ToLowerInvariant()}");
         if (combat.PlayerActionsDisabled)
-            return DispatchResult.Reject("not_ready", "player actions disabled");
+            return DispatchResult.Reject(RejectionCodes.NotReady, "player actions disabled");
 
         return action switch
         {
@@ -1513,20 +1550,20 @@ public static class Dispatcher
             "end-turn" => EndTurn(state, player),
             // Unreachable via Dispatch's verb grouping — reject rather than
             // silently ending the turn if the grouping ever grows.
-            _ => DispatchResult.Reject("bad_request", $"unknown combat verb '{action}'"),
+            _ => DispatchResult.Reject(RejectionCodes.BadRequest, $"unknown combat verb '{action}'"),
         };
     }
 
     private static DispatchResult PotionUse(JsonElement args, CombatState state, Player player)
     {
         if (!TryGetInt(args, "slot", out var slot))
-            return DispatchResult.Reject("bad_request", "missing args.slot");
+            return DispatchResult.Reject(RejectionCodes.BadRequest, "missing args.slot");
         var slots = player.PotionSlots;
         if (slot < 0 || slot >= slots.Count || slots[slot] is null)
-            return DispatchResult.Reject("bad_index", $"no potion in slot {slot}");
+            return DispatchResult.Reject(RejectionCodes.BadIndex, $"no potion in slot {slot}");
         var potion = slots[slot]!;
         if (potion.IsQueued || potion.HasBeenRemovedFromState)
-            return DispatchResult.Reject("not_playable", $"potion in slot {slot} already used");
+            return DispatchResult.Reject(RejectionCodes.NotPlayable, $"potion in slot {slot} already used");
 
         var (target, err) = ResolveTarget(potion.TargetType, args, state, player);
         if (err is not null) return err.Value;
@@ -1548,12 +1585,11 @@ public static class Dispatcher
     private static DispatchResult PotionDiscard(JsonElement args)
     {
         if (!TryGetInt(args, "slot", out var slot))
-            return DispatchResult.Reject("bad_request", "missing args.slot");
-        var rm = RunManager.Instance;
-        var rs = rm?.DebugOnlyGetState();
-        var player = rs is null ? null : LocalContext.GetMe(rs);
-        if (rm is null || player is null)
-            return DispatchResult.Reject("not_ready", "no run in progress");
+            return DispatchResult.Reject(RejectionCodes.BadRequest, "missing args.slot");
+        if (RequireRunContext(
+            out var run, "no run in progress", "no run in progress") is { } runErr)
+            return runErr;
+        var player = run.Player!;
         // Outside combat, discarding remains legal in every run phase. During
         // combat, however, a hand/card picker temporarily owns input even
         // though CombatManager still reports an in-progress fight.
@@ -1562,16 +1598,16 @@ public static class Dispatcher
             return phaseErr;
         var slots = player.PotionSlots;
         if (slot < 0 || slot >= slots.Count || slots[slot] is null)
-            return DispatchResult.Reject("bad_index", $"no potion in slot {slot}");
+            return DispatchResult.Reject(RejectionCodes.BadIndex, $"no potion in slot {slot}");
 
-        return Enqueue(rm, new DiscardPotionGameAction(
+        return Enqueue(run.Manager, new DiscardPotionGameAction(
             player, (uint)slot, CombatManager.Instance is { IsInProgress: true }));
     }
 
     private static DispatchResult Play(JsonElement args, CombatState state, Player player)
     {
         if (!TryGetString(args, "model", out var model))
-            return DispatchResult.Reject("bad_request", "missing args.model");
+            return DispatchResult.Reject(RejectionCodes.BadRequest, "missing args.model");
 
         var pcs = player.PlayerCombatState!;
         var card = pcs.Hand.Cards.FirstOrDefault(c =>
@@ -1579,7 +1615,7 @@ public static class Dispatcher
         if (card is null)
         {
             var hand = string.Join(",", pcs.Hand.Cards.Where(c => c != null).Select(c => c.Id.Entry));
-            return DispatchResult.Reject("bad_index", $"no '{model}' in hand [{hand}]");
+            return DispatchResult.Reject(RejectionCodes.BadIndex, $"no '{model}' in hand [{hand}]");
         }
 
         // The engine's own playability gate — Unplayable keyword, energy
@@ -1588,9 +1624,9 @@ public static class Dispatcher
         // cancels: card stays, nothing spends, no error.
         if (!card.CanPlay(out var reason, out var preventer))
         {
-            var code = reason.HasFlag(UnplayableReason.StarCostTooHigh) ? "not_enough_stars"
-                : reason.HasFlag(UnplayableReason.EnergyCostTooHigh) ? "not_enough_energy"
-                : "not_playable";
+            var code = reason.HasFlag(UnplayableReason.StarCostTooHigh) ? RejectionCodes.NotEnoughStars
+                : reason.HasFlag(UnplayableReason.EnergyCostTooHigh) ? RejectionCodes.NotEnoughEnergy
+                : RejectionCodes.NotPlayable;
             var detail = reason.HasFlag(UnplayableReason.StarCostTooHigh)
                     ? $" (needs {card.GetStarCostWithModifiers()} stars, have {pcs.Stars})"
                 : reason.HasFlag(UnplayableReason.EnergyCostTooHigh)
@@ -1630,14 +1666,14 @@ public static class Dispatcher
                         var hit = state.Enemies.FirstOrDefault(e =>
                             e != null && (e.CombatId ?? 0u) == id && e.IsAlive);
                         return hit is null
-                            ? (null, DispatchResult.Reject("bad_target", $"no living enemy with id {id}"))
+                            ? (null, DispatchResult.Reject(RejectionCodes.BadTarget, $"no living enemy with id {id}"))
                             : (hit, null);
                     }
                     // Auto-target when there's exactly one alive enemy.
                     var alive = state.Enemies.Where(e => e != null && e.IsAlive).ToList();
                     if (alive.Count == 1) return (alive[0], null);
                     var ids = string.Join(",", alive.Select(e => e.CombatId));
-                    return (null, DispatchResult.Reject("bad_target",
+                    return (null, DispatchResult.Reject(RejectionCodes.BadTarget,
                         $"this card requires args.target; alive enemy ids: [{ids}]"));
                 }
 

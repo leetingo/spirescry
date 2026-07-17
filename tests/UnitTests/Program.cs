@@ -36,6 +36,16 @@ return failures == 0 ? 0 : 1;
 
 internal static class Tests
 {
+    public static void RejectionCodesExposeTheCompleteDispatcherGrammar()
+    {
+        Equal("bad_request", RejectionCodes.BadRequest);
+        Equal("bad_request,bad_phase,bad_index,bad_target,not_ready,not_playable,"
+            + "not_enough_gold,not_enough_energy,not_enough_stars,run_exists,"
+            + "stale_state,external_change,resolution_partial,resolution_failed,"
+            + "not_found,internal",
+            string.Join(',', RejectionCodes.All));
+    }
+
     public static void FieldValueFindsPrivateFieldsDeclaredOnBaseTypes()
     {
         var target = new DerivedProbe();
