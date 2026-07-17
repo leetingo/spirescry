@@ -382,6 +382,69 @@ def p10():
     to_menu()
 
 
+@case("P11 runlog reconstruction verifies every verb and stops on divergence")
+def p11():
+    to_menu()
+
+    # Accepted verbs without follow are diagnostic history, but are not a
+    # replayable recipe because no settled fingerprint was captured.
+    run("new-run", "IRONCLAD", "--seed", "CIUNVERIFIED")
+    incomplete = run("runlog")
+    assert incomplete["complete"] is False, incomplete
+    assert not incomplete["verbs"][0].get("fingerprint"), incomplete["verbs"]
+    to_menu()
+
+    run("new-run", "IRONCLAD", "--seed", "CIRUNLOG", "--follow", "5000")
+    run("proceed", "--follow", "5000")
+    bridge.wait_phase("map")
+    log = run("runlog")
+    assert log["complete"] is True, log
+    assert log["kind"] == "diagnostic_reconstruction_recipe", log
+    assert log["runId"] != "none", log
+    assert log["verbs"] and log["verbs"][0]["action"] == "new-run", log
+    assert all(v["runId"] == log["runId"] for v in log["verbs"]), log["verbs"]
+    assert all(v.get("fingerprint") for v in log["verbs"]), log["verbs"]
+
+    with tempfile.TemporaryDirectory(prefix="spirescry-runlog-") as td:
+        recipe = os.path.join(td, "recipe.json")
+        with open(recipe, "w", encoding="utf-8") as f:
+            json.dump(log, f, ensure_ascii=False)
+
+        # Replay is intentionally non-destructive: it refuses to abandon or
+        # replace a live run on the caller's behalf.
+        active = bridge.cli("replay", recipe)
+        assert active.returncode != 0 and "requires a clean main_menu" in active.stderr, active.stderr
+
+        to_menu()
+        rebuilt = run("replay", recipe)
+        assert rebuilt["kind"] == "diagnostic_reconstruction_result", rebuilt
+        assert rebuilt["sourceRunId"] == log["runId"], rebuilt
+        assert rebuilt["reconstructionRunId"] != log["runId"], rebuilt
+        assert rebuilt["verifiedFingerprints"] == len(log["verbs"]), rebuilt
+        assert rebuilt["verifiedFingerprints"] > 0, rebuilt
+        assert "not the source run" in rebuilt["attribution"], rebuilt
+
+        to_menu()
+        broken = json.loads(json.dumps(log))
+        broken["verbs"][0]["fingerprint"] = "0000000000000000"
+        bad_recipe = os.path.join(td, "broken.json")
+        with open(bad_recipe, "w", encoding="utf-8") as f:
+            json.dump(broken, f, ensure_ascii=False)
+        diverged = bridge.cli("replay", bad_recipe)
+        assert diverged.returncode != 0 and "divergence at verb 1" in diverged.stderr, diverged.stderr
+
+        # Even a hand-edited complete flag cannot bypass fingerprint checks.
+        missing = json.loads(json.dumps(log))
+        del missing["verbs"][0]["fingerprint"]
+        missing["complete"] = True
+        missing_recipe = os.path.join(td, "missing.json")
+        with open(missing_recipe, "w", encoding="utf-8") as f:
+            json.dump(missing, f, ensure_ascii=False)
+        rejected = bridge.cli("replay", missing_recipe)
+        assert rejected.returncode != 0 and "no verifiable settled fingerprint" in rejected.stderr, rejected.stderr
+    to_menu()
+
+
 # ---------- R: run lifecycle ----------
 
 @case("R1 same seed, same world")
