@@ -66,21 +66,23 @@ public static class Handlers
         var wait = int.TryParse(waitStr, out var w) ? Math.Clamp(w, 0, 60_000) : 0;
         var compact = compactStr is "1" or "true";
         var decision = decisionStr is "1" or "true";
-        var changed = since < 0 || wait == 0 || await Signals.WaitForChange(since, wait);
+        if (since >= 0 && wait > 0)
+            await Signals.WaitForChange(since, wait);
 
         return await MainThreadPump.Instance!.Run(() =>
         {
             var runId = Signals.RefreshRunIdentity();
             var snapshot = Snapshotter.ForCurrentPhase(compact, decision, knownCards ?? []);
             var node = JsonSerializer.SerializeToNode(snapshot)!.AsObject();
-            node["rev"] = Signals.Revision;
+            var revision = Signals.Revision;
+            node["rev"] = revision;
             node["runId"] = runId;
             if (decision)
                 node["legal"] = JsonSerializer.SerializeToNode(
                     DecisionProjection.LegalVerbs(node, runId != "none"));
             if (since >= 0)
             {
-                node["changed"] = changed;
+                node["changed"] = revision > since;
                 node["events"] = JsonSerializer.SerializeToNode(Signals.EventsSince(since));
             }
             return new Response { Body = node.ToJsonString() };

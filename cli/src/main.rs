@@ -222,8 +222,11 @@ fn main() -> ExitCode {
                 let mut path = String::from("/obs");
                 let mut sep = '?';
                 if let Some(s) = since {
-                    path = format!("{}{}since={}&wait={}", path, sep, s, wait.unwrap_or(5000));
+                    path = format!("{}{}since={}", path, sep, s);
                     sep = '&';
+                    if let Some(w) = wait {
+                        path = format!("{}{}wait={}", path, sep, w);
+                    }
                 }
                 if *compact {
                     path = format!("{}{}compact=1", path, sep);

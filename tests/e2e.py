@@ -229,6 +229,27 @@ def p3():
     to_menu()
 
 
+@case("P3b no-wait since reports change honestly")
+def p3b():
+    to_menu()
+    cur = obs()["rev"]
+
+    t0 = time.monotonic()
+    unchanged = run("obs", "--since", str(cur))
+    assert time.monotonic() - t0 < 1, "omitted --wait unexpectedly parked"
+    assert unchanged.get("changed") is False, unchanged
+    assert unchanged.get("events") == [], unchanged.get("events")
+
+    explicit = run("obs", "--since", str(cur), "--wait", "0")
+    assert explicit.get("changed") is False, explicit
+
+    launch(seed="CIP3B")
+    advanced = run("obs", "--since", str(cur), "--wait", "0")
+    assert advanced.get("changed") is True, advanced
+    assert advanced.get("events"), "advanced rev returned no events"
+    to_menu()
+
+
 @case("P4 unknown routes 404")
 def p4():
     for method, path in (("GET", "/nope"), ("POST", "/obs"), ("GET", "/step")):
