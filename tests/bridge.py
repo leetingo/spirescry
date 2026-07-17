@@ -32,12 +32,12 @@ def cli(*args, timeout=30):
     return r
 
 
-def run(*args, ok=False, timeout=30):
-    """One CLI call that must succeed. ok=True tolerates failure and
+def run(*args, allow_fail=False, timeout=30):
+    """One CLI call that must succeed. allow_fail=True tolerates failure and
     returns {"_err": stderr}; otherwise a failure ends the harness."""
     r = cli(*args, timeout=timeout)
     if r.returncode != 0:
-        if ok:
+        if allow_fail:
             return {"_err": r.stderr.strip()}
         sys.exit(f"FAIL: spirescry {' '.join(args)} -> {r.stderr.strip()}")
     return json.loads(r.stdout) if r.stdout.strip() else {}
@@ -64,3 +64,113 @@ def wait_phase(*want, timeout=20, raise_on_timeout=True, on_obs=None):
                 raise AssertionError(f"phase stuck at {d.get('phase')}, wanted {want}")
             return None
         since = d.get("rev")
+
+
+def launch_run(character="IRONCLAD", seed=None, *, timeout=30,
+               allow_first_failure=False, on_obs=None, on_retry=None):
+    """Launch a run, retrying the cold-boot window until Neow appears."""
+    args = ["new-run", character] + (["--seed", seed] if seed else [])
+    for attempt in range(3):
+        run(*args, allow_fail=allow_first_failure or attempt > 0)
+        started = wait_phase(
+            "event", timeout=timeout, raise_on_timeout=False, on_obs=on_obs)
+        if started is not None:
+            return started
+        if attempt < 2 and on_retry:
+            on_retry()
+    raise AssertionError(f"new-run {character} never reached the Neow event")
+
+
+def kill_current_combat(*, on_obs=None):
+    """Cheat-kill the current combat, resolving any picker it opens."""
+    def observe():
+        snapshot = obs()
+        if on_obs:
+            on_obs(snapshot)
+        return snapshot
+
+    used_potion = False
+    for _ in range(30):
+        d = observe()
+        if d["phase"] in ("hand_select", "card_select"):
+            run("pick-card", "0", allow_fail=True)
+            time.sleep(1)
+            if observe()["phase"] in ("hand_select", "card_select"):
+                run("confirm", allow_fail=True)
+                time.sleep(1)
+            continue
+        if d["phase"] != "combat":
+            return
+        if d.get("side") != "player":
+            time.sleep(1.5)
+            continue
+        if not used_potion:
+            used_potion = True
+            pot = next(iter(d.get("potions", [])), None)
+            if pot:
+                alive_now = [e for e in d["enemies"] if e["alive"]]
+                if pot["target"] == "anyenemy" and alive_now:
+                    run("potion-use", str(pot["slot"]), "--target",
+                        str(alive_now[0]["id"]), allow_fail=True)
+                else:
+                    run("potion-use", str(pot["slot"]), allow_fail=True)
+        run("cheat", "heal", allow_fail=True)
+        run("cheat", "wound-enemies", allow_fail=True)
+        d = observe()
+        if d["phase"] in ("hand_select", "card_select"):
+            continue
+        if d["phase"] != "combat":
+            return
+        alive = [e for e in d["enemies"] if e["alive"]]
+        if not alive:
+            run("end-turn", allow_fail=True)
+            time.sleep(1.5)
+            continue
+        energy = d["you"]["energy"][0]
+        attack = next((card for card in d["hand"]
+                       if card["target"] == "anyenemy"
+                       and card["cost"] <= energy), None)
+        if attack:
+            run("play", attack["model"], "--target", str(alive[0]["id"]),
+                allow_fail=True)
+            time.sleep(1)
+        else:
+            run("end-turn", allow_fail=True)
+            time.sleep(2)
+    raise AssertionError("combat did not finish in 30 turns")
+
+
+def resolve_transient_phase(d, *, claim_reward_tiles=False,
+                            claim_card_reward=False,
+                            claim_relic_reward=False):
+    """Advance one non-event transient phase; return an error if rejected."""
+    phase = d.get("phase")
+    if phase in ("card_select", "hand_select"):
+        need = max(1, d.get("min", 1))
+        for card in d.get("cards", [])[:need]:
+            picked = run("pick-card", str(card["idx"]), allow_fail=True)
+            if "_err" in picked:
+                return f"pick:{picked['_err'][:60]}"
+            if obs().get("phase") not in ("card_select", "hand_select"):
+                break
+        if obs().get("phase") in ("card_select", "hand_select"):
+            confirmed = run("confirm", allow_fail=True)
+            if "_err" in confirmed:
+                return f"confirm:{confirmed['_err'][:60]}"
+    elif phase == "bundle_select":
+        run("pick-card", "0", allow_fail=True)
+    elif phase == "combat":
+        kill_current_combat()
+    elif phase == "rewards" and claim_reward_tiles and d.get("rewards"):
+        run("pick-reward", str(d["rewards"][0]["idx"]), allow_fail=True)
+    elif phase == "card_reward" and claim_card_reward and d.get("cards"):
+        run("pick-card", str(d["cards"][0]["idx"]), allow_fail=True)
+    elif phase == "relic_reward" and claim_relic_reward and d.get("relics"):
+        run("pick-relic", str(d["relics"][0]["idx"]), allow_fail=True)
+    elif phase in ("card_reward", "relic_reward"):
+        run("skip", allow_fail=True)
+    elif phase == "shop":
+        run("leave", allow_fail=True)
+    else:
+        run("proceed", allow_fail=True)
+    return None

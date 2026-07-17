@@ -53,21 +53,6 @@ def wait_phase(*want, timeout=20):
     bridge.wait_phase(*want, timeout=timeout, on_obs=record)
 
 
-def launch_run(seed=None):
-    # A launch fired into a cold boot window can be dropped silently —
-    # retry it if it didn't land.
-    extra = ["--seed", seed] if seed else []
-    for attempt in range(3):
-        run("new-run", "IRONCLAD", *extra, ok=attempt > 0)
-        try:
-            wait_phase("event", timeout=40)
-            return
-        except AssertionError:
-            if attempt == 2:
-                raise
-            print("    launch didn't land, retrying")
-
-
 def confirm_if_selecting():
     # GUI pickers wait for an explicit confirm; the host picker resolves
     # itself once max cards are picked. Both are legal under the protocol:
@@ -82,68 +67,15 @@ def step(msg):
 
 
 
-def kill_current_combat():
-    """Cheat-kill whatever we're fighting; use a potion once if one's on hand."""
-    used_potion = False
-    for _ in range(30):
-        d = obs()
-        # A potion or card can open a mid-combat picker (a discard choice,
-        # a gamble). Resolve it minimally, or the loop parks forever on a
-        # phase it never plays from.
-        if d["phase"] in ("hand_select", "card_select"):
-            run("pick-card", "0", ok=True)
-            time.sleep(1)
-            if phase() in ("hand_select", "card_select"):
-                run("confirm", ok=True)
-                time.sleep(1)
-            continue
-        if d["phase"] != "combat":
-            return
-        if d.get("side") != "player":
-            time.sleep(1.5)
-            continue
-        if not used_potion:
-            used_potion = True
-            pot = next(iter(d.get("potions", [])), None)
-            if pot:
-                alive_now = [e for e in d["enemies"] if e["alive"]]
-                if pot["target"] == "anyenemy" and alive_now:
-                    run("potion-use", str(pot["slot"]), "--target",
-                        str(alive_now[0]["id"]), ok=True)
-                else:
-                    run("potion-use", str(pot["slot"]), ok=True)
-        run("cheat", "heal", ok=True)
-        run("cheat", "wound-enemies", ok=True)
-        d = obs()
-        if d["phase"] in ("hand_select", "card_select"):
-            continue  # the top of the loop resolves the picker
-        if d["phase"] != "combat":
-            return
-        alive = [e for e in d["enemies"] if e["alive"]]
-        if not alive:
-            # transforming bosses revive on their own turn
-            run("end-turn", ok=True)
-            time.sleep(1.5)
-            continue
-        energy = d["you"]["energy"][0]
-        atk = next((c for c in d["hand"]
-                    if c["target"] == "anyenemy" and c["cost"] <= energy), None)
-        if atk:
-            run("play", atk["model"], "--target", str(alive[0]["id"]), ok=True)
-            time.sleep(1)
-        else:
-            run("end-turn", ok=True)
-            time.sleep(2)
-    raise AssertionError("combat did not finish in 30 turns")
-
-
 def drive(seed=None):
     step("new-run")
-    run("abandon", ok=True)
+    run("abandon", allow_fail=True)
     # The bridge comes up during mod init, before a cold engine boot's
     # menu is actually ready. Settle, then launch.
     time.sleep(5)
-    launch_run(seed)
+    bridge.launch_run(
+        seed=seed, timeout=40, on_obs=record,
+        on_retry=lambda: print("    launch didn't land, retrying"))
 
     step("neow: proceed past")
     run("proceed")
@@ -164,7 +96,7 @@ def drive(seed=None):
     assert en.get("title"), f"enemy {en['model']} has no readable title"
 
     step("combat: kill")
-    kill_current_combat()
+    bridge.kill_current_combat(on_obs=record)
     wait_phase("rewards")
 
     step("rewards: claim all (re-read between picks; GUI reflows idx)")
@@ -241,7 +173,7 @@ def drive(seed=None):
         for_sale = obs().get("potions", [])
         bought = sum(
             1 for idx in range(min(2, len(for_sale)))
-            if "_err" not in run("buy", "potion", "--idx", str(idx), ok=True)
+            if "_err" not in run("buy", "potion", "--idx", str(idx), allow_fail=True)
         )
         if bought == 0:
             print("    no potions in the shop this run — skipped")
@@ -277,9 +209,9 @@ def drive(seed=None):
     step("boss → act transition")
     d = obs()
     boss = next(p for p in d["graph"] if p["type"] == "boss")
-    run("cheat", "goto", str(boss["col"]), str(boss["row"]), ok=True)
+    run("cheat", "goto", str(boss["col"]), str(boss["row"]), allow_fail=True)
     wait_phase("combat", timeout=30)
-    kill_current_combat()
+    bridge.kill_current_combat(on_obs=record)
     wait_phase("rewards")
     run("proceed")
     for _ in range(60):
@@ -294,7 +226,9 @@ def drive(seed=None):
     run("abandon")
     wait_phase("main_menu")
     time.sleep(3)
-    launch_run(seed)
+    bridge.launch_run(
+        seed=seed, timeout=40, on_obs=record,
+        on_retry=lambda: print("    launch didn't land, retrying"))
     run("proceed")
     wait_phase("map")
     node = next(p for p in obs()["next"] if p["type"] == "monster")
@@ -305,8 +239,8 @@ def drive(seed=None):
         if d["phase"] == "game_over":
             break
         if d["phase"] == "combat" and d.get("side") == "player":
-            run("cheat", "hp", "1", ok=True)
-            run("end-turn", ok=True)
+            run("cheat", "hp", "1", allow_fail=True)
+            run("end-turn", allow_fail=True)
         time.sleep(1.5)
     wait_phase("game_over", timeout=30)
     d = obs()

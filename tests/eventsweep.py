@@ -14,21 +14,16 @@ run = bridge.run
 
 obs = lambda: run("obs")
 
-def wait(*want, timeout=20):
-    return bridge.wait_phase(*want, timeout=timeout, raise_on_timeout=False)
-
 def fresh_run(seed=None):
-    run("abandon", ok=True)
+    run("abandon", allow_fail=True)
     time.sleep(1)
-    for _ in range(3):
-        args = ["new-run", "IRONCLAD"] + (["--seed", seed] if seed else [])
-        run(*args, ok=True)
-        if wait("event", timeout=30) is not None:
-            break
-    run("proceed", ok=True)
-    if wait("map", timeout=20) is None:
+    bridge.launch_run(
+        seed=seed, timeout=30, allow_first_failure=True)
+    run("proceed", allow_fail=True)
+    if bridge.wait_phase(
+            "map", timeout=20, raise_on_timeout=False) is None:
         sys.exit("could not reach map for a fresh run")
-    run("cheat", "gold", "500", ok=True)
+    run("cheat", "gold", "500", allow_fail=True)
 
 def ensure_map():
     d = obs()
@@ -40,14 +35,14 @@ def ensure_map():
         if ph == "map":
             return
         if ph in ("event", "rest_site", "treasure", "rewards"):
-            run("proceed", ok=True)
+            run("proceed", allow_fail=True)
         elif ph == "shop":
-            run("leave", ok=True)
+            run("leave", allow_fail=True)
         elif ph in ("card_select", "bundle_select"):
-            run("pick-card", "0", ok=True)
-            run("skip", ok=True)
+            run("pick-card", "0", allow_fail=True)
+            run("skip", allow_fail=True)
         elif ph == "crystal_sphere":
-            run("proceed", ok=True)
+            run("proceed", allow_fail=True)
         elif ph in ("combat", "hand_select", "card_reward", "relic_reward"):
             break  # fresh run below
         else:
@@ -59,7 +54,6 @@ def ensure_map():
 def drain(max_steps=30):
     """Generically resolve whatever an option opened, all the way out.
     Returns where it settled — map/main_menu/game_over — or 'stuck@…'."""
-    import parity
     for _ in range(max_steps):
         d = obs()
         ph = d.get("phase")
@@ -69,62 +63,27 @@ def drain(max_steps=30):
             opts = [o for o in d.get("options", [])
                     if not o.get("locked") and not o.get("chosen")]
             if opts:
-                run("option", str(opts[0]["idx"]), ok=True)
+                run("option", str(opts[0]["idx"]), allow_fail=True)
             else:
-                run("proceed", ok=True)
-        elif ph in ("card_select", "hand_select"):
-            need = max(1, d.get("min", 1))
-            for card in d.get("cards", [])[:need]:
-                picked = run("pick-card", str(card["idx"]), ok=True)
-                if "_err" in picked:
-                    return f"stuck@{ph}:pick:{picked['_err'][:60]}"
-                if obs().get("phase") not in ("card_select", "hand_select"):
-                    break
-            time.sleep(0.4)
-            if obs().get("phase") in ("card_select", "hand_select"):
-                confirmed = run("confirm", ok=True)
-                if "_err" in confirmed:
-                    return f"stuck@{ph}:confirm:{confirmed['_err'][:60]}"
-        elif ph == "bundle_select":
-            run("pick-card", "0", ok=True)
-        elif ph == "combat":
-            parity.kill_current_combat()
-        elif ph in ("card_reward", "relic_reward"):
-            run("skip", ok=True)
-        elif ph == "shop":
-            run("leave", ok=True)
+                run("proceed", allow_fail=True)
         else:  # rewards, rest_site, treasure, crystal_sphere, …
-            run("proceed", ok=True)
+            error = bridge.resolve_transient_phase(d)
+            if error:
+                return f"stuck@{ph}:{error}"
         time.sleep(0.4)
     return f"stuck@{obs().get('phase')}"
 
 
 def settle_to_event_or_exit(max_steps=30):
     """Resolve transient screens without choosing another event option."""
-    import parity
     for _ in range(max_steps):
         d = obs()
         ph = d.get("phase")
         if ph in ("event", "map", "main_menu", "game_over"):
             return d
-        if ph in ("card_select", "hand_select"):
-            need = max(1, d.get("min", 1))
-            for card in d.get("cards", [])[:need]:
-                run("pick-card", str(card["idx"]), ok=True)
-                if obs().get("phase") not in ("card_select", "hand_select"):
-                    break
-            if obs().get("phase") in ("card_select", "hand_select"):
-                run("confirm", ok=True)
-        elif ph == "bundle_select":
-            run("pick-card", "0", ok=True)
-        elif ph == "combat":
-            parity.kill_current_combat()
-        elif ph in ("card_reward", "relic_reward"):
-            run("skip", ok=True)
-        elif ph == "shop":
-            run("leave", ok=True)
-        else:
-            run("proceed", ok=True)
+        error = bridge.resolve_transient_phase(d)
+        if error:
+            return {"phase": f"stuck@{ph}:{error}"}
         time.sleep(0.4)
     return {"phase": f"stuck@{obs().get('phase')}"}
 
@@ -132,7 +91,7 @@ def settle_to_event_or_exit(max_steps=30):
 def force(ev):
     """Force one event from a settled map; return its snapshot or None."""
     ensure_map()
-    if "_err" in run("cheat", "event", ev, ok=True):
+    if "_err" in run("cheat", "event", ev, allow_fail=True):
         return None
     d = obs()
     for _ in range(10):  # engine boots mount the room over a few frames
@@ -158,7 +117,7 @@ def replay_event_path(ev, path):
         opts = d.get("options", [])
         if idx >= len(opts) or opts[idx].get("locked"):
             return None, f"path {path} option {idx} unavailable"
-        result = run("option", str(idx), ok=True)
+        result = run("option", str(idx), allow_fail=True)
         if "_err" in result:
             return None, f"path {path} option {idx} rejected: {result['_err'][:120]}"
         time.sleep(0.4)
@@ -202,7 +161,7 @@ def explore_all_event_options(ev):
             current, err = replay_event_path(ev, path)
             if err:
                 return outcomes, clicked, locked, err
-            result = run("option", str(idx), ok=True)
+            result = run("option", str(idx), allow_fail=True)
             if "_err" in result:
                 return outcomes, clicked, locked, (
                     f"path {path} option {idx} rejected: {result['_err'][:120]}")
@@ -226,7 +185,7 @@ def sweep(all_options=False):
     tests/e2e.py runs this as its event-coverage case."""
     # event list from the cheat's known-list error (needs map phase)
     fresh_run()
-    err = run("cheat", "event", "__LIST__", ok=True).get("_err", "")
+    err = run("cheat", "event", "__LIST__", allow_fail=True).get("_err", "")
     ids = sorted(set(err.split("known: ", 1)[1].rstrip(")").split(","))) if "known: " in err else []
     if not ids:
         sys.exit(f"could not enumerate events: {err[:200]}")
@@ -279,7 +238,7 @@ def sweep(all_options=False):
             if idx >= len(opts_now) or opts_now[idx].get("locked"):
                 locked_skipped += 1
                 continue
-            run("option", str(idx), ok=True)
+            run("option", str(idx), allow_fail=True)
             time.sleep(0.5)
             options_clicked += 1
             landed = drain()
@@ -298,7 +257,7 @@ def sweep(all_options=False):
           + f"; {options_clicked} options clicked, {locked_skipped} locked")
     for k, v in sorted(bad.items()):
         print(f"  {k}: {v}")
-    run("abandon", ok=True)
+    run("abandon", allow_fail=True)
     return bad
 
 

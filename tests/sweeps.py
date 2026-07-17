@@ -11,11 +11,11 @@ world at the main menu. Each returns a dict of failures: {} == clean.
 """
 import json
 import os
+import sys
 import time
 import urllib.request
 
 import bridge
-import parity
 
 run, obs = bridge.run, bridge.obs
 
@@ -40,15 +40,12 @@ def model_entries(kind):
 
 
 def fresh_run(seed="SWEEP", character="IRONCLAD"):
-    run("abandon", ok=True)
+    run("abandon", allow_fail=True)
     time.sleep(0.4)
-    for attempt in range(3):
-        run("new-run", character, "--seed", seed, ok=True)
-        if bridge.wait_phase("event", timeout=30, raise_on_timeout=False):
-            break
-    else:
-        raise AssertionError(f"could not start {character} run after 3 attempts")
-    run("proceed", ok=True)
+    bridge.launch_run(
+        character=character, seed=seed, timeout=30,
+        allow_first_failure=True)
+    run("proceed", allow_fail=True)
     bridge.wait_phase("map", timeout=20)
 
 
@@ -66,24 +63,24 @@ def settle_to_map(max_steps=40):
         if ph == "rewards":
             tiles = d.get("rewards", [])
             if tiles:
-                run("pick-reward", str(tiles[0]["idx"]), ok=True)
+                run("pick-reward", str(tiles[0]["idx"]), allow_fail=True)
             else:
-                run("proceed", ok=True)
+                run("proceed", allow_fail=True)
         elif ph == "card_reward":
-            run("skip", ok=True)
+            run("skip", allow_fail=True)
         elif ph in ("card_select", "hand_select", "bundle_select"):
             resolve_pickers()
         elif ph == "event":
             opts = [x for x in d.get("options", [])
                     if not x.get("locked") and not x.get("chosen")]
             if opts:
-                run("option", str(opts[0]["idx"]), ok=True)
+                run("option", str(opts[0]["idx"]), allow_fail=True)
             else:
-                run("proceed", ok=True)
+                run("proceed", allow_fail=True)
         elif ph == "combat":
-            parity.kill_current_combat()
+            bridge.kill_current_combat()
         else:
-            run("proceed", ok=True)
+            run("proceed", allow_fail=True)
         time.sleep(0.5)
     raise AssertionError(f"world would not settle to map: {obs()['phase']}")
 
@@ -112,7 +109,7 @@ def resolve_pickers(deadline_s=8):
         d = obs()
         ph = d["phase"]
         if ph == "bundle_select":
-            run("pick-card", "0", ok=True)
+            run("pick-card", "0", allow_fail=True)
             time.sleep(0.5)
         elif ph in ("card_select", "hand_select"):
             # Exercise the effect, not its cancel path. Multi-card picks
@@ -120,41 +117,41 @@ def resolve_pickers(deadline_s=8):
             # min is satisfied; max-selection auto-confirms in headless.
             need = max(1, d.get("min", 1))
             for card in d.get("cards", [])[:need]:
-                picked = run("pick-card", str(card["idx"]), ok=True)
+                picked = run("pick-card", str(card["idx"]), allow_fail=True)
                 if "_err" in picked:
                     raise AssertionError(f"picker rejected card {card['idx']}: {picked['_err'][:100]}")
                 if obs()["phase"] not in ("card_select", "hand_select"):
                     break
             time.sleep(0.5)
             if obs()["phase"] in ("card_select", "hand_select"):
-                confirmed = run("confirm", ok=True)
+                confirmed = run("confirm", allow_fail=True)
                 if "_err" in confirmed:
-                    run("skip", ok=True)
+                    run("skip", allow_fail=True)
                     raise AssertionError(f"picker confirm failed: {confirmed['_err'][:100]}")
                 time.sleep(0.5)
         elif ph == "crystal_sphere":
-            run("proceed", ok=True)
+            run("proceed", allow_fail=True)
             time.sleep(0.5)
         elif ph == "rewards":
             rewards = d.get("rewards", [])
             if rewards:
-                run("pick-reward", str(rewards[0]["idx"]), ok=True)
+                run("pick-reward", str(rewards[0]["idx"]), allow_fail=True)
             else:
-                run("proceed", ok=True)
+                run("proceed", allow_fail=True)
             time.sleep(0.5)
         elif ph == "card_reward":
             cards = d.get("cards", [])
             if cards:
-                run("pick-card", str(cards[0]["idx"]), ok=True)
+                run("pick-card", str(cards[0]["idx"]), allow_fail=True)
             else:
-                run("skip", ok=True)
+                run("skip", allow_fail=True)
             time.sleep(0.5)
         elif ph == "relic_reward":
             relics = d.get("relics", [])
             if relics:
-                run("pick-relic", str(relics[0]["idx"]), ok=True)
+                run("pick-relic", str(relics[0]["idx"]), allow_fail=True)
             else:
-                run("skip", ok=True)
+                run("skip", allow_fail=True)
             time.sleep(0.5)
         else:
             return ph
@@ -174,7 +171,7 @@ def encounters(log=print):
         try:
             settle_to_map()
             rev = obs()["rev"]
-            r = run("cheat", "combat", enc, ok=True)
+            r = run("cheat", "combat", enc, allow_fail=True)
             if "_err" in r:
                 failures[enc] = f"force: {r['_err'][:90]}"
                 continue
@@ -188,7 +185,7 @@ def encounters(log=print):
             if not d.get("enemies") or bad:
                 failures[enc] = f"load: enemies={d.get('enemies')}"
                 continue
-            parity.kill_current_combat()
+            bridge.kill_current_combat()
             w = wedge_events(rev)
             if w:
                 failures[enc] = f"wedge after kill: {w}"
@@ -200,7 +197,7 @@ def encounters(log=print):
             fresh_run()
         if (i + 1) % 10 == 0:
             log(f"  ...{i + 1}/{len(ids)} ({len(failures)} failures)")
-    run("abandon", ok=True)
+    run("abandon", allow_fail=True)
     return failures
 
 
@@ -238,21 +235,21 @@ def cards(log=print, only=None):
                 fresh_run(character=active_character)
                 d = enter_sandbag()
                 plays_in_fight = 0
-            run("cheat", "heal", ok=True)
-            run("cheat", "energy", "99", ok=True)
-            run("cheat", "stars", "99", ok=True)
+            run("cheat", "heal", allow_fail=True)
+            run("cheat", "energy", "99", allow_fail=True)
+            run("cheat", "stars", "99", allow_fail=True)
             d = obs()
             if len(d["hand"]) >= 9:  # keep room for the graft
-                run("end-turn", ok=True)
+                run("end-turn", allow_fail=True)
                 time.sleep(1.2)
-                run("cheat", "heal", ok=True)
-                run("cheat", "energy", "99", ok=True)
-                run("cheat", "stars", "99", ok=True)
+                run("cheat", "heal", allow_fail=True)
+                run("cheat", "energy", "99", allow_fail=True)
+                run("cheat", "stars", "99", allow_fail=True)
                 d = obs()
                 if d["phase"] != "combat":
                     fresh_run(character=active_character)
                     d = enter_sandbag()
-            r = run("cheat", "card", card, ok=True)
+            r = run("cheat", "card", card, allow_fail=True)
             if "_err" in r:
                 failures[card] = f"graft: {r['_err'][:90]}"
                 continue
@@ -330,7 +327,7 @@ def cards(log=print, only=None):
         if ratio < 0.90:
             failures["__coverage__"] = (
                 f"only {playable_executed}/{playable_attempts} playable cards executed")
-    run("abandon", ok=True)
+    run("abandon", allow_fail=True)
     if failures and only is None:
         first_pass = set(failures)
         log(f"  retrying {len(first_pass)} first-pass failures in isolated combats")
@@ -358,8 +355,8 @@ def potions(log=print):
                 fresh_run()
                 enter_sandbag()
                 used_in_fight = 0
-            run("cheat", "heal", ok=True)
-            r = run("cheat", "potion", pot, ok=True)
+            run("cheat", "heal", allow_fail=True)
+            r = run("cheat", "potion", pot, allow_fail=True)
             if "_err" in r:
                 failures[pot] = f"procure: {r['_err'][:90]}"
                 continue
@@ -406,7 +403,7 @@ def potions(log=print):
             used_in_fight = 0
         if (i + 1) % 20 == 0:
             log(f"  ...{i + 1}/{len(ids)} ({len(failures)} failures)")
-    run("abandon", ok=True)
+    run("abandon", allow_fail=True)
     return failures
 
 
@@ -425,7 +422,7 @@ def relics(log=print):
     fresh_run("SWEEPREL")
 
     def grant_and_settle(relic):
-        r = run("cheat", "relic", relic, ok=True)
+        r = run("cheat", "relic", relic, allow_fail=True)
         if "_err" in r:
             if "not_playable:" in r["_err"]:
                 return "LEGAL_REJECT"
@@ -466,5 +463,18 @@ def relics(log=print):
             log(f"  ...{i + 1}/{len(ids)} verified (current belt shows {n})")
     log(f"  {verified} legal obtain hooks completed; "
         f"{legal_rejects} context-ineligible relics rejected cleanly")
-    run("abandon", ok=True)
+    run("abandon", allow_fail=True)
     return failures
+
+
+if __name__ == "__main__":
+    sweep = sys.argv[1] if len(sys.argv) == 2 else ""
+    choices = {
+        "encounters": encounters,
+        "cards": cards,
+        "potions": potions,
+        "relics": relics,
+    }
+    if sweep not in choices:
+        sys.exit("usage: sweeps.py encounters|cards|potions|relics")
+    sys.exit(1 if choices[sweep]() else 0)
