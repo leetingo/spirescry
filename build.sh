@@ -295,7 +295,9 @@ stop_game() {
             rm -f "$pidfile"
         elif ! is_this_host_snapshot "$current_snapshot"; then
             die "PID $host_pid in $pidfile does not belong to this host — refusing to signal it"
-        elif [ -n "$saved_snapshot" ] && [ "$saved_snapshot" != "$current_snapshot" ]; then
+        elif [ -z "$saved_snapshot" ]; then
+            die "host pidfile $pidfile has no saved process snapshot — refusing to signal PID $host_pid"
+        elif [ "$saved_snapshot" != "$current_snapshot" ]; then
             die "PID $host_pid in $pidfile was reused or restarted — refusing to signal it"
         else
             stop_exact_process "$host_pid" "$current_snapshot" "host"

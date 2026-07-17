@@ -82,6 +82,16 @@ bash -c 'trap "" TERM; while :; do sleep 1; done' \
 host_pid=$!
 sleep 0.1
 printf '%s\n' "$host_pid" > "$pidfile"
+if output="$(run_stop 2>&1)"; then
+    echo "snapshot-less host pidfile unexpectedly reported success: $output" >&2
+    exit 1
+fi
+assert_alive "$host_pid"
+grep -q 'has no saved process snapshot' <<<"$output"
+
+host_snapshot="$(ps -p "$host_pid" -o lstart= -o command= 2>/dev/null \
+    | sed -E 's/^[[:space:]]+//')"
+printf '%s\n%s\n' "$host_pid" "$host_snapshot" > "$pidfile"
 output="$(run_stop 2>&1)"
 assert_dead "$host_pid"
 grep -q 'stopped' <<<"$output"
