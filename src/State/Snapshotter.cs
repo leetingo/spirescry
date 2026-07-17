@@ -6,6 +6,7 @@ using MegaCrit.Sts2.Core.Entities.Creatures;
 using MegaCrit.Sts2.Core.Entities.Players;
 using MegaCrit.Sts2.Core.Localization;
 using MegaCrit.Sts2.Core.Models;
+using MegaCrit.Sts2.Core.Models.Powers;
 using MegaCrit.Sts2.Core.MonsterMoves.Intents;
 using MegaCrit.Sts2.Core.Nodes;
 using MegaCrit.Sts2.Core.Nodes.Cards;
@@ -805,6 +806,7 @@ public static class Snapshotter
         var creature = player?.Creature;
         if (pcs is null || creature is null)
             return new { phase, available = false };
+        var facing = FacingOf(creature);
 
         return new
         {
@@ -824,6 +826,7 @@ public static class Snapshotter
                 relics = player!.Relics
                     .Select(r => (object)new { model = r.Id.Entry, counter = RelicCounter(r) })
                     .ToArray(),
+                facing,
             },
             potions = PotionViews(player!),
             piles = new
@@ -862,6 +865,8 @@ public static class Snapshotter
                     hp = new[] { c.CurrentHp, c.MaxHp },
                     block = c.Block,
                     alive = c.IsAlive,
+                    side = SideOf(c),
+                    isBehind = IsBehind(c, facing),
                     powers = PowerViews(c),
                     intents = IntentViews(state, c),
                 })
@@ -869,9 +874,33 @@ public static class Snapshotter
         };
     }
 
-    // Damage rides the intent's own calculator — the number the intent pip
-    // shows, strength/weak already applied. NextMove can be mid-roll during
-    // turn transitions; an empty list means "poll again".
+    // Surround fights: the engine keeps the player's orientation as
+    // SurroundedPower.Facing on the player, and marks each flanker with a
+    // BackAttackLeft/RightPower. SurroundedPower's damage hook grants ×1.5
+    // to the enemy on the side the player faces away from — these fields
+    // expose exactly the state that hook reads. Null/false outside
+    // surround fights.
+    private static string? FacingOf(Creature creature) =>
+        creature.GetPower<SurroundedPower>()?.Facing.ToString().ToLowerInvariant();
+
+    private static string? SideOf(Creature enemy) =>
+        enemy.HasPower<BackAttackLeftPower>() ? "left"
+        : enemy.HasPower<BackAttackRightPower>() ? "right"
+        : null;
+
+    private static bool IsBehind(Creature enemy, string? facing) => facing switch
+    {
+        "right" => enemy.HasPower<BackAttackLeftPower>(),
+        "left" => enemy.HasPower<BackAttackRightPower>(),
+        _ => false,
+    };
+
+    // `damage` rides the intent's own calculator — the number the intent
+    // pip shows, every modifier already applied (strength/weak, and in
+    // surround fights the ×1.5 back attack). `baseDamage` is the raw roll
+    // before the hooks, so an agent can see the modifier gap without
+    // diffing turns. NextMove can be mid-roll during turn transitions; an
+    // empty list means "poll again".
     private static object[] IntentViews(CombatState state, Creature enemy)
     {
         try
@@ -881,6 +910,9 @@ public static class Snapshotter
                 {
                     type = i.IntentType.ToString().ToLowerInvariant(),
                     damage = i is AttackIntent a ? a.GetSingleDamage(state.Allies, enemy) : (int?)null,
+                    baseDamage = i is AttackIntent c && c.DamageCalc is { } calc
+                        ? (int?)(int)calc()
+                        : null,
                     hits = i is AttackIntent b ? b.Repeats : (int?)null,
                     // The game's own hover text — defend/buff magnitudes
                     // are hidden by design (the GUI shows none either),

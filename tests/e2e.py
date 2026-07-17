@@ -649,6 +649,34 @@ def c4():
     to_menu()
 
 
+@case("C5 facing/back-attack fields track a surround fight")
+def c5():
+    to_map(seed="CIC3CRAB", character="DEFECT")
+    run("cheat", "combat", "KAISER_CRAB_BOSS")
+    d = bridge.wait_phase("combat", timeout=30)
+
+    assert {e["model"] for e in d["enemies"]} == {"CRUSHER", "ROCKET"}, d["enemies"]
+    assert d["you"]["facing"] in ("left", "right"), d["you"]
+    assert {e["side"] for e in d["enemies"]} == {"left", "right"}, d["enemies"]
+    behind = [e for e in d["enemies"] if e["isBehind"]]
+    assert len(behind) == 1 and behind[0]["side"] != d["you"]["facing"], d
+
+    attacks = [i for e in d["enemies"] for i in e["intents"]
+               if i.get("damage") is not None]
+    assert attacks and all(i.get("baseDamage") is not None for i in attacks), attacks
+    assert any(i["damage"] != i["baseDamage"] for i in attacks), attacks
+
+    target = behind[0]
+    run("cheat", "card", "STRIKE_DEFECT")
+    run("cheat", "energy", "99")
+    run("play", "STRIKE_DEFECT", "--target", str(target["id"]))
+    after = obs()
+    assert after["you"]["facing"] == target["side"], after["you"]
+    after_behind = [e for e in after["enemies"] if e["isBehind"]]
+    assert len(after_behind) == 1 and after_behind[0]["side"] != target["side"], after
+    to_menu()
+
+
 # ---------- V: victory ----------
 
 @case("V1 cheat-driven full clear reaches a victory game_over")
