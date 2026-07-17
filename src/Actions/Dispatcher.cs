@@ -11,6 +11,7 @@ using MegaCrit.Sts2.Core.Entities.TreasureRelicPicking;
 using MegaCrit.Sts2.Core.GameActions;
 using MegaCrit.Sts2.Core.Map;
 using MegaCrit.Sts2.Core.Models;
+using MegaCrit.Sts2.Core.Models.Events;
 using MegaCrit.Sts2.Core.Entities.Merchant;
 using MegaCrit.Sts2.Core.Multiplayer.Game;
 using MegaCrit.Sts2.Core.Nodes;
@@ -969,7 +970,13 @@ public static class Dispatcher
 
     private static DispatchResult Buy(JsonElement args)
     {
-        if (RequirePhase(Phase.Shop) is { } err) return err;
+        var phase = PhaseDetector.Current();
+        var fakeMerchant = phase == Phase.Event
+            ? Screens.CurrentEvent() as FakeMerchant
+            : null;
+        if (phase != Phase.Shop && fakeMerchant is null)
+            return DispatchResult.Reject("bad_phase",
+                $"buy requires shop/fake merchant, current is {phase.AsString()}");
         if (!TryGetString(args, "kind", out var kind))
             return DispatchResult.Reject("bad_request", "missing args.kind");
         if (kind is not ("card" or "colorless" or "relic" or "potion" or "card_removal"))
@@ -978,7 +985,7 @@ public static class Dispatcher
         TryGetInt(args, "idx", out var idx);
 
         var rs = RunManager.Instance?.DebugOnlyGetState();
-        var inv = Screens.ShopInventory(rs);
+        var inv = fakeMerchant?.Inventory ?? Screens.ShopInventory(rs);
         if (rs is null || inv is null)
             return DispatchResult.Reject("not_ready", "shop inventory not available");
 
