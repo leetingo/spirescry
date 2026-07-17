@@ -47,11 +47,16 @@ auto-confirm at max picks — `confirm` accepts a partial pick.
 2. **Scry**: use that fresh decision `obs`, or call
    `spirescry obs --decision` → read `phase`, `rev`, `runId`,
    `legal`, and the board; decide. `legal` comes from the targets and gates
-   in this exact snapshot; it is authoritative over the reference table.
+   visible in this exact snapshot and is safer than the orientation table;
+   dispatch still performs the final engine-side validation.
 3. **Act with both guards and follow**: fire one verb from `legal`, adding
    `--if-rev <rev> --if-run <runId> --follow`. The response waits past
-   acceptance and includes resolution events plus a fresh decision `obs`.
-4. Inspect `outcome`: `settled` means the work went quiet;
+   acceptance while tracked queues/tasks are busy and includes resolution
+   events plus a fresh decision `obs`; GUI-only callbacks must expose the
+   same boundary for three consecutive frames.
+4. Inspect `outcome`: `settled` means tracked work is quiet (and the GUI
+   boundary was stable for those frames), not proof that every opaque engine
+   continuation has completed;
    `next_decision` means an effect parked on a picker/dialogue that now
    needs one verb; `timeout` means the verb was accepted but has not
    resolved — do not fire another verb, rescry and inspect `health`.
@@ -77,9 +82,10 @@ afflictions), then pass cached keys back as repeatable
 
 For a diagnostic checkpoint, save `spirescry runlog > run-<seed>.json`.
 `spirescry replay <file>` only runs from a clean `main_menu`, reconstructs
-a **new** guarded run, checks fingerprints after followed steps, and stops
-at the first divergence. Its final board belongs to the reconstruction's
-new `runId`; never report it as the source run's outcome or history.
+a **new** guarded run, and rejects logs where any verb lacks a followed,
+settled fingerprint. It checks every fingerprint and stops at the first
+divergence. Its final board belongs to the reconstruction's new `runId`;
+never report it as the source run's outcome or history.
 
 ## The ledger
 
