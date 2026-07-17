@@ -28,6 +28,12 @@ struct Cli {
     /// Trace each HTTP round-trip (request, status, wall time) on stderr
     #[arg(long, short = 'v', global = true)]
     verbose: bool,
+    /// Reject the verb if the revision moved since the board was read
+    #[arg(long, global = true)]
+    if_rev: Option<u64>,
+    /// Reject the verb if the live run id no longer matches
+    #[arg(long, global = true)]
+    if_run: Option<String>,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -118,6 +124,8 @@ fn main() -> ExitCode {
     let client = Client {
         base: format!("http://{}:{}", cli.host, cli.port),
         verbose: cli.verbose,
+        if_rev: cli.if_rev,
+        if_run: cli.if_run.clone(),
     };
     let result = match &cli.cmd {
         Cmd::Health => client.get("/health"),
@@ -247,6 +255,8 @@ fn cheat_args(name: &str, values: &[String]) -> Result<Value, String> {
 struct Client {
     base: String,
     verbose: bool,
+    if_rev: Option<u64>,
+    if_run: Option<String>,
 }
 
 impl Client {
@@ -267,7 +277,14 @@ impl Client {
             .then(|| args.get("name").and_then(Value::as_str))
             .flatten();
         validate_health(&health, Some(action), cheat)?;
-        self.post("/step", json!({ "action": action, "args": args }))
+        let mut body = json!({ "action": action, "args": args });
+        if let Some(rev) = self.if_rev {
+            body["ifRev"] = json!(rev);
+        }
+        if let Some(run) = &self.if_run {
+            body["ifRun"] = json!(run);
+        }
+        self.post("/step", body)
     }
 
     fn compatible_get(&self, path: &str) -> Result<Value, String> {
@@ -472,6 +489,42 @@ mod tests {
 
         let cli = Cli::try_parse_from(["spirescry", "health"]).unwrap();
         assert!(!cli.verbose);
+    }
+
+    #[test]
+    fn parses_global_guard_flags_after_the_verb() {
+        let cli = Cli::try_parse_from([
+            "spirescry",
+            "end-turn",
+            "--if-rev",
+            "310",
+            "--if-run",
+            "abc123",
+        ])
+        .unwrap();
+
+        assert_eq!(cli.if_rev, Some(310));
+        assert_eq!(cli.if_run.as_deref(), Some("abc123"));
+    }
+
+    #[test]
+    fn client_step_serializes_both_guards() {
+        let client = Client {
+            base: "http://127.0.0.1:1".to_string(),
+            verbose: false,
+            if_rev: Some(42),
+            if_run: Some("run-1".to_string()),
+        };
+        let mut body = json!({ "action": "end-turn", "args": {} });
+        if let Some(rev) = client.if_rev {
+            body["ifRev"] = json!(rev);
+        }
+        if let Some(run) = &client.if_run {
+            body["ifRun"] = json!(run);
+        }
+
+        assert_eq!(body["ifRev"], 42);
+        assert_eq!(body["ifRun"], "run-1");
     }
 
     #[test]

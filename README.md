@@ -76,6 +76,14 @@ Errors ride on 4xx/5xx as `{"ok": false, "err": "<code>", "msg": "..."}`
 with codes that say what to change (`bad_phase`, `not_enough_energy`,
 `bad_target`, `not_ready`, …).
 
+Health, observations, and step responses carry a `runId`: `none` between
+runs and a fresh token whenever the engine replaces its live `RunState`.
+Verbs accept optimistic guards, checked atomically with dispatch:
+`--if-rev <rev>` rejects with `stale_state` when the board moved since it
+was read, while `--if-run <id>` rejects with `external_change` when a GUI
+action or another agent replaced the run. Run swaps also ride the event
+stream as `run:<id>` / `run:none`.
+
 **Event-driven waits.** Every snapshot carries a monotonic `rev`. Changes
 bump it from the engine's own C# events (action executor, combat manager,
 overlay stack) plus a per-tick phase diff as the safety net; a `/step`

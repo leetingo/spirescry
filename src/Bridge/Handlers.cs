@@ -14,6 +14,7 @@ public static class Handlers
     {
         var snapshot = await MainThreadPump.Instance!.Run(() =>
         {
+            var runId = Signals.RefreshRunIdentity();
             var rm = MegaCrit.Sts2.Core.Runs.RunManager.Instance;
             var exec = rm?.ActionExecutor;
             var running = exec?.CurrentlyRunningAction;
@@ -23,6 +24,8 @@ public static class Handlers
             return new
             {
                 phase = PhaseDetector.Current().AsString(),
+                rev = Signals.Revision,
+                runId,
                 executor = running is null
                     ? null
                     : $"{running.GetType().Name}:{running.State}",
@@ -39,7 +42,8 @@ public static class Handlers
             protocolVersion = Mod.ProtocolVersion,
             capabilities = new { verbs = Dispatcher.Verbs, cheats = Dispatcher.Cheats },
             snapshot.phase,
-            rev = Signals.Revision,
+            snapshot.rev,
+            snapshot.runId,
             snapshot.executor,
             snapshot.executorStuckMs,
             snapshot.queues,
@@ -57,39 +61,95 @@ public static class Handlers
         var compact = compactStr is "1" or "true";
         var changed = since < 0 || wait == 0 || await Signals.WaitForChange(since, wait);
 
-        var snapshot = await MainThreadPump.Instance!.Run(() => Snapshotter.ForCurrentPhase(compact));
-        var node = JsonSerializer.SerializeToNode(snapshot)!.AsObject();
-        node["rev"] = Signals.Revision;
-        if (since >= 0)
+        return await MainThreadPump.Instance!.Run(() =>
         {
-            node["changed"] = changed;
-            node["events"] = JsonSerializer.SerializeToNode(Signals.EventsSince(since));
-        }
-        return new Response { Body = node.ToJsonString() };
+            var runId = Signals.RefreshRunIdentity();
+            var snapshot = Snapshotter.ForCurrentPhase(compact);
+            var node = JsonSerializer.SerializeToNode(snapshot)!.AsObject();
+            node["rev"] = Signals.Revision;
+            node["runId"] = runId;
+            if (since >= 0)
+            {
+                node["changed"] = changed;
+                node["events"] = JsonSerializer.SerializeToNode(Signals.EventsSince(since));
+            }
+            return new Response { Body = node.ToJsonString() };
+        });
     }
 
     public static async Task<Response> Step(string body)
     {
         string action;
         JsonElement args;
+        long? ifRev = null;
+        string? ifRun = null;
+        string? parseError = null;
         try
         {
             using var doc = JsonDocument.Parse(body);
-            if (!doc.RootElement.TryGetProperty("action", out var actionEl)
+            if (doc.RootElement.ValueKind != JsonValueKind.Object)
+            {
+                action = "";
+                args = default;
+                parseError = "request body must be an object";
+            }
+            else if (!doc.RootElement.TryGetProperty("action", out var actionEl)
                 || actionEl.ValueKind != JsonValueKind.String)
-                return Response.Error("bad_request", "missing 'action'");
-            action = actionEl.GetString()!;
-            args = doc.RootElement.TryGetProperty("args", out var argsEl)
-                ? argsEl.Clone()
-                : default;
+            {
+                action = "";
+                args = default;
+                parseError = "missing 'action'";
+            }
+            else
+            {
+                action = actionEl.GetString()!;
+                args = doc.RootElement.TryGetProperty("args", out var argsEl)
+                    ? argsEl.Clone()
+                    : default;
+                if (doc.RootElement.TryGetProperty("ifRev", out var revEl))
+                {
+                    if (revEl.ValueKind != JsonValueKind.Number
+                        || !revEl.TryGetInt64(out var parsedRev)
+                        || parsedRev < 0)
+                        parseError = "'ifRev' must be a non-negative integer";
+                    else
+                        ifRev = parsedRev;
+                }
+                if (doc.RootElement.TryGetProperty("ifRun", out var runEl))
+                {
+                    if (runEl.ValueKind != JsonValueKind.String
+                        || string.IsNullOrWhiteSpace(runEl.GetString()))
+                        parseError ??= "'ifRun' must be a non-empty string";
+                    else
+                        ifRun = runEl.GetString();
+                }
+            }
         }
         catch (JsonException ex)
         {
-            return Response.Error("bad_request", $"invalid json body: {ex.Message}");
+            action = "";
+            args = default;
+            parseError = $"invalid json body: {ex.Message}";
         }
+
+        if (parseError is not null)
+            return await MainThreadPump.Instance!.Run(() =>
+            {
+                var runId = Signals.RefreshRunIdentity();
+                return Response.Error("bad_request", parseError, runId: runId);
+            });
 
         var result = await MainThreadPump.Instance!.Run(() =>
         {
+            var runId = Signals.RefreshRunIdentity();
+            if (ifRun is not null && ifRun != runId)
+                return (dispatch: DispatchResult.Reject("external_change",
+                    $"run {ifRun} is gone — the live run is {runId}"),
+                    rev: Signals.Revision, runId);
+            if (ifRev is { } expectedRev && Signals.Revision != expectedRev)
+                return (dispatch: DispatchResult.Reject("stale_state",
+                    $"rev moved {expectedRev}->{Signals.Revision} since you scried — rescry and decide again"),
+                    rev: Signals.Revision, runId);
             var before = Signals.Revision;
             var r = Dispatcher.Dispatch(action, args);
             // Verbs that resolve inline within one phase (host-mode Neow
@@ -98,17 +158,23 @@ public static class Handlers
             // accepted step must be visible to --since waiters.
             if (r.Ok && Signals.Revision == before)
                 Signals.Bump($"step:{action}");
-            return r;
+            runId = Signals.RefreshRunIdentity();
+            return (dispatch: r, rev: Signals.Revision, runId);
         });
-        if (!result.Ok)
-            return Response.Error(result.Err!, result.Msg ?? "", result.Status);
+        if (!result.dispatch.Ok)
+            return Response.Error(
+                result.dispatch.Err!, result.dispatch.Msg ?? "",
+                result.dispatch.Status, result.runId);
         // The action is enqueued on the engine's action queue and
         // resolves over the following frames — follow with
         // /obs?since=<rev>&wait=<ms> to wake on the outcome. A success
         // Msg is a note (e.g. "settled with victory cleanup").
-        return result.Msg is null
-            ? Response.Json(new { ok = true, enqueued = action, rev = Signals.Revision })
-            : Response.Json(new { ok = true, enqueued = action, rev = Signals.Revision, note = result.Msg });
+        return result.dispatch.Msg is null
+            ? Response.Json(new
+                { ok = true, enqueued = action, rev = result.rev, runId = result.runId })
+            : Response.Json(new
+                { ok = true, enqueued = action, rev = result.rev,
+                    runId = result.runId, note = result.dispatch.Msg });
     }
 
     // The registry the cheats validate against, enumerable — sweeps drive
