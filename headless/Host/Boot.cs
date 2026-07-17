@@ -48,10 +48,7 @@ internal static class HeadlessBoot
             AppDomain.CurrentDomain.FirstChanceException += (_, e) =>
             {
                 var ex = e.Exception;
-                var known = debug != "2"
-                    && ex is TypeLoadException or ReflectionTypeLoadException
-                            or MissingMethodException
-                    && (ex.Message.Contains("GodotSharp") || ex.Message.Contains("Godot."));
+                var known = debug != "2" && FirstChanceFilter.IsKnownGodotStubMiss(ex);
                 if (known)
                 {
                     if (Interlocked.Increment(ref stubMisses) == 1)
