@@ -11,6 +11,8 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 use serde_json::{json, Value};
 
+const PROTOCOL_VERSION: u64 = 1;
+
 #[derive(Parser)]
 #[command(name = "spirescry", version, about)]
 struct Cli {
@@ -119,7 +121,7 @@ fn main() -> ExitCode {
     };
     let result = match &cli.cmd {
         Cmd::Health => client.get("/health"),
-        Cmd::Models { kind } => client.get(&format!("/models?kind={}", kind)),
+        Cmd::Models { kind } => client.compatible_get(&format!("/models?kind={}", kind)),
         Cmd::Obs {
             since,
             wait,
@@ -137,7 +139,7 @@ fn main() -> ExitCode {
                 if *compact {
                     path = format!("{}{}compact=1", path, sep);
                 }
-                client.get(&path)
+                client.compatible_get(&path)
             }
         }
         Cmd::NewRun {
@@ -167,9 +169,7 @@ fn main() -> ExitCode {
         Cmd::Cheat { name, values } => {
             cheat_args(name, values).and_then(|args| client.step("cheat", args))
         }
-        Cmd::MapMove { col, row } => {
-            client.step("map-move", json!({ "col": col, "row": row }))
-        }
+        Cmd::MapMove { col, row } => client.step("map-move", json!({ "col": col, "row": row })),
         Cmd::Play { model, target } => {
             let mut args = json!({ "model": model });
             if let Some(t) = target {
@@ -230,8 +230,12 @@ fn cheat_args(name: &str, values: &[String]) -> Result<Value, String> {
         ("gold", [value]) | ("hp", [value]) | ("stars", [value]) | ("energy", [value]) => {
             args["value"] = json!(num(value)?)
         }
-        ("event", [id]) | ("combat", [id]) | ("card", [id]) | ("card-upgraded", [id])
-        | ("relic", [id]) | ("potion", [id]) => args["id"] = json!(id),
+        ("event", [id])
+        | ("combat", [id])
+        | ("card", [id])
+        | ("card-upgraded", [id])
+        | ("relic", [id])
+        | ("potion", [id]) => args["id"] = json!(id),
         _ => {}
     }
     Ok(args)
@@ -258,7 +262,18 @@ impl Client {
     }
 
     fn step(&self, action: &str, args: Value) -> Result<Value, String> {
+        let health = self.get("/health")?;
+        let cheat = (action == "cheat")
+            .then(|| args.get("name").and_then(Value::as_str))
+            .flatten();
+        validate_health(&health, Some(action), cheat)?;
         self.post("/step", json!({ "action": action, "args": args }))
+    }
+
+    fn compatible_get(&self, path: &str) -> Result<Value, String> {
+        let health = self.get("/health")?;
+        validate_health(&health, None, None)?;
+        self.get(path)
     }
 
     fn exchange(
@@ -286,6 +301,68 @@ impl Client {
         }
         handle(result)
     }
+}
+
+fn validate_health(
+    health: &Value,
+    action: Option<&str>,
+    cheat: Option<&str>,
+) -> Result<(), String> {
+    let host_protocol = health
+        .get("protocolVersion")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| {
+            "incompatible host: /health has no numeric protocolVersion; update the running host"
+                .to_string()
+        })?;
+    if host_protocol != PROTOCOL_VERSION {
+        let build = health
+            .get("buildHash")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        return Err(format!(
+            "incompatible host protocol {} (CLI expects {}, build {})",
+            host_protocol, PROTOCOL_VERSION, build
+        ));
+    }
+
+    if let Some(action) = action {
+        let verbs = health
+            .pointer("/capabilities/verbs")
+            .and_then(Value::as_array)
+            .ok_or_else(|| "incompatible host: /health has no capabilities.verbs".to_string())?;
+        if !verbs.iter().any(|verb| verb.as_str() == Some(action)) {
+            let supported = verbs
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(format!(
+                "bad_request: host does not advertise '{}' (supported: {})",
+                action, supported
+            ));
+        }
+    }
+
+    if let Some(cheat) = cheat {
+        let cheats = health
+            .pointer("/capabilities/cheats")
+            .and_then(Value::as_array)
+            .ok_or_else(|| "incompatible host: /health has no capabilities.cheats".to_string())?;
+        if !cheats.iter().any(|item| item.as_str() == Some(cheat)) {
+            let supported = cheats
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(format!(
+                "bad_request: host does not advertise cheat '{}' (supported: {})",
+                cheat, supported
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 // HH:MM:SS.mmm UTC — hand-rolled from the epoch to keep the CLI
@@ -332,6 +409,15 @@ mod tests {
 
     fn strings(values: &[&str]) -> Vec<String> {
         values.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn health(protocol: u64, verbs: &[&str], cheats: &[&str]) -> Value {
+        json!({
+            "ok": true,
+            "buildHash": "abc1234",
+            "protocolVersion": protocol,
+            "capabilities": { "verbs": verbs, "cheats": cheats }
+        })
     }
 
     #[test]
@@ -437,7 +523,10 @@ mod tests {
         let upgraded = cheat_args("card-upgraded", &strings(&["WHIRLWIND"])).unwrap();
         let relic = cheat_args("relic", &strings(&["KUNAI"])).unwrap();
 
-        assert_eq!(upgraded, json!({ "name": "card-upgraded", "id": "WHIRLWIND" }));
+        assert_eq!(
+            upgraded,
+            json!({ "name": "card-upgraded", "id": "WHIRLWIND" })
+        );
         assert_eq!(relic, json!({ "name": "relic", "id": "KUNAI" }));
     }
 
@@ -466,5 +555,43 @@ mod tests {
         let args = cheat_args("heal", &[]).unwrap();
 
         assert_eq!(args, json!({ "name": "heal" }));
+    }
+
+    #[test]
+    fn compatible_health_accepts_advertised_verb_and_cheat() {
+        let value = health(PROTOCOL_VERSION, &["play", "cheat"], &["relic"]);
+
+        assert_eq!(validate_health(&value, Some("play"), None), Ok(()));
+        assert_eq!(
+            validate_health(&value, Some("cheat"), Some("relic")),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn old_health_without_protocol_fails_fast() {
+        let err = validate_health(&json!({ "ok": true }), Some("play"), None).unwrap_err();
+
+        assert!(err.contains("no numeric protocolVersion"), "{err}");
+    }
+
+    #[test]
+    fn protocol_mismatch_names_both_versions_and_build() {
+        let err = validate_health(&health(2, &["play"], &[]), Some("play"), None).unwrap_err();
+
+        assert!(err.contains("protocol 2"), "{err}");
+        assert!(err.contains("expects 1"), "{err}");
+        assert!(err.contains("abc1234"), "{err}");
+    }
+
+    #[test]
+    fn missing_advertised_capability_fails_before_the_step() {
+        let value = health(PROTOCOL_VERSION, &["cheat"], &["gold"]);
+
+        let verb_err = validate_health(&value, Some("play"), None).unwrap_err();
+        assert!(verb_err.contains("does not advertise 'play'"), "{verb_err}");
+
+        let cheat_err = validate_health(&value, Some("cheat"), Some("relic")).unwrap_err();
+        assert!(cheat_err.contains("cheat 'relic'"), "{cheat_err}");
     }
 }
