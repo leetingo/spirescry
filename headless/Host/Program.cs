@@ -7,6 +7,24 @@
 using System.Runtime.Loader;
 using Spirescry.Host;
 
+var lifetime = HostLifetime.Install();
+
+// Process-level regression hooks. They run before loading the proprietary
+// game assembly so tests can force exit paths in isolation.
+switch (Environment.GetEnvironmentVariable("STS2_HOST_EXIT_TRAIL_TEST"))
+{
+    case "wait":
+        HostLog.Info("exit-trail test ready");
+        lifetime.WaitAndLogShutdown();
+        return 0;
+    case "unhandled-thread":
+        var thread = new Thread(static () =>
+            throw new InvalidOperationException("exit-trail test exception"));
+        thread.Start();
+        thread.Join();
+        return 99;
+}
+
 var libDir = Environment.GetEnvironmentVariable("STS2_HEADLESS_LIB");
 if (string.IsNullOrEmpty(libDir))
     libDir = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "build", "lib"));
@@ -39,12 +57,12 @@ try
 }
 catch (Exception ex)
 {
-    HostLog.Info($"boot failed: {ex}");
+    HostLog.Error("boot failed", ex);
+    lifetime.LogShutdown("boot failure");
     return 1;
 }
 
-// Park; the bridge listens on its own threads. SIGINT/SIGTERM exit.
-var done = new ManualResetEventSlim(false);
-Console.CancelKeyPress += (_, e) => { e.Cancel = true; done.Set(); };
-done.Wait();
+// Park; the bridge listens on its own threads. Trappable termination signals
+// wake this thread so the final log record is flushed before exit.
+lifetime.WaitAndLogShutdown();
 return 0;

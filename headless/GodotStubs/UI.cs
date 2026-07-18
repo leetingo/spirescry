@@ -30,7 +30,7 @@ public class CanvasItem : Node
     public Color GetModulate() => Modulate;
     public void SetSelfModulate(Color c) => SelfModulate = c;
     public Color GetSelfModulate() => SelfModulate;
-    public Tween CreateTween() => new Tween();
+    public new Tween CreateTween() => new Tween();
     public Rect2 GetViewportRect() => new Rect2(Vector2.Zero, new Vector2(1920, 1080));
 }
 
@@ -62,7 +62,7 @@ public class Control : CanvasItem
     public MouseFilterEnum MouseFilter { get; set; }
     public string TooltipText { get; set; } = "";
 
-    public Rect2 GetViewportRect() => new Rect2(0, 0, 1920, 1080);
+    public new Rect2 GetViewportRect() => new Rect2(0, 0, 1920, 1080);
     public void GrabFocus() { }
     public void ReleaseFocus() { }
     public bool HasFocus() => false;
@@ -91,7 +91,7 @@ public class Resource : GodotObject
     public string ResourcePath { get; set; } = "";
     public class MethodName { }
     public class PropertyName { }
-    public class SignalName { }
+    public new class SignalName { }
 }
 
 public class PackedScene : Resource
@@ -233,7 +233,7 @@ public class Button : Control
         public static readonly StringName Pressed = "Pressed";
     }
     public string Text { get; set; } = "";
-    public event Action? Pressed;
+    public event Action? Pressed { add { } remove { } }
 }
 
 public class BaseButton : Control
@@ -380,7 +380,7 @@ public class AnimationPlayer : Node
     // animation is "instantly done." `await ToSignal(player, "animation_finished")`
     // routes through SignalAwaiter (always completed) and is unaffected
     // either way; this fix is for raw `+= handler` users.
-    public void Play(StringName name = default, double customBlend = -1, float customSpeed = 1f, bool fromEnd = false)
+    public void Play(StringName? name = null, double customBlend = -1, float customSpeed = 1f, bool fromEnd = false)
     {
         AnimationFinished?.Invoke(name ?? "");
     }
@@ -426,7 +426,7 @@ public class ResourceFormatLoader : GodotObject
 {
     public class MethodName { }
     public class PropertyName { }
-    public class SignalName { }
+    public new class SignalName { }
 
     public virtual Variant _Load(string path, string originalPath, bool useSubThreads, int cacheMode) => default;
     public virtual string[] _GetRecognizedExtensions() => Array.Empty<string>();

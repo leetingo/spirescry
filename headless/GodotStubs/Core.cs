@@ -109,7 +109,7 @@ public class Node : GodotObject
     public int GetIndex(bool includeInternal = false) =>
         _parent is null ? -1 : _parent._children.IndexOf(this);
 
-    public void CallDeferred(StringName method, params Variant[] args) { }
+    public new void CallDeferred(StringName method, params Variant[] args) { }
 
     public virtual void _Ready() { }
     public virtual void _EnterTree() { }

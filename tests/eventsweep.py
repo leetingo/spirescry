@@ -55,6 +55,25 @@ def ensure_map():
     if obs()["phase"] != "map":
         fresh_run()
 
+def dig_crystal():
+    """Perform one real divination and prove the board/progress changed."""
+    before = obs()
+    hidden = next((c for c in before.get("cells", []) if c.get("hidden")), None)
+    if hidden is None or before.get("divinationsLeft", 0) <= 0:
+        return False
+    before_left = before["divinationsLeft"]
+    before_hidden = before.get("hiddenCells", sum(c.get("hidden", False)
+                                                   for c in before.get("cells", [])))
+    run("map-move", str(hidden["col"]), str(hidden["row"]), ok=True)
+    for _ in range(20):
+        after = obs()
+        if after.get("divinationsLeft", before_left) < before_left:
+            after_hidden = after.get("hiddenCells", sum(c.get("hidden", False)
+                                                        for c in after.get("cells", [])))
+            return after_hidden < before_hidden
+        time.sleep(0.1)
+    return False
+
 # event list from the cheat's known-list error (needs map phase)
 fresh_run()
 err = run("cheat", "event", "__LIST__", ok=True).get("_err", "")
@@ -99,6 +118,7 @@ for i, ev in enumerate(ids):
                 elif after == "bundle_select":
                     run("pick-card", "0", ok=True)
                 elif after == "crystal_sphere":
+                    render += " dig-ok" if dig_crystal() else " DIG-FAIL"
                     run("proceed", ok=True)
         results[ev] = render
     elif ph in special_ok:
@@ -118,3 +138,4 @@ for k, v in sorted(bad.items()):
 post = Counter(v.split("->")[1].split()[0] for v in results.values() if "->" in v)
 print("option-0 landed in:", dict(post))
 run("abandon", ok=True)
+sys.exit(1 if bad else 0)

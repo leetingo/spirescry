@@ -108,7 +108,7 @@ enum Cmd {
         #[arg(value_parser = clap::value_parser!(i32).range(0..))]
         row: i32,
     },
-    /// Dev/verification cheats: goto <col> <row> | gold <n> | hp <n> | heal | wound-enemies | event <ID> | card <ID> | card-upgraded <ID> | relic <ID>
+    /// Dev/verification cheats: goto <col> <row> | gold <n> | hp <n> | heal | wound-enemies | event <ID> | card <ID> | card-upgraded <ID> | potion <ID> | relic <ID>
     Cheat { name: String, values: Vec<String> },
     /// Play an exact hand-card selector (MODEL, MODEL+, MODEL@ENCHANTMENT, MODEL!AFFLICTION)
     Play {
@@ -120,7 +120,7 @@ enum Cmd {
     },
     /// End the player turn
     EndTurn,
-    /// Drink a potion by slot (combat; from obs.potions)
+    /// Use a potion by slot (combat, or Foul Potion in a shop; from obs.potions)
     PotionUse {
         #[arg(value_parser = clap::value_parser!(i32).range(0..))]
         slot: i32,

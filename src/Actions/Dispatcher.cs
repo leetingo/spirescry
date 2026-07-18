@@ -57,7 +57,8 @@ public static class Dispatcher
         "leave" => Leave(),
         "cheat" => Cheat(args),
         "potion-discard" => PotionDiscard(args),
-        "play" or "end-turn" or "potion-use" => CombatVerb(action, args),
+        "potion-use" => PotionUse(args),
+        "play" or "end-turn" => CombatVerb(action, args),
         _ => DispatchResult.Reject("bad_request",
             $"unknown action '{action}' (supported: new-run, abandon, option, proceed, map-move, pick-reward, pick-card, pick-relic, confirm, skip, buy, leave, cheat, play, end-turn, potion-use, potion-discard)"),
     };
@@ -78,9 +79,10 @@ public static class Dispatcher
             "event" => CheatEvent(args),
             "card" => CheatCard(args),
             "card-upgraded" => CheatCard(args),
+            "potion" => CheatPotion(args),
             "relic" => CheatRelic(args),
             var n => DispatchResult.Reject("bad_request",
-                $"unknown cheat '{n}' (supported: goto, gold, heal, hp, wound-enemies, event, card, card-upgraded, relic)"),
+                $"unknown cheat '{n}' (supported: goto, gold, heal, hp, wound-enemies, event, card, card-upgraded, potion, relic)"),
         };
     }
 
@@ -185,7 +187,9 @@ public static class Dispatcher
             return DispatchResult.Reject("bad_request", $"no card model '{entry}'");
 
         var inCombat = CombatManager.Instance is { IsInProgress: true };
-        ICardScope scope = inCombat ? CombatManager.Instance!.DebugOnlyGetState()! : rs;
+        ICardScope? scope = inCombat ? CombatManager.Instance?.DebugOnlyGetState() : rs;
+        if (scope is null)
+            return DispatchResult.Reject("not_ready", "card scope not available");
         var card = scope.CreateCard(proto, player);
         var makeUpgraded = args.TryGetProperty("upgraded", out var upgraded)
             && upgraded.ValueKind == JsonValueKind.True;
@@ -220,6 +224,36 @@ public static class Dispatcher
         if (RunMode.IsHeadless) obtain.GetAwaiter().GetResult();
         else Fire(obtain, "cheat-relic");
         return DispatchResult.Success();
+    }
+
+    private static DispatchResult CheatPotion(JsonElement args)
+    {
+        if (!TryGetString(args, "id", out var id))
+            return DispatchResult.Reject("bad_request", "missing args.id");
+        var rs = RunManager.Instance?.DebugOnlyGetState();
+        var player = rs is null ? null : LocalContext.GetMe(rs);
+        if (player is null)
+            return DispatchResult.Reject("not_ready", "no run in progress");
+
+        var entry = id.ToUpperInvariant();
+        var proto = ModelDb.AllPotions.FirstOrDefault(p => p.Id.Entry == entry);
+        if (proto is null)
+            return DispatchResult.Reject("bad_request", $"no potion model '{entry}'");
+        var slot = Enumerable.Range(0, player.PotionSlots.Count)
+            .FirstOrDefault(i => player.PotionSlots[i] is null, -1);
+        if (slot < 0)
+            return DispatchResult.Reject("not_ready", "no open potion slots");
+
+        var procure = PotionCmd.TryToProcure(proto.ToMutable(), player, slot);
+        if (!RunMode.IsHeadless)
+        {
+            Fire(procure, "cheat-potion");
+            return DispatchResult.Success();
+        }
+        procure.GetAwaiter().GetResult();
+        return player.PotionSlots[slot] is not null
+            ? DispatchResult.Success()
+            : DispatchResult.Reject("internal", $"failed to procure potion '{entry}'");
     }
 
     // Leaves every enemy at 1 HP with no block, so one normal play ends the
@@ -461,7 +495,11 @@ public static class Dispatcher
         var seed = TryGetString(args, "seed", out var seedStr)
             ? seedStr.ToUpperInvariant()
             : "";
-        TryGetInt(args, "ascension", out var ascension);
+        var ascension = 0;
+        if (args.TryGetProperty("ascension", out _)
+            && (!TryGetInt(args, "ascension", out ascension) || ascension < 0))
+            return DispatchResult.Reject("bad_request",
+                "args.ascension must be a non-negative 32-bit integer");
 
         var game = NGame.Instance;
         if (game is null) return NewRunHeadless(character, seed, ascension);
@@ -651,7 +689,9 @@ public static class Dispatcher
             // ForceClick fires the Godot Released signal so the engine's
             // wired handler chain runs — invoking the handler directly does
             // nothing.
-            room.GetButtonForOption(opts[idx]).ForceClick();
+            if (room.GetButtonForOption(opts[idx]) is not { } button)
+                return DispatchResult.Reject("not_ready", "rest option button not wired yet — retry");
+            button.ForceClick();
             return DispatchResult.Success();
         }
 
@@ -805,7 +845,10 @@ public static class Dispatcher
         if (kind is not ("card" or "colorless" or "relic" or "potion" or "card_removal"))
             return DispatchResult.Reject("bad_request",
                 $"unknown kind '{kind}' (card, colorless, relic, potion, card_removal)");
-        TryGetInt(args, "idx", out var idx);
+        if (!TryGetInt(args, "idx", out var idx))
+            return DispatchResult.Reject("bad_request", "missing or invalid args.idx (32-bit integer required)");
+        if (idx < 0)
+            return DispatchResult.Reject("bad_index", $"{kind} idx {idx} must be non-negative");
 
         var rs = RunManager.Instance?.DebugOnlyGetState();
         var inv = Screens.ShopInventory(rs);
@@ -1067,59 +1110,59 @@ public static class Dispatcher
                     : DispatchResult.Success();
 
             case Phase.CardSelect:
-            {
-                var screen = Screens.Top<NCardGridSelectionScreen>();
-                if (screen is null)
-                    return DispatchResult.Reject("not_ready", "selection screen not mounted");
-                var prefs = Screens.Prefs(screen);
-                var count = Screens.SelectedCards(screen).Count();
-                switch (screen)
                 {
-                    // These complete through their confirm button; mirror its gate.
-                    case NSimpleCardSelectScreen or NCombatPileCardSelectScreen:
-                        var btn = Reflect.Field<NClickableControl>(screen, "_confirmButton");
-                        if (btn is not { IsEnabled: true })
-                            return DispatchResult.Reject("not_ready",
-                                $"confirm not available — {count} selected, need {prefs.MinSelect}..{prefs.MaxSelect}");
-                        btn.ForceClick();
-                        return DispatchResult.Success();
+                    var screen = Screens.Top<NCardGridSelectionScreen>();
+                    if (screen is null)
+                        return DispatchResult.Reject("not_ready", "selection screen not mounted");
+                    var prefs = Screens.Prefs(screen);
+                    var count = Screens.SelectedCards(screen).Count();
+                    switch (screen)
+                    {
+                        // These complete through their confirm button; mirror its gate.
+                        case NSimpleCardSelectScreen or NCombatPileCardSelectScreen:
+                            var btn = Reflect.Field<NClickableControl>(screen, "_confirmButton");
+                            if (btn is not { IsEnabled: true })
+                                return DispatchResult.Reject("not_ready",
+                                    $"confirm not available — {count} selected, need {prefs.MinSelect}..{prefs.MaxSelect}");
+                            btn.ForceClick();
+                            return DispatchResult.Success();
 
-                    // Transform completes ungated — pre-check or an empty
-                    // pick would resolve the selection.
-                    case NDeckTransformSelectScreen:
-                        if (count < prefs.MinSelect)
-                            return DispatchResult.Reject("not_ready",
-                                $"{count} selected, need {prefs.MinSelect} (pick-card first)");
-                        Reflect.Invoke(screen, "CompleteSelection", new object?[] { null });
-                        return DispatchResult.Success();
+                        // Transform completes ungated — pre-check or an empty
+                        // pick would resolve the selection.
+                        case NDeckTransformSelectScreen:
+                            if (count < prefs.MinSelect)
+                                return DispatchResult.Reject("not_ready",
+                                    $"{count} selected, need {prefs.MinSelect} (pick-card first)");
+                            Reflect.Invoke(screen, "CompleteSelection", new object?[] { null });
+                            return DispatchResult.Success();
 
-                    // Deck select confirms at MinSelect; upgrade/enchant only
-                    // at MaxSelect (their CheckIfSelectionComplete no-ops
-                    // below it) — pre-check so a short pick errors instead.
-                    default:
-                        var need = screen is NDeckCardSelectScreen ? prefs.MinSelect : prefs.MaxSelect;
-                        if (count < need)
-                            return DispatchResult.Reject("not_ready",
-                                $"{count} selected, need {need} (pick-card first)");
-                        Reflect.Invoke(screen, "CheckIfSelectionComplete");
-                        return DispatchResult.Success();
+                        // Deck select confirms at MinSelect; upgrade/enchant only
+                        // at MaxSelect (their CheckIfSelectionComplete no-ops
+                        // below it) — pre-check so a short pick errors instead.
+                        default:
+                            var need = screen is NDeckCardSelectScreen ? prefs.MinSelect : prefs.MaxSelect;
+                            if (count < need)
+                                return DispatchResult.Reject("not_ready",
+                                    $"{count} selected, need {need} (pick-card first)");
+                            Reflect.Invoke(screen, "CheckIfSelectionComplete");
+                            return DispatchResult.Success();
+                    }
                 }
-            }
 
             case Phase.HandSelect:
-            {
-                var hand = NPlayerHand.Instance!;
-                var btn = Reflect.Field<NClickableControl>(hand, "_selectModeConfirmButton");
-                if (btn is not { IsEnabled: true })
                 {
-                    var prefs = Screens.Prefs(hand);
-                    var count = Screens.SelectedCards(hand).Count();
-                    return DispatchResult.Reject("not_ready",
-                        $"confirm not available — {count} selected, need {prefs.MinSelect}..{prefs.MaxSelect}");
+                    var hand = NPlayerHand.Instance!;
+                    var btn = Reflect.Field<NClickableControl>(hand, "_selectModeConfirmButton");
+                    if (btn is not { IsEnabled: true })
+                    {
+                        var prefs = Screens.Prefs(hand);
+                        var count = Screens.SelectedCards(hand).Count();
+                        return DispatchResult.Reject("not_ready",
+                            $"confirm not available — {count} selected, need {prefs.MinSelect}..{prefs.MaxSelect}");
+                    }
+                    btn.ForceClick();
+                    return DispatchResult.Success();
                 }
-                btn.ForceClick();
-                return DispatchResult.Success();
-            }
 
             case var p:
                 return DispatchResult.Reject("bad_phase",
@@ -1131,7 +1174,16 @@ public static class Dispatcher
     // otherwise args.idx must name one — same rule in both boots.
     private static DispatchResult? ResolveAltIdx(JsonElement args, int count, out int idx)
     {
-        idx = TryGetInt(args, "idx", out var i) ? i : (count == 1 ? 0 : -1);
+        if (args.ValueKind == JsonValueKind.Object && args.TryGetProperty("idx", out _))
+        {
+            if (!TryGetInt(args, "idx", out idx))
+                return DispatchResult.Reject("bad_request",
+                    "args.idx must be a 32-bit integer");
+        }
+        else
+        {
+            idx = count == 1 ? 0 : -1;
+        }
         return idx < 0 || idx >= count
             ? DispatchResult.Reject("bad_request",
                 $"multiple alternatives — pass args.idx in [0,{count - 1}] (see obs.alternatives)")
@@ -1194,10 +1246,16 @@ public static class Dispatcher
 
             case Phase.Treasure:
                 var sync = RunManager.Instance?.TreasureRoomRelicSynchronizer;
-                if (sync is null || sync.CurrentRelics is not { Count: > 0 })
-                    return DispatchResult.Reject("not_ready", "no relic offer to skip");
-                sync.SkipRelicLocally();
-                return DispatchResult.Success();
+                if (sync?.CurrentRelics is { Count: > 0 })
+                {
+                    sync.SkipRelicLocally();
+                    return DispatchResult.Success();
+                }
+                // Once a relic has been picked (or a previous skip has
+                // resolved), the offer is permanently empty. Treat another
+                // skip as the room's proceed action instead of returning a
+                // not_ready that can never clear by retrying.
+                return Proceed();
 
             case Phase.CardSelect:
                 if (Screens.Top<NChooseACardSelectionScreen>() is { } chooseSel)
@@ -1282,7 +1340,6 @@ public static class Dispatcher
         return action switch
         {
             "play" => Play(args, state, player),
-            "potion-use" => PotionUse(args, state, player),
             "end-turn" => EndTurn(state, player),
             // Unreachable via Dispatch's verb grouping — reject rather than
             // silently ending the turn if the grouping ever grows.
@@ -1290,16 +1347,43 @@ public static class Dispatcher
         };
     }
 
-    private static DispatchResult PotionUse(JsonElement args, CombatState state, Player player)
+    private static DispatchResult PotionUse(JsonElement args)
     {
         if (!TryGetInt(args, "slot", out var slot))
             return DispatchResult.Reject("bad_request", "missing args.slot");
+        var phase = PhaseDetector.Current();
+        var combat = CombatManager.Instance;
+        if (phase != Phase.Shop && combat is not { IsInProgress: true })
+            return DispatchResult.Reject("bad_phase",
+                "potion-use is valid in combat; FOUL_POTION is also usable in the shop");
+        var rs = RunManager.Instance?.DebugOnlyGetState();
+        var player = rs is null ? null : LocalContext.GetMe(rs);
+        if (player is null)
+            return DispatchResult.Reject("not_ready", "no run in progress");
         var slots = player.PotionSlots;
         if (slot < 0 || slot >= slots.Count || slots[slot] is null)
             return DispatchResult.Reject("bad_index", $"no potion in slot {slot}");
         var potion = slots[slot]!;
         if (potion.IsQueued || potion.HasBeenRemovedFromState)
             return DispatchResult.Reject("not_playable", $"potion in slot {slot} already used");
+
+        if (phase == Phase.Shop)
+        {
+            if (potion.Id.Entry != "FOUL_POTION")
+                return DispatchResult.Reject("not_playable",
+                    $"{potion.Id.Entry} has no merchant interaction; only FOUL_POTION can be used in the shop");
+            potion.EnqueueManualUse(null!);
+            return DispatchResult.Success();
+        }
+
+        var state = combat!.DebugOnlyGetState();
+        if (state is null)
+            return DispatchResult.Reject("not_ready", "combat state not available");
+        if (state.CurrentSide != CombatSide.Player)
+            return DispatchResult.Reject("not_ready",
+                $"current side is {state.CurrentSide.ToString().ToLowerInvariant()}");
+        if (combat.PlayerActionsDisabled)
+            return DispatchResult.Reject("not_ready", "player actions disabled");
 
         var (target, err) = ResolveTarget(potion.TargetType, args, state, player);
         if (err is not null) return err.Value;
@@ -1335,10 +1419,10 @@ public static class Dispatcher
 
         var pcs = player.PlayerCombatState!;
         var card = pcs.Hand.Cards.FirstOrDefault(c =>
-            c != null && string.Equals(c.Id.Entry, model, StringComparison.OrdinalIgnoreCase));
+            c != null && string.Equals(CardSpecifier(c), model, StringComparison.OrdinalIgnoreCase));
         if (card is null)
         {
-            var hand = string.Join(",", pcs.Hand.Cards.Where(c => c != null).Select(c => c.Id.Entry));
+            var hand = string.Join(",", pcs.Hand.Cards.Where(c => c != null).Select(CardSpecifier));
             return DispatchResult.Reject("bad_index", $"no '{model}' in hand [{hand}]");
         }
 
@@ -1369,6 +1453,15 @@ public static class Dispatcher
             Enqueue(RunManager.Instance!, new PlayCardAction(card, target!)));
         return DispatchResult.Success();
     }
+
+    // The same stable suffixes compact pile snapshots use: an unsuffixed ID
+    // means an unupgraded, unenchanted, unafflicted copy; +/@/! select the
+    // corresponding variant. Identical copies resolve by hand order.
+    private static string CardSpecifier(CardModel card) =>
+        card.Id.Entry
+        + (card.IsUpgraded ? "+" : "")
+        + (card.Enchantment is { } enchantment ? $"@{enchantment.Id.Entry}" : "")
+        + (card.Affliction is { } affliction ? $"!{affliction.Id.Entry}" : "");
 
     private static DispatchResult EndTurn(CombatState state, Player player)
     {

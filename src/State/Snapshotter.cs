@@ -6,6 +6,7 @@ using MegaCrit.Sts2.Core.Entities.Creatures;
 using MegaCrit.Sts2.Core.Entities.Players;
 using MegaCrit.Sts2.Core.Localization;
 using MegaCrit.Sts2.Core.Models;
+using MegaCrit.Sts2.Core.Models.Events;
 using MegaCrit.Sts2.Core.MonsterMoves.Intents;
 using MegaCrit.Sts2.Core.Nodes;
 using MegaCrit.Sts2.Core.Nodes.Cards;
@@ -100,16 +101,39 @@ public static class Snapshotter
 
         var grid = entity.GridSize;
         var cells = new List<object>();
+        var hiddenCells = 0;
         for (var y = 0; y < grid.Y; y++)
             for (var x = 0; x < grid.X; x++)
             {
                 if (entity.cells[x, y] is not { } cell) continue;
+                if (cell.IsHidden)
+                {
+                    hiddenCells++;
+                    if (_compact) continue;
+                }
+                object? item = null;
+                if (!cell.IsHidden && cell.Item is { } revealed)
+                {
+                    item = new
+                    {
+                        type = CrystalItemType(revealed.GetType().Name),
+                        good = revealed.IsGood,
+                        footprint = new
+                        {
+                            col = revealed.Position.X,
+                            row = revealed.Position.Y,
+                            width = revealed.Size.X,
+                            height = revealed.Size.Y,
+                        },
+                    };
+                }
                 cells.Add(new
                 {
                     col = cell.X,
                     row = cell.Y,
                     hidden = cell.IsHidden,
                     hasItem = cell.Item is not null && !cell.IsHidden,
+                    item,
                 });
             }
         return new
@@ -120,9 +144,21 @@ public static class Snapshotter
             divinationsLeft = entity.DivinationCount,
             tool = entity.CrystalSphereTool.ToString().ToLowerInvariant(),
             finished = entity.IsFinished,
+            hiddenCells,
             cells,
         };
     }
+
+    private static string CrystalItemType(string runtimeType) => runtimeType switch
+    {
+        "CrystalSphereCardReward" => "card_reward",
+        "CrystalSphereCurse" => "curse",
+        "CrystalSphereGold" => "gold",
+        "CrystalSpherePotion" => "potion",
+        "CrystalSphereRelic" => "relic",
+        _ => runtimeType.Replace("CrystalSphere", "", StringComparison.Ordinal)
+            .ToLowerInvariant(),
+    };
 
     private static object GameOverSnapshot(string phase)
     {
@@ -236,10 +272,26 @@ public static class Snapshotter
             {
                 id = p.Id.Entry,
                 amount = p.Amount,
-                description = SafeText(p.Description),
+                description = PowerDescription(p),
             }).ToArray();
         }
         catch { return []; }
+    }
+
+    // Power descriptions have the same split as cards: Description is the
+    // static catalog text, while SmartDescription carries live values such
+    // as Amount. The GUI fills both the power-specific dynamic variables and
+    // the common amount/icon variables before rendering.
+    private static string PowerDescription(PowerModel power)
+    {
+        try
+        {
+            var description = power.SmartDescription;
+            power.DynamicVars.AddTo(description);
+            description.Add("Amount", power.Amount);
+            return SafeText(description);
+        }
+        catch { return SafeText(power.Description); }
     }
 
     // Draw contents are sorted so the snapshot can't leak draw order.
@@ -458,12 +510,19 @@ public static class Snapshotter
         var holders = screen is null ? null : Screens.CardHolders(screen);
         if (holders is null || holders.Count == 0)
             return new { phase, available = false };
+        var cardViews = new List<object>(holders.Count);
+        for (var i = 0; i < holders.Count; i++)
+        {
+            if (holders[i].CardModel is not { } card)
+                return new { phase, available = false };
+            cardViews.Add(RewardCardView(card, i));
+        }
 
         return new
         {
             phase,
             player = FooterView(),
-            cards = holders.Select((h, i) => RewardCardView(h.CardModel, i)).ToArray(),
+            cards = cardViews.ToArray(),
             // Non-card choices (skip, trade offers, …) — target of `skip`.
             alternatives = Screens.ExtraOptions(screen!)
                 .Select((o, i) => new
@@ -553,30 +612,55 @@ public static class Snapshotter
         var rs = RunManager.Instance?.DebugOnlyGetState();
         if (rs is null) return new { phase, available = false };
 
-        return new
+        var points = rs.Map is { } map ? AllMapPoints(map) : [];
+        var snapshot = new Dictionary<string, object?>
         {
-            phase,
-            act = rs.CurrentActIndex,
-            seed = rs.Rng?.StringSeed ?? "",
-            player = FooterView(),
-            current = rs.CurrentMapCoord is { } c ? new[] { c.col, c.row } : null,
-            next = NextPoints(rs).Select(MapPointView).ToArray(),
+            ["phase"] = phase,
+            ["act"] = rs.CurrentActIndex,
+            ["seed"] = rs.Rng?.StringSeed ?? "",
+            ["player"] = FooterView(),
+            ["current"] = rs.CurrentMapCoord is { } c ? new[] { c.col, c.row } : null,
+            ["next"] = NextPoints(rs).Select(MapPointView).ToArray(),
             // The act graph is the biggest repeat in the protocol — compact
             // callers keep `next` and re-request the full view when routing.
-            graph = _compact ? null
-                : rs.Map is { } map
-                    ? AllMapPoints(map).Select(MapPointView).ToArray()
-                    : [],
+            ["graph"] = _compact ? null : points.Select(MapPointView).ToArray(),
         };
+
+        // Quest markers can sit anywhere in the next act, not necessarily
+        // on a currently reachable node. Keep compact graph elision, but
+        // retain just the marked node(s) when an effect such as Spoils Map
+        // makes them decision-relevant. Omit the field entirely otherwise.
+        var marked = points.Where(p => MapMarkers(p).Length > 0)
+            .Select(MapPointView)
+            .ToArray();
+        if (marked.Length > 0) snapshot["marked"] = marked;
+        return snapshot;
     }
 
     // Shared by obs.next and obs.graph so the two views can't drift.
-    private static object MapPointView(MegaCrit.Sts2.Core.Map.MapPoint p) => new
+    private static object MapPointView(MegaCrit.Sts2.Core.Map.MapPoint p)
     {
-        col = p.coord.col,
-        row = p.coord.row,
-        type = p.PointType.ToString().ToLowerInvariant(),
-    };
+        var view = new Dictionary<string, object?>
+        {
+            ["col"] = p.coord.col,
+            ["row"] = p.coord.row,
+            ["type"] = p.PointType.ToString().ToLowerInvariant(),
+        };
+        var markers = MapMarkers(p);
+        if (markers.Length > 0) view["markers"] = markers;
+        return view;
+    }
+
+    private static string[] MapMarkers(MegaCrit.Sts2.Core.Map.MapPoint point)
+    {
+        try
+        {
+            return point.Quests.Select(q => q.Id.Entry)
+                .OrderBy(id => id, StringComparer.Ordinal)
+                .ToArray();
+        }
+        catch { return []; }
+    }
 
     // BFS over the act map from its start points. The final act's second
     // boss hangs off the map without a child edge — include it explicitly.
@@ -641,6 +725,7 @@ public static class Snapshotter
             title = SafeText(ev.Title),
             description = SafeText(ev.Description),
             finished = ev.IsFinished,
+            fakeMerchant = ev is FakeMerchant fake ? FakeMerchantView(fake) : null,
             options = (ev.CurrentOptions ?? []).Select((o, i) => new
             {
                 idx = i,
@@ -650,6 +735,33 @@ public static class Snapshotter
                 chosen = o.WasChosen,
                 proceed = o.IsProceed,
             }).ToArray(),
+        };
+    }
+
+    // FAKE_MERCHANT is an event-backed shop, so it has no normal shop
+    // snapshot. Surface the inventory (and the Foul Potion gate) while the
+    // event is active so an agent can make the same decision as the GUI.
+    private static object FakeMerchantView(FakeMerchant fake)
+    {
+        var owner = fake.Owner;
+        var inventory = fake.Inventory;
+        return new
+        {
+            available = inventory is not null,
+            canFight = owner?.PotionSlots.Any(p => p?.Id.Entry == "FOUL_POTION") == true,
+            relics = (inventory?.RelicEntries ?? [])
+                .Select((entry, i) => new
+                {
+                    idx = i,
+                    model = entry.Model?.Id.Entry,
+                    title = entry.Model is { } relic ? SafeText(relic.Title) : null,
+                    description = entry.Model is { } described
+                        ? SafeText(described.DynamicDescription)
+                        : null,
+                    cost = entry.Cost,
+                    stocked = entry.IsStocked,
+                    affordable = entry.EnoughGold,
+                }).ToArray(),
         };
     }
 
@@ -697,6 +809,15 @@ public static class Snapshotter
         try
         {
             if (s.IsEmpty) return "";
+            // Card rendering injects these vars before formatting; power/
+            // potion texts arrive without them and icon formatters otherwise
+            // fail the whole string. AddObj is idempotent for existing vars.
+            try
+            {
+                s.AddObj("energyPrefix", "");
+                s.AddObj("singleStarIcon", "[star]");
+            }
+            catch { }
             var text = s.GetFormattedText();
             // The host's GetFormattedText finalizer degrades hard failures
             // to the entry key; a key echo means the entry doesn't exist —
@@ -845,6 +966,13 @@ public static class Snapshotter
             var chooseHolders = Screens.CardHolders(choose);
             if (chooseHolders is null || chooseHolders.Count == 0)
                 return new { phase, available = false };
+            var chooseCards = new List<object>(chooseHolders.Count);
+            for (var i = 0; i < chooseHolders.Count; i++)
+            {
+                if (chooseHolders[i].CardModel is not { } card)
+                    return new { phase, available = false };
+                chooseCards.Add(SelectCardView(card, i, false));
+            }
             return new
             {
                 phase,
@@ -853,7 +981,7 @@ public static class Snapshotter
                 min = 1,
                 max = 1,
                 cancelable = Screens.ChooseSkipEnabled(choose),
-                cards = chooseHolders.Select((h, i) => SelectCardView(h.CardModel, i, false)).ToArray(),
+                cards = chooseCards.ToArray(),
             };
         }
 
@@ -897,7 +1025,7 @@ public static class Snapshotter
             max = prefs.MaxSelect,
             selected = selected.Select(c => c.Id.Entry).ToArray(),
             cards = hand.ActiveHolders.Select((h, i) =>
-                HandCardView(h.CardNode?.Model.Id.Entry, h.CardNode?.Model.IsUpgraded ?? false, i))
+                HandCardView(h.CardNode?.Model?.Id.Entry, h.CardNode?.Model?.IsUpgraded ?? false, i))
                 .ToArray(),
         };
     }

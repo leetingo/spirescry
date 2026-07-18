@@ -342,6 +342,178 @@ def c1():
     to_menu()
 
 
+# ---------- A: action regressions ----------
+
+@case("A1 treasure relic can be followed by skip")
+def a1():
+    d = to_map(seed=PARITY_SEED)
+    treasure = next(p for p in d["graph"] if p["type"] == "treasure")
+    run("cheat", "goto", str(treasure["col"]), str(treasure["row"]))
+    bridge.wait_phase("treasure")
+
+    for _ in range(10):
+        d = obs()
+        if d.get("relics"):
+            break
+        time.sleep(0.2)
+    assert d.get("relics"), "treasure chest never offered a relic"
+
+    run("pick-relic", str(d["relics"][0]["idx"]))
+    d = obs()
+    if d.get("phase") == "treasure":
+        status, result = http("POST", "/step", {"action": "skip", "args": {}})
+        assert status == 200 and result.get("ok") is True, \
+            f"skip after pick-relic was permanently rejected: {status} {result}"
+    bridge.wait_phase("map")
+    to_menu()
+
+
+@case("A2 combat reward slots are claimable exactly once")
+def a2():
+    into_combat(seed=PARITY_SEED)
+    import parity
+    parity.kill_current_combat()
+    d = bridge.wait_phase("rewards")
+    reward = next(r for r in d["rewards"] if r["type"] == "gold")
+    gold_before = d["player"]["gold"]
+
+    status, result = http("POST", "/step", {
+        "action": "pick-reward", "args": {"idx": reward["idx"]}
+    })
+    assert status == 200 and result.get("ok") is True, result
+    d = obs()
+    assert d["player"]["gold"] == gold_before + reward["amount"], \
+        f"gold reward applied incorrectly: {gold_before} -> {d['player']['gold']}"
+
+    status, result = http("POST", "/step", {
+        "action": "pick-reward", "args": {"idx": reward["idx"]}
+    })
+    assert status == 400 and result.get("err") == "bad_index", \
+        f"consumed reward slot was claimable twice: {status} {result}"
+    assert obs()["player"]["gold"] == gold_before + reward["amount"], \
+        "repeat reward claim changed gold"
+    to_menu()
+
+
+@case("A3 upgraded same-model card can be played precisely")
+def a3():
+    into_combat(seed="CIUPGRADEDPLAY")
+    run("cheat", "card", "STRIKE_IRONCLAD")
+    run("cheat", "card-upgraded", "STRIKE_IRONCLAD")
+    run("cheat", "card-upgraded", "STRIKE_IRONCLAD")
+    d = obs()
+    target = alive_enemy(d)["id"]
+
+    def copies(snapshot, upgraded):
+        return sum(c["model"] == "STRIKE_IRONCLAD"
+                   and c["upgraded"] is upgraded for c in snapshot["hand"])
+
+    base_before = copies(d, False)
+    upgraded_before = copies(d, True)
+    assert base_before > 0 and upgraded_before >= 2, d["hand"]
+
+    status, result = http("POST", "/step", {
+        "action": "play",
+        "args": {"model": "STRIKE_IRONCLAD+", "target": target},
+    })
+    assert status == 200 and result.get("ok") is True, \
+        f"could not select upgraded copy: {status} {result}"
+    d = obs()
+    assert copies(d, True) == upgraded_before - 1, "upgraded copy stayed in hand"
+    assert copies(d, False) == base_before, "MODEL+ played an unupgraded copy"
+
+    # Unsuffixed MODEL deterministically means an unupgraded, unmodified
+    # copy; identical copies resolve by stable hand order.
+    status, result = http("POST", "/step", {
+        "action": "play",
+        "args": {"model": "STRIKE_IRONCLAD", "target": target},
+    })
+    assert status == 200 and result.get("ok") is True, result
+    d = obs()
+    assert copies(d, False) == base_before - 1, "base MODEL did not play a base copy"
+    assert copies(d, True) == upgraded_before - 1, "base MODEL played an upgraded copy"
+    to_menu()
+
+
+@case("A4 Foul Potion can be redeemed only at a merchant")
+def a4():
+    d = to_map(seed=PARITY_SEED)
+
+    def cheat_potion(model):
+        status, result = http("POST", "/step", {
+            "action": "cheat", "args": {"name": "potion", "id": model},
+        })
+        assert status == 200 and result.get("ok") is True, \
+            f"could not procure {model}: {status} {result}"
+
+    cheat_potion("FOUL_POTION")
+    foul = next(p for p in obs()["player"]["potions"]
+                if p["model"] == "FOUL_POTION")
+
+    shop = next(p for p in d["graph"] if p["type"] == "shop")
+    run("cheat", "goto", str(shop["col"]), str(shop["row"]))
+    d = bridge.wait_phase("shop")
+    gold_before = d["gold"]
+    status, result = http("POST", "/step", {
+        "action": "potion-use", "args": {"slot": foul["slot"]},
+    })
+    assert status == 200 and result.get("ok") is True, \
+        f"Foul Potion merchant redemption failed: {status} {result}"
+    d = obs()
+    gained = d["gold"] - gold_before
+    assert gained > 0, f"Foul Potion awarded no gold: {gold_before} -> {d['gold']}"
+    assert f"[blue]{gained}[/blue]" in foul["description"], \
+        f"Foul Potion awarded {gained}, inconsistent with its description: {foul}"
+    assert not any(p["slot"] == foul["slot"] for p in d["player"]["potions"]), \
+        "redeemed Foul Potion stayed in its belt slot"
+
+    cheat_potion("ENERGY_POTION")
+    energy = next(p for p in obs()["player"]["potions"]
+                  if p["model"] == "ENERGY_POTION")
+    status, result = http("POST", "/step", {
+        "action": "potion-use", "args": {"slot": energy["slot"]},
+    })
+    assert status == 400 and result.get("err") == "not_playable", \
+        f"ordinary potion got the wrong merchant gate: {status} {result}"
+    assert "merchant" in result.get("msg", "").lower(), result
+    assert any(p["slot"] == energy["slot"] for p in obs()["player"]["potions"]), \
+        "rejected ordinary potion left its belt slot"
+    to_menu()
+
+
+@case("A5 malformed numeric fields never default to zero")
+def a5():
+    to_menu()
+    for value in ("10", 2**31, -1):
+        status, result = http("POST", "/step", {
+            "action": "new-run",
+            "args": {"character": "IRONCLAD", "ascension": value},
+        })
+        assert status == 400 and result.get("err") == "bad_request", \
+            f"invalid ascension {value!r} launched a run: {status} {result}"
+        assert obs()["phase"] == "main_menu", "invalid ascension mutated the run"
+
+    d = to_map(seed=PARITY_SEED)
+    run("cheat", "gold", "1000")
+    shop = next(p for p in d["graph"] if p["type"] == "shop")
+    run("cheat", "goto", str(shop["col"]), str(shop["row"]))
+    d = bridge.wait_phase("shop")
+    card = next(c for c in d["cards"] if c["stocked"])
+    gold_before = d["gold"]
+
+    for value, code in (("0", "bad_request"), (2**31, "bad_request"), (-1, "bad_index")):
+        status, result = http("POST", "/step", {
+            "action": "buy", "args": {"kind": "card", "idx": value},
+        })
+        assert status == 400 and result.get("err") == code, \
+            f"invalid buy idx {value!r} acted as slot zero: {status} {result}"
+        d = obs()
+        assert d["gold"] == gold_before, "invalid buy idx spent gold"
+        current = next(c for c in d["cards"] if c["idx"] == card["idx"])
+        assert current["stocked"], "invalid buy idx purchased a card"
+    to_menu()
+
+
 # ---------- K: cheats ----------
 
 @case("K1 cheat surface grafts real state")
@@ -357,6 +529,146 @@ def k1():
     assert p["deck"].get("STRIKE_IRONCLAD+", 0) >= 1, \
         f"card-upgraded cheat: {p['deck']}"
     assert p["deck"].get("BASH", 0) >= 2, f"card cheat: {p['deck']}"
+    to_menu()
+
+
+# ---------- I: information snapshots ----------
+
+@case("I3 power descriptions track their live amounts")
+def i3():
+    launch(character="REGENT", seed="CIPOWERDESC")
+    run("proceed")
+    d = bridge.wait_phase("map")
+    node = next(p for p in d["next"] if p["type"] == "monster")
+    run("map-move", str(node["col"]), str(node["row"]))
+    bridge.wait_phase("combat")
+
+    def power(model):
+        return next(p for p in obs()["you"]["powers"] if p["id"] == model)
+
+    def next_turn():
+        run("cheat", "heal", ok=True)
+        run("end-turn")
+        for _ in range(20):
+            d = obs()
+            if d.get("phase") == "combat" and d.get("side") == "player":
+                return
+            time.sleep(0.3)
+        raise AssertionError("player turn never returned")
+
+    # Exact QA regressions: the static prose says 3/25, while upgraded
+    # cards apply larger live values. The snapshot must render those values.
+    run("cheat", "card-upgraded", "BLACK_HOLE")
+    run("play", "BLACK_HOLE+")
+    black_hole = power("BLACK_HOLE_POWER")
+    assert black_hole["amount"] == 4, black_hole
+    assert "[blue]4[/blue]" in black_hole["description"], black_hole
+
+    next_turn()
+    run("cheat", "card-upgraded", "ROYALTIES")
+    run("play", "ROYALTIES+")
+    royalties = power("ROYALTIES_POWER")
+    assert royalties["amount"] > 25, royalties
+    assert f"[blue]{royalties['amount']}[/blue]" in royalties["description"], royalties
+
+    # A normal stacking power must update on the later turn too.
+    next_turn()
+    run("cheat", "card", "RUPTURE")
+    run("play", "RUPTURE")
+    first = power("RUPTURE_POWER")
+    assert first["amount"] == 1 and "[blue]1[/blue]" in first["description"], first
+    next_turn()
+    run("cheat", "card", "RUPTURE")
+    run("play", "RUPTURE")
+    stacked = power("RUPTURE_POWER")
+    assert stacked["amount"] == 2 and "[blue]2[/blue]" in stacked["description"], stacked
+    to_menu()
+
+
+@case("I4 compact crystal reveals decisions without dumping the board")
+def i4():
+    to_map(seed="CICRYSTALINFO")
+    run("cheat", "event", "CRYSTAL_SPHERE")
+    d = bridge.wait_phase("event")
+    option = next(o for o in d["options"] if not o["locked"])
+    run("option", str(option["idx"]))
+    full = bridge.wait_phase("crystal_sphere")
+
+    compact = run("obs", "--compact")
+    width, height = full["grid"]["width"], full["grid"]["height"]
+    total_cells = width * height
+    assert len(compact["cells"]) < total_cells, \
+        f"compact crystal dumped the raw board: {len(compact['cells'])} cells"
+    assert compact["hiddenCells"] == sum(c["hidden"] for c in full["cells"]), compact
+
+    # Exercise the real dig seam and spread the finite divinations around
+    # the board until a reward/danger footprint is exposed.
+    preferred = [(0, 0), (width - 1, height - 1), (0, height - 1),
+                 (width - 1, 0), (width // 2, height // 2)]
+    item = None
+    while full["divinationsLeft"] > 0:
+        hidden = {(c["col"], c["row"]): c for c in full["cells"] if c["hidden"]}
+        coord = next((p for p in preferred if p in hidden), next(iter(hidden)))
+        before_left = full["divinationsLeft"]
+        before_hidden = sum(c["hidden"] for c in full["cells"])
+        run("map-move", str(coord[0]), str(coord[1]))
+        for _ in range(20):
+            full = obs()
+            if full.get("divinationsLeft", before_left) < before_left:
+                break
+            time.sleep(0.1)
+        assert full["divinationsLeft"] == before_left - 1, full
+        assert sum(c["hidden"] for c in full["cells"]) < before_hidden, full
+        compact = run("obs", "--compact")
+        assert len(compact["cells"]) < total_cells, compact
+        item = next((c.get("item") for c in full["cells"] if c.get("item")), None)
+        if item:
+            break
+
+    assert item and item.get("type"), f"no revealed cell exposed item identity: {full}"
+    footprint = item.get("footprint")
+    assert footprint and footprint["width"] > 0 and footprint["height"] > 0, item
+    for key in ("col", "row"):
+        assert key in footprint, item
+    compact_item = next((c.get("item") for c in compact["cells"] if c.get("item")), None)
+    assert compact_item == item, compact
+    to_menu()
+
+
+@case("I5 Spoils Map marks its next-act treasure node")
+def i5():
+    d = to_map(seed="CISPOILSMAP")
+    run("cheat", "card", "SPOILS_MAP")
+    d = obs()
+    assert "marked" not in d, d
+    assert all("markers" not in point for point in d["graph"]), d["graph"]
+    assert "marked" not in run("obs", "--compact")
+
+    import parity
+    boss = next(p for p in d["graph"] if p["type"] == "boss")
+    run("cheat", "goto", str(boss["col"]), str(boss["row"]), ok=True)
+    bridge.wait_phase("combat", timeout=30)
+    parity.kill_current_combat()
+    bridge.wait_phase("rewards")
+    run("proceed")
+    for _ in range(60):
+        d = obs()
+        if d.get("phase") == "map" and d.get("act") == 1:
+            break
+        time.sleep(0.5)
+    assert d.get("act") == 1, d
+
+    marked = d.get("marked")
+    assert marked and len(marked) == 1, d
+    treasure = marked[0]
+    assert treasure["markers"] == ["SPOILS_MAP"], treasure
+    in_graph = next(p for p in d["graph"]
+                    if p["col"] == treasure["col"] and p["row"] == treasure["row"])
+    assert in_graph["markers"] == ["SPOILS_MAP"], in_graph
+
+    compact = run("obs", "--compact")
+    assert compact.get("marked") == marked, compact
+    assert compact["graph"] is None, compact
     to_menu()
 
 

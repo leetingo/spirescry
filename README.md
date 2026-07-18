@@ -67,6 +67,11 @@ Errors ride on 4xx/5xx as `{"ok": false, "err": "<code>", "msg": "..."}`
 with codes that say what to change (`bad_phase`, `not_enough_energy`,
 `bad_target`, `not_ready`, …).
 
+`play` uses the same exact card specifiers as compact pile counts:
+`MODEL` selects an unmodified base copy, `MODEL+` an upgraded copy, and
+`@ENCHANTMENT` / `!AFFLICTION` select those variants; otherwise-identical
+copies resolve by their stable order in the hand.
+
 **Event-driven waits.** Every snapshot carries a monotonic `rev`. Changes
 bump it from the engine's own C# events (action executor, combat manager,
 overlay stack) plus a per-tick phase diff as the safety net; a `/step`
@@ -86,6 +91,12 @@ side on stderr; both stamp the same UTC clock, so the two logs line up.
 `build.sh` boots keep their output in `$TMPDIR/spirescry-host.log`
 (engine-headless: `spirescry-headless.log`), foreground included; the
 previous boot's log survives at `.log.1`.
+
+The pure host always records why it exits: clean process shutdowns,
+SIGINT/SIGTERM/SIGHUP/SIGQUIT, boot failures, and unhandled managed
+exceptions (with their stack). No process can log after an untrappable
+SIGKILL or an OOM-kill; in those cases an abruptly truncated log plus the
+operating system's process/pressure records are the available evidence.
 
 ## Three ways to run, one bridge
 
@@ -127,7 +138,7 @@ picks), and text comes from tables extracted out of your local install's
   clicks a cell, `option 0/1` picks the divination tool).
 - **Reproducibility**: `new-run --seed --ascension`.
 - **Dev cheats** for single-point verification:
-  `cheat goto|gold|hp|heal|wound-enemies|event|card|card-upgraded|relic`
+  `cheat goto|gold|hp|heal|wound-enemies|event|card|card-upgraded|potion|relic`
   — jump anywhere on the act map, end fights fast, force any event room
   by model id, graft cards and relics into the run (state reconstruction
   after a host fault). No full-run replay needed to test one phase.
@@ -141,6 +152,8 @@ picks), and text comes from tables extracted out of your local install's
 python3 tests/e2e.py --boot   # the pre-merge suite against a self-booted
                               # host (port 7779): boot/protocol/lifecycle/
                               # combat/cheat cases + the act-1 loop
+python3 tests/host_exit.py    # force signal + unhandled-exception exits and
+                              # assert that the host log keeps the evidence
 python3 tests/eventsweep.py   # force + exercise all 57 events (minutes)
 ```
 
