@@ -237,11 +237,12 @@ internal static class HeadlessBoot
     }
 
     // Act 4 maps can contain treasure points, but the engine constructs a
-    // TreasureRoom with CurrentActIndex and its constructor only accepts the
-    // three normal-act loot tiers (0..2). The GUI build avoids that invalid
-    // combination elsewhere; the headless map action reaches it directly
-    // and faults without ever entering the room. Use the last real tier for
-    // later acts while preserving the engine's normal room-entry action.
+    // TreasureRoom with CurrentActIndex and its constructor only accepts
+    // 0..2. The argument is validation-only in the current game build:
+    // treasure gold and relic rarity are generated later from run state/RNG,
+    // so clamping does not select a different loot tier. Use the highest
+    // accepted value for later acts while preserving normal room entry and
+    // the real reward path.
     private static void PatchAct4TreasureRooms()
     {
         var createRoom = typeof(RunManager).GetMethod(
@@ -250,7 +251,7 @@ internal static class HeadlessBoot
         if (createRoom is null)
             throw new MissingMethodException(typeof(RunManager).FullName, "CreateRoom");
         _harmony!.Patch(createRoom, prefix: Local(nameof(CreateRoomPrefix)));
-        HostLog.Info("clamping post-Act-3 treasure rooms to the final loot tier");
+        HostLog.Info("clamping post-Act-3 treasure rooms past the constructor guard");
     }
 
     private static bool CreateRoomPrefix(

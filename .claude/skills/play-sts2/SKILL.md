@@ -14,11 +14,11 @@ the complete play surface.
 
 ## CLI pre-flight
 
-Before `health` or **any verb**, run this once in the shell that will play.
-It resolves the `spirescry` executable currently on `PATH`, compares its
-SHA-256 with this checkout's release CLI (falling back to a byte comparison
-when no SHA-256 tool is installed), and installs a shell wrapper for the
-verified choice. Rerun it after rebuilding or redeploying the CLI.
+Before `health` or **any verb**, run this once and record its single stdout
+line as the command word for this play session. It resolves the `spirescry`
+executable currently on `PATH` and compares its SHA-256 with this checkout's
+release CLI (falling back to a byte comparison when no SHA-256 tool is
+installed). Rerun it after rebuilding or redeploying the CLI.
 
 ```sh
 spirescry_preflight() {
@@ -58,30 +58,30 @@ spirescry_preflight() {
     fi
 
     if [ "$same_cli" -eq 1 ]; then
-        SPIRESCRY_CLI="$path_cli"
+        printf '%s\n' spirescry
     else
-        SPIRESCRY_CLI="$repo_cli"
         if [ -n "$path_cli" ]; then
             echo "spirescry pre-flight: PATH CLI differs from repo release; using $repo_cli (run ./build.sh deploy-cli before relying on PATH again)" >&2
         else
             echo "spirescry pre-flight: no PATH CLI; using $repo_cli" >&2
         fi
+        printf '%s\n' "$repo_cli"
     fi
-    export SPIRESCRY_CLI
 }
 
-if spirescry_preflight; then
-    spirescry() { "$SPIRESCRY_CLI" "$@"; }
-else
+if ! spirescry_preflight; then
     echo "spirescry pre-flight failed: stop and fix the CLI before playing" >&2
     return 1 2>/dev/null || false
 fi
 ```
 
-A matching PATH CLI produces no warning and runs normally. A missing or
-stale PATH CLI automatically uses the repository release binary; a missing
-repository release binary is the hard stop because there is nothing trusted
-to compare or run.
+Use that exact output in place of the `spirescry` command word in **every**
+later command, including commands run by fresh shells. If it prints
+`spirescry`, the PATH copy matches and every example below runs verbatim,
+without warnings or extra per-command work. If it prints an absolute path,
+quote that path as one command word for every later verb; this bypasses a
+missing or stale PATH copy across shell boundaries. A missing repository
+release binary is the hard stop because there is nothing trusted to run.
 
 ## Boot
 

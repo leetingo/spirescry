@@ -165,6 +165,24 @@ process_snapshot() {
     return 2
 }
 
+# The command may legitimately change in-place when a launcher shell execs
+# dotnet. Process start time does not, so keep it as the launch identity that
+# survives that transition and detects a recycled PID running the same command.
+process_start_identity() {
+    local identity identity_status
+    identity=""
+    if identity="$(ps -p "$1" -o lstart= 2>&1)"; then
+        identity="$(printf '%s\n' "$identity" | sed -E 's/^[[:space:]]+//')"
+        [ -n "$identity" ] || return 2
+        printf '%s\n' "$identity"
+        return 0
+    else
+        identity_status=$?
+    fi
+    [ "$identity_status" = 1 ] && return 1
+    return 2
+}
+
 process_state() {
     local state state_status
     state=""
@@ -273,21 +291,53 @@ launch_host() {
     step "launch host (bridge port $STS2_AGENT_PORT, log $log)"
     nohup dotnet "$HOST_DLL" > "$log" 2>&1 &
     host_pid=$!
+    host_start_status=0
+    host_start_identity="$(process_start_identity "$host_pid")" || host_start_status=$?
     host_snapshot_status=0
     host_snapshot="$(process_snapshot "$host_pid")" || host_snapshot_status=$?
+    host_start_confirm_status=0
+    host_start_confirm="$(process_start_identity "$host_pid")" || host_start_confirm_status=$?
     [ "$(process_state "$host_pid")" = live ] \
+        && [ "$host_start_status" = 0 ] \
+        && [ "$host_start_confirm_status" = 0 ] \
+        && [ "$host_start_identity" = "$host_start_confirm" ] \
         && [ "$host_snapshot_status" = 0 ] \
         && is_this_host_snapshot "$host_snapshot" || \
         die "launched host PID $host_pid could not be identified"
-    wait_bridge 30 "$log"
+    # wait_bridge calls die on deadline. Run it in a subshell so launch_host
+    # can still reclaim the exact child it started before returning failure.
+    if ! (wait_bridge 30 "$log"); then
+        timeout_start_status=0
+        timeout_start_identity="$(process_start_identity "$host_pid")" || timeout_start_status=$?
+        timeout_snapshot_status=0
+        timeout_snapshot="$(process_snapshot "$host_pid")" || timeout_snapshot_status=$?
+        timeout_state="$(process_state "$host_pid")"
+        if [ "$timeout_state" = unknown ] \
+            || { [ "$timeout_state" = live ] \
+                && { [ "$timeout_start_status" != 0 ] \
+                    || [ "$timeout_snapshot_status" != 0 ]; }; }; then
+            die "bridge timed out and host PID $host_pid cannot be inspected safely"
+        elif [ "$timeout_state" = live ]; then
+            [ "$timeout_start_identity" = "$host_start_identity" ] || \
+                die "bridge timed out and host PID $host_pid start identity changed — refusing to signal it"
+            is_this_host_snapshot "$timeout_snapshot" || \
+                die "bridge timed out and PID $host_pid no longer belongs to this host"
+            stop_exact_process "$host_pid" "$timeout_snapshot" "timed-out host"
+        fi
+        return 1
+    fi
 
     # The child may still be the forked shell at the first ps sample and
     # exec dotnet a moment later without changing PID/start time. Persist
     # the stable, post-boot command so stop does not mistake that exec for
     # PID reuse.
+    booted_start_status=0
+    booted_start_identity="$(process_start_identity "$host_pid")" || booted_start_status=$?
     host_snapshot_status=0
     host_snapshot="$(process_snapshot "$host_pid")" || host_snapshot_status=$?
     [ "$(process_state "$host_pid")" = live ] \
+        && [ "$booted_start_status" = 0 ] \
+        && [ "$booted_start_identity" = "$host_start_identity" ] \
         && [ "$host_snapshot_status" = 0 ] \
         && is_this_host_snapshot "$host_snapshot" || \
         die "booted host PID $host_pid could not be identified"

@@ -781,6 +781,19 @@ def s2():
     to_menu()
 
 
+@case("S3 potion-use outside combat explains both supported contexts")
+def s3():
+    to_map(seed="CIPOTIONHINT")
+    status, result = http("POST", "/step", {
+        "action": "potion-use", "args": {"slot": 0},
+    })
+    assert status == 400 and result.get("err") == "bad_phase", result
+    message = result.get("msg", "").lower()
+    assert "combat" in message, result
+    assert "foul potion" in message and "merchant" in message, result
+    to_menu()
+
+
 @case("W1 skip: card reward and treasure walk away clean")
 def w1():
     d = into_combat(seed="CISKIP")

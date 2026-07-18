@@ -63,6 +63,9 @@ switch (exitTrailTest)
         thread.Start();
         thread.Join();
         return 99;
+    case "hung-main-thread":
+        Thread.Sleep(Timeout.Infinite);
+        return 98;
 }
 
 // Park; the bridge listens on its own threads. Trappable termination signals

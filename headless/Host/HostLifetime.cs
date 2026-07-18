@@ -2,14 +2,20 @@ using System.Runtime.InteropServices;
 
 namespace Spirescry.Host;
 
-// Owns the host's process-wide last-gasp diagnostics. Signal handlers only
-// request a graceful exit; the main thread writes the final shutdown record.
+// Owns the host's process-wide last-gasp diagnostics. The first signal asks
+// the main thread to exit gracefully; a repeated signal or expired deadline
+// writes the final record itself before forcing the process down.
 internal sealed class HostLifetime
 {
+    private static readonly TimeSpan ForcedShutdownDelay = TimeSpan.FromSeconds(2);
+
     private readonly ManualResetEventSlim _shutdown = new(false);
     private readonly List<PosixSignalRegistration> _signalRegistrations = new();
     private string? _trigger;
     private int _exitLogged;
+    private int _terminationRequests;
+    private int _forcedExitStarted;
+    private Timer? _forcedShutdownTimer;
 
     private HostLifetime()
     {
@@ -44,7 +50,15 @@ internal sealed class HostLifetime
             _signalRegistrations.Add(PosixSignalRegistration.Create(signal, context =>
             {
                 context.Cancel = true;
-                RequestShutdown($"signal {context.Signal}");
+                var trigger = $"signal {context.Signal}";
+                if (Interlocked.Increment(ref _terminationRequests) > 1)
+                {
+                    ForceShutdown($"repeated {trigger}", SignalExitCode(context.Signal));
+                    return;
+                }
+
+                RequestShutdown(trigger);
+                ArmForcedShutdown(trigger, SignalExitCode(context.Signal));
             }));
         }
         catch (PlatformNotSupportedException)
@@ -59,6 +73,36 @@ internal sealed class HostLifetime
         Interlocked.CompareExchange(ref _trigger, trigger, null);
         _shutdown.Set();
     }
+
+    private void ArmForcedShutdown(string trigger, int exitCode)
+    {
+        var timer = new Timer(
+            _ => ForceShutdown($"timeout after {trigger}", exitCode),
+            null,
+            ForcedShutdownDelay,
+            Timeout.InfiniteTimeSpan);
+        if (Interlocked.CompareExchange(ref _forcedShutdownTimer, timer, null) is not null)
+            timer.Dispose();
+    }
+
+    private void ForceShutdown(string trigger, int exitCode)
+    {
+        if (Interlocked.Exchange(ref _forcedExitStarted, 1) != 0) return;
+
+        Interlocked.Exchange(ref _exitLogged, 1);
+        HostLog.Info($"forced-shutdown: {trigger}");
+        Console.Error.Flush();
+        Environment.Exit(exitCode);
+    }
+
+    private static int SignalExitCode(PosixSignal signal) => signal switch
+    {
+        PosixSignal.SIGHUP => 129,
+        PosixSignal.SIGINT => 130,
+        PosixSignal.SIGQUIT => 131,
+        PosixSignal.SIGTERM => 143,
+        _ => 1,
+    };
 
     private void OnCancelKeyPress(object? sender, ConsoleCancelEventArgs e)
     {

@@ -1674,8 +1674,14 @@ public static class Dispatcher
 
     private static DispatchResult PotionUse(JsonElement args)
     {
-        if (PhaseDetector.Current() != Phase.Shop)
+        var phase = PhaseDetector.Current();
+        if (phase != Phase.Shop)
+        {
+            if (CombatManager.Instance is not { IsInProgress: true })
+                return DispatchResult.Reject(RejectionCodes.BadPhase,
+                    "potion-use is available in combat; Foul Potion can also be redeemed at a merchant");
             return CombatVerb("potion-use", args);
+        }
         if (!TryGetInt(args, "slot", out var slot))
             return DispatchResult.Reject(RejectionCodes.BadRequest, "missing args.slot");
         if (RequireRunContext(

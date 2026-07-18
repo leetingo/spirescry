@@ -33,3 +33,6 @@ jobs:
 
       - name: Run build stop tests
         run: tests/build_stop_test.sh
+
+      - name: Run play skill pre-flight tests
+        run: tests/play_skill_preflight_test.sh

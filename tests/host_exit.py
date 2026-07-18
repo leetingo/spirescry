@@ -116,6 +116,56 @@ def signal_shutdown(sig):
         log.close()
 
 
+def hung_main_thread_forced_shutdown():
+    proc, log = launch("hung-main-thread")
+    try:
+        wait_for_line(proc, log, "bridge listening")
+
+        # The first signal is cancelled so the host can shut down gracefully,
+        # but this test mode deliberately leaves the main thread unable to
+        # observe that request.
+        proc.send_signal(signal.SIGTERM)
+        time.sleep(0.25)
+        assert proc.poll() is None, (
+            "first SIGTERM did not preserve the graceful-shutdown window",
+            proc.returncode,
+            log_text(log),
+        )
+
+        # A repeated termination request must not be cancelled forever.
+        proc.send_signal(signal.SIGTERM)
+        proc.wait(timeout=5)
+        text = log_text(log)
+        assert proc.returncode == 143, (proc.returncode, text)
+        assert "forced-shutdown" in text, text
+        assert last_log_line(text).endswith(
+            "forced-shutdown: repeated signal SIGTERM"
+        ), text
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+        log.close()
+
+
+def hung_main_thread_timeout_forced_shutdown():
+    proc, log = launch("hung-main-thread")
+    try:
+        wait_for_line(proc, log, "bridge listening")
+        proc.send_signal(signal.SIGTERM)
+        proc.wait(timeout=5)
+        text = log_text(log)
+        assert proc.returncode == 143, (proc.returncode, text)
+        assert last_log_line(text).endswith(
+            "forced-shutdown: timeout after signal SIGTERM"
+        ), text
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+        log.close()
+
+
 def unhandled_exception():
     proc, log = launch("unhandled-thread")
     try:
@@ -148,6 +198,13 @@ def main():
             lambda sig=sig: signal_shutdown(sig),
         )
         for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP, signal.SIGQUIT)
+    )
+    checks.append(("hung_main_thread_forced_shutdown", hung_main_thread_forced_shutdown))
+    checks.append(
+        (
+            "hung_main_thread_timeout_forced_shutdown",
+            hung_main_thread_timeout_forced_shutdown,
+        )
     )
     checks.append(("unhandled_exception", unhandled_exception))
     failures = 0
