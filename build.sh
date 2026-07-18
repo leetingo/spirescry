@@ -279,10 +279,21 @@ launch_host() {
         && [ "$host_snapshot_status" = 0 ] \
         && is_this_host_snapshot "$host_snapshot" || \
         die "launched host PID $host_pid could not be identified"
+    wait_bridge 30 "$log"
+
+    # The child may still be the forked shell at the first ps sample and
+    # exec dotnet a moment later without changing PID/start time. Persist
+    # the stable, post-boot command so stop does not mistake that exec for
+    # PID reuse.
+    host_snapshot_status=0
+    host_snapshot="$(process_snapshot "$host_pid")" || host_snapshot_status=$?
+    [ "$(process_state "$host_pid")" = live ] \
+        && [ "$host_snapshot_status" = 0 ] \
+        && is_this_host_snapshot "$host_snapshot" || \
+        die "booted host PID $host_pid could not be identified"
     pidtmp="$(mktemp "${pidfile}.XXXXXX")"
     printf '%s\n%s\n' "$host_pid" "$host_snapshot" > "$pidtmp"
     mv -f "$pidtmp" "$pidfile"
-    wait_bridge 30 "$log"
 }
 
 build_mod() {
@@ -439,16 +450,23 @@ stop_game() {
 verify() {
     kh="${TMPDIR:-/tmp}/spirescry-parity-host.json"
     ke="${TMPDIR:-/tmp}/spirescry-parity-engine.json"
+    parity_seed="${SPIRESCRY_PARITY_SEED:-SPIRECI1}"
     stop_game
 
-    step "verify: host boot"
+    step "verify: host boot (seed $parity_seed)"
     launch_host
-    python3 tests/parity.py --keys-out "$kh" || { stop_game; die "host parity run failed"; }
+    python3 tests/parity.py --seed "$parity_seed" --keys-out "$kh" || {
+        stop_game
+        die "host parity run failed"
+    }
     stop_game
 
-    step "verify: engine-headless boot"
+    step "verify: engine-headless boot (seed $parity_seed)"
     launch_headless
-    python3 tests/parity.py --keys-out "$ke" || { stop_game; die "engine parity run failed"; }
+    python3 tests/parity.py --seed "$parity_seed" --keys-out "$ke" || {
+        stop_game
+        die "engine parity run failed"
+    }
     stop_game
 
     step "verify: cross-mode key sets"
