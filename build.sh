@@ -181,13 +181,15 @@ deploy_mod() {
 deploy_cli() {
     [ -x cli/target/release/spirescry ] || die "cli not built; run: ./build.sh cli"
     mkdir -p "$SPIRESCRY_CLI_BIN"
+    # macOS AMFI SIGKILLs linker-signed binaries copied across paths
+    # (exit 137, silent). Replace the linker signature on the release
+    # artifact before copying so the installed binary remains valid and
+    # byte-identical — the play skill's pre-flight can then compare hashes.
+    if [ "$(uname -s)" = "Darwin" ] && command -v codesign >/dev/null 2>&1; then
+        codesign --force --sign - cli/target/release/spirescry >/dev/null 2>&1 || true
+    fi
     step "deploy cli → $SPIRESCRY_CLI_BIN/spirescry"
     cp cli/target/release/spirescry "$SPIRESCRY_CLI_BIN/spirescry"
-    # macOS amfi SIGKILLs linker-signed binaries copied across paths
-    # (exit 137, silent). Re-sign in place so the new path validates.
-    if [ "$(uname -s)" = "Darwin" ] && command -v codesign >/dev/null 2>&1; then
-        codesign --force --sign - "$SPIRESCRY_CLI_BIN/spirescry" >/dev/null 2>&1 || true
-    fi
     ok "deployed"
 }
 

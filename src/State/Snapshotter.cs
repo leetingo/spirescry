@@ -4,6 +4,7 @@ using MegaCrit.Sts2.Core.Context;
 using MegaCrit.Sts2.Core.Entities.Cards;
 using MegaCrit.Sts2.Core.Entities.Creatures;
 using MegaCrit.Sts2.Core.Entities.Players;
+using MegaCrit.Sts2.Core.Events.Custom.CrystalSphereEvent.CrystalSphereItems;
 using MegaCrit.Sts2.Core.Localization;
 using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.MonsterMoves.Intents;
@@ -20,6 +21,7 @@ using MegaCrit.Sts2.Core.Nodes.Screens.Overlays;
 using MegaCrit.Sts2.Core.Rewards;
 using MegaCrit.Sts2.Core.Rooms;
 using MegaCrit.Sts2.Core.Runs;
+using CrystalItem = MegaCrit.Sts2.Core.Events.Custom.CrystalSphereEvent.CrystalSphereItem;
 using CrystalMinigame = MegaCrit.Sts2.Core.Events.Custom.CrystalSphereEvent.CrystalSphereMinigame;
 
 namespace Spirescry.State;
@@ -115,7 +117,7 @@ public static class Snapshotter
                 {
                     item = new
                     {
-                        type = CrystalItemType(revealed.GetType().Name),
+                        type = CrystalItemType(revealed),
                         good = revealed.IsGood,
                         footprint = new
                         {
@@ -148,15 +150,14 @@ public static class Snapshotter
         };
     }
 
-    private static string CrystalItemType(string runtimeType) => runtimeType switch
+    private static string CrystalItemType(CrystalItem item) => item switch
     {
-        "CrystalSphereCardReward" => "card_reward",
-        "CrystalSphereCurse" => "curse",
-        "CrystalSphereGold" => "gold",
-        "CrystalSpherePotion" => "potion",
-        "CrystalSphereRelic" => "relic",
-        _ => runtimeType.Replace("CrystalSphere", "", StringComparison.Ordinal)
-            .ToLowerInvariant(),
+        CrystalSphereCardReward => "card_reward",
+        CrystalSphereCurse => "curse",
+        CrystalSphereGold => "gold",
+        CrystalSpherePotion => "potion",
+        CrystalSphereRelic => "relic",
+        _ => "unknown",
     };
 
     private static object GameOverSnapshot(string phase)
@@ -283,11 +284,33 @@ public static class Snapshotter
         try
         {
             var description = power.SmartDescription;
-            power.DynamicVars.AddTo(description);
             description.Add("Amount", power.Amount);
+            AddPowerContext(power, description);
+            power.DynamicVars.AddTo(description);
             return SafeText(description);
         }
         catch { return SafeText(power.Description); }
+    }
+
+    // Mirrors the context variables PowerModel.HoverTips supplies to smart
+    // descriptions. Amount and model-specific DynamicVars are handled by
+    // the caller; these names describe the creatures around the power.
+    private static void AddPowerContext(PowerModel power, LocString description)
+    {
+        var owner = power.Owner;
+        description.Add("OnPlayer", owner.IsPlayer);
+        var playerCount = owner.CombatState?.Players.Count ?? 1;
+        description.Add("IsMultiplayer", playerCount > 1);
+        description.Add("PlayerCount", playerCount);
+        var ownerTitle = owner.Player?.Character?.Title ?? owner.Monster?.Title;
+        if (ownerTitle is not null)
+            description.Add("OwnerName", ownerTitle);
+        else
+            description.Add("OwnerName", owner.Name);
+        if (power.Applier is { } applier)
+            description.Add("ApplierName", applier.Name);
+        if (power.Target is { } target)
+            description.Add("TargetName", target.Name);
     }
 
     // Draw contents are sorted so the snapshot can't leak draw order.

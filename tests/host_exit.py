@@ -3,6 +3,7 @@
 
 import os
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
@@ -15,9 +16,16 @@ HOST_DLL = os.path.join(
 )
 
 
+def unused_loopback_port():
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        return listener.getsockname()[1]
+
+
 def launch(exit_mode):
     env = os.environ.copy()
     env["STS2_HOST_EXIT_TRAIL_TEST"] = exit_mode
+    env["STS2_AGENT_PORT"] = str(unused_loopback_port())
     log = tempfile.TemporaryFile(mode="w+")
     proc = subprocess.Popen(
         ["dotnet", HOST_DLL],
@@ -35,7 +43,13 @@ def log_text(log):
     return log.read()
 
 
-def wait_for_line(proc, log, expected, timeout=5):
+def last_log_line(text):
+    lines = [line for line in text.splitlines() if line.strip()]
+    assert lines, "host log was empty"
+    return lines[-1]
+
+
+def wait_for_line(proc, log, expected, timeout=20):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         text = log_text(log)
@@ -52,10 +66,12 @@ def wait_for_line(proc, log, expected, timeout=5):
 def clean_shutdown():
     proc, log = launch("clean")
     try:
+        wait_for_line(proc, log, "bridge listening")
         proc.wait(timeout=5)
         text = log_text(log)
         assert proc.returncode == 0, (proc.returncode, text)
         assert "shutdown: clean self-test" in text, text
+        assert last_log_line(text).endswith("shutdown: clean self-test"), text
     finally:
         if proc.poll() is None:
             proc.kill()
@@ -66,10 +82,12 @@ def clean_shutdown():
 def process_exit_shutdown():
     proc, log = launch("process-exit")
     try:
+        wait_for_line(proc, log, "bridge listening")
         proc.wait(timeout=5)
         text = log_text(log)
         assert proc.returncode == 0, (proc.returncode, text)
         assert "shutdown: process exit" in text, text
+        assert last_log_line(text).endswith("shutdown: process exit"), text
     finally:
         if proc.poll() is None:
             proc.kill()
@@ -80,7 +98,7 @@ def process_exit_shutdown():
 def signal_shutdown(sig):
     proc, log = launch("wait")
     try:
-        wait_for_line(proc, log, "exit-trail test ready")
+        wait_for_line(proc, log, "bridge listening")
         proc.send_signal(sig)
         proc.wait(timeout=5)
         text = log_text(log)
@@ -90,6 +108,7 @@ def signal_shutdown(sig):
             signal.SIGQUIT: ("shutdown: signal SIGQUIT", "shutdown: console ControlBreak"),
         }.get(sig, (f"shutdown: signal {signal.Signals(sig).name}",))
         assert any(line in text for line in expected), text
+        assert any(last_log_line(text).endswith(line) for line in expected), text
     finally:
         if proc.poll() is None:
             proc.kill()
@@ -100,6 +119,7 @@ def signal_shutdown(sig):
 def unhandled_exception():
     proc, log = launch("unhandled-thread")
     try:
+        wait_for_line(proc, log, "bridge listening")
         proc.wait(timeout=5)
         text = log_text(log)
         assert proc.returncode != 0, (proc.returncode, text)

@@ -373,24 +373,33 @@ def a2():
     import parity
     parity.kill_current_combat()
     d = bridge.wait_phase("rewards")
-    reward = next(r for r in d["rewards"] if r["type"] == "gold")
-    gold_before = d["player"]["gold"]
+    reward = next(r for r in d["rewards"] if r["type"] == "potion")
+    reward_idx = reward["idx"]
+    belt_before = {p["slot"]: p for p in d["player"]["potions"]}
 
     status, result = http("POST", "/step", {
-        "action": "pick-reward", "args": {"idx": reward["idx"]}
+        "action": "pick-reward", "args": {"idx": reward_idx}
     })
     assert status == 200 and result.get("ok") is True, result
-    d = obs()
-    assert d["player"]["gold"] == gold_before + reward["amount"], \
-        f"gold reward applied incorrectly: {gold_before} -> {d['player']['gold']}"
+    belt_after_first = obs()["player"]["potions"]
+    added = [p for p in belt_after_first if p["slot"] not in belt_before]
+    assert len(added) == 1, \
+        f"potion reward changed the belt by {len(added)} slots: {belt_before} -> {belt_after_first}"
+    potion_model = added[0]["model"]
+    model_count_before = sum(p["model"] == potion_model for p in belt_before.values())
+    assert sum(p["model"] == potion_model for p in belt_after_first) == model_count_before + 1, \
+        f"potion reward did not add exactly one {potion_model}: {belt_after_first}"
 
     status, result = http("POST", "/step", {
-        "action": "pick-reward", "args": {"idx": reward["idx"]}
+        "action": "pick-reward", "args": {"idx": reward_idx}
     })
     assert status == 400 and result.get("err") == "bad_index", \
         f"consumed reward slot was claimable twice: {status} {result}"
-    assert obs()["player"]["gold"] == gold_before + reward["amount"], \
-        "repeat reward claim changed gold"
+    belt_after_second = obs()["player"]["potions"]
+    assert belt_after_second == belt_after_first, \
+        f"repeat reward claim changed the belt: {belt_after_first} -> {belt_after_second}"
+    assert sum(p["model"] == potion_model for p in belt_after_second) == model_count_before + 1, \
+        f"repeat reward claim duplicated {potion_model}: {belt_after_second}"
     to_menu()
 
 
@@ -522,6 +531,77 @@ def a5():
     to_menu()
 
 
+@case("A6 Act 4 treasure entry completes without a map-action wedge", boot_only=True)
+def a6():
+    d = to_map(seed="CIACT4TREASURE")
+    import parity
+
+    # Dev-cheat only the long approach; the Act 4 transition and treasure
+    # entry below use the public rewards/map-move interfaces under test.
+    for next_act in range(1, 4):
+        boss = next(p for p in d["graph"] if p["type"] == "boss")
+        run("cheat", "goto", str(boss["col"]), str(boss["row"]), ok=True)
+        bridge.wait_phase("combat", timeout=30)
+        parity.kill_current_combat()
+        bridge.wait_phase("rewards")
+        run("proceed")
+        d = bridge.wait_until(
+            lambda snapshot: snapshot.get("phase") == "map"
+            and snapshot.get("act") == next_act,
+            timeout=30,
+            description=f"act {next_act + 1} map",
+        )
+
+    graph = d["graph"]
+    treasure = None
+    # The fixed Act 4 map does not start at its treasure. Use the dev jump
+    # to visit candidate row-above nodes until the public `next` view proves
+    # which one is its parent; the actual treasure entry remains map-move.
+    for target in (p for p in graph if p["type"] == "treasure"):
+        predecessors = [p for p in graph
+                        if p["row"] == target["row"] - 1
+                        and abs(p["col"] - target["col"]) <= 1
+                        and p["type"] != "unknown"]
+        predecessors.sort(key=lambda p: (
+            {"monster": 0, "elite": 0, "restsite": 1,
+             "shop": 2, "treasure": 3}.get(p["type"], 4),
+            abs(p["col"] - target["col"]),
+        ))
+        for predecessor in predecessors:
+            run("cheat", "goto", str(predecessor["col"]), str(predecessor["row"]), ok=True)
+            phase = bridge.wait_phase("combat", "rest_site", "shop", "treasure", timeout=30)["phase"]
+            if phase == "combat":
+                parity.kill_current_combat()
+                bridge.wait_phase("rewards")
+                run("proceed")
+            elif phase == "shop":
+                run("leave")
+            else:
+                run("proceed")
+            d = bridge.wait_phase("map")
+            if any(p["col"] == target["col"] and p["row"] == target["row"]
+                   for p in d["next"]):
+                treasure = target
+                break
+        if treasure:
+            break
+
+    assert treasure, "could not establish a reachable Act 4 treasure predecessor"
+    run("map-move", str(treasure["col"]), str(treasure["row"]))
+    d = bridge.wait_phase("treasure", timeout=12)
+    d = bridge.wait_until(
+        lambda snapshot: bool(snapshot.get("relics")),
+        timeout=5,
+        description="Act 4 treasure relic offer",
+    )
+    run("pick-relic", str(d["relics"][0]["idx"]))
+    if obs().get("phase") == "treasure":
+        run("skip")
+    bridge.wait_phase("map")
+    assert "wedge:" not in host_log(), "Act 4 treasure travel tripped the executor watchdog"
+    to_menu()
+
+
 # ---------- K: cheats ----------
 
 @case("K1 cheat surface grafts real state")
@@ -592,6 +672,24 @@ def i3():
     run("play", "RUPTURE")
     stacked = power("RUPTURE_POWER")
     assert stacked["amount"] == 2 and "[blue]2[/blue]" in stacked["description"], stacked
+    to_menu()
+
+
+@case("I6 monster smart power descriptions include their owner")
+def i6():
+    d = to_map(seed="CIPLOW")
+    boss = next(p for p in d["graph"] if p["type"] == "boss")
+    run("cheat", "goto", str(boss["col"]), str(boss["row"]), ok=True)
+    d = bridge.wait_phase("combat", timeout=30)
+    # Vantom's SLIPPERY_POWER uses the same OwnerName smart variable as
+    # PLOW_POWER, while this seed makes the public regression deterministic.
+    owner = next((enemy for enemy in d["enemies"]
+                  if any(power["id"] == "SLIPPERY_POWER" for power in enemy["powers"])), None)
+    assert owner, f"CIPLOW no longer selects the OwnerName boss: {d['enemies']}"
+    power = next(power for power in owner["powers"] if power["id"] == "SLIPPERY_POWER")
+    assert owner["title"] in power["description"], (owner, power)
+    assert f"[blue]{power['amount']}[/blue]" in power["description"], power
+    assert "{OwnerName}" not in power["description"], power
     to_menu()
 
 

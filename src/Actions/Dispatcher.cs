@@ -1425,17 +1425,17 @@ public static class Dispatcher
 
     private static DispatchResult Play(JsonElement args, CombatState state, Player player)
     {
-        if (!TryGetString(args, "model", out var model))
+        if (!TryGetString(args, "model", out var selector))
             return DispatchResult.Reject("bad_request", "missing args.model");
 
         var pcs = player.PlayerCombatState!;
         var card = pcs.Hand.Cards.FirstOrDefault(c =>
-            c != null && string.Equals(State.CardSpecifier.From(c), model, StringComparison.OrdinalIgnoreCase));
+            c != null && string.Equals(State.CardSpecifier.From(c), selector, StringComparison.OrdinalIgnoreCase));
         if (card is null)
         {
             var hand = string.Join(",", pcs.Hand.Cards.Where(c => c != null)
                 .Select(State.CardSpecifier.From));
-            return DispatchResult.Reject("bad_index", $"no '{model}' in hand [{hand}]");
+            return DispatchResult.Reject("bad_index", $"no '{selector}' in hand [{hand}]");
         }
 
         // The engine's own playability gate — Unplayable keyword, energy

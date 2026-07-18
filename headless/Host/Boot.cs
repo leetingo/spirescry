@@ -11,8 +11,11 @@
 
 using System.Reflection;
 using HarmonyLib;
+using MegaCrit.Sts2.Core.Map;
 using MegaCrit.Sts2.Core.Modding;
 using MegaCrit.Sts2.Core.Models;
+using MegaCrit.Sts2.Core.Rooms;
+using MegaCrit.Sts2.Core.Runs;
 using MegaCrit.Sts2.Core.Saves;
 using MegaCrit.Sts2.Core.TestSupport;
 using Spirescry.Bridge;
@@ -185,6 +188,7 @@ internal static class HeadlessBoot
         // that hangs on the first combat action is worse than not starting.
         PatchCmdWait();
         VerifyQueueWaitIlPatch();
+        PatchAct4TreasureRooms();
 
         // Cosmetic — a missing one loses a label or a particle, not liveness.
         try
@@ -210,6 +214,35 @@ internal static class HeadlessBoot
         {
             HostLog.Error("cosmetic patch failed", ex);
         }
+    }
+
+    // Act 4 maps can contain treasure points, but the engine constructs a
+    // TreasureRoom with CurrentActIndex and its constructor only accepts the
+    // three normal-act loot tiers (0..2). The GUI build avoids that invalid
+    // combination elsewhere; the headless map action reaches it directly
+    // and faults without ever entering the room. Use the last real tier for
+    // later acts while preserving the engine's normal room-entry action.
+    private static void PatchAct4TreasureRooms()
+    {
+        var createRoom = typeof(RunManager).GetMethod(
+            "CreateRoom", AllDeclared, null,
+            [typeof(RoomType), typeof(MapPointType), typeof(AbstractModel)], null);
+        if (createRoom is null)
+            throw new MissingMethodException(typeof(RunManager).FullName, "CreateRoom");
+        _harmony!.Patch(createRoom, prefix: Local(nameof(CreateRoomPrefix)));
+        HostLog.Info("clamping post-Act-3 treasure rooms to the final loot tier");
+    }
+
+    private static bool CreateRoomPrefix(
+        RunManager __instance,
+        MapPointType mapPointType,
+        ref AbstractRoom __result)
+    {
+        var actIndex = __instance.DebugOnlyGetState()?.CurrentActIndex ?? 0;
+        if (mapPointType != MapPointType.Treasure || actIndex <= 2)
+            return true;
+        __result = new TreasureRoom(2);
+        return false;
     }
 
     // ReattachPower's death fade calls Godot.Node.GetIndex(bool), an API

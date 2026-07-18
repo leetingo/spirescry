@@ -12,6 +12,77 @@ the complete play surface.
 `./build.sh` runs from the repo root — this file's real path
 (`readlink -f`) is `<repo>/.claude/skills/play-sts2/SKILL.md`.
 
+## CLI pre-flight
+
+Before `health` or **any verb**, run this once in the shell that will play.
+It resolves the `spirescry` executable currently on `PATH`, compares its
+SHA-256 with this checkout's release CLI (falling back to a byte comparison
+when no SHA-256 tool is installed), and installs a shell wrapper for the
+verified choice. Rerun it after rebuilding or redeploying the CLI.
+
+```sh
+spirescry_preflight() {
+    local repo_root repo_cli path_cli repo_hash path_hash same_cli
+    repo_root="$(git rev-parse --show-toplevel 2>/dev/null)" || {
+        echo "spirescry pre-flight: not inside the spirescry repository; stop" >&2
+        return 1
+    }
+    repo_cli="$repo_root/cli/target/release/spirescry"
+    if [ ! -x "$repo_cli" ]; then
+        echo "spirescry pre-flight: repo release CLI is missing; run (cd '$repo_root' && ./build.sh cli), then retry; do not run verbs" >&2
+        return 1
+    fi
+
+    # A fresh /bin/sh resolves PATH without seeing a wrapper or alias left
+    # behind by an earlier pre-flight in this interactive shell.
+    path_cli="$(PATH="$PATH" /bin/sh -c 'command -v spirescry' 2>/dev/null || true)"
+    case "$path_cli" in
+        /*) ;;
+        "") ;;
+        *) path_cli="$PWD/$path_cli" ;;
+    esac
+
+    same_cli=0
+    if [ -n "$path_cli" ] && [ -x "$path_cli" ]; then
+        if command -v shasum >/dev/null 2>&1; then
+            repo_hash="$(shasum -a 256 "$repo_cli" | awk '{print $1}')"
+            path_hash="$(shasum -a 256 "$path_cli" | awk '{print $1}')"
+            [ -n "$repo_hash" ] && [ "$repo_hash" = "$path_hash" ] && same_cli=1
+        elif command -v sha256sum >/dev/null 2>&1; then
+            repo_hash="$(sha256sum "$repo_cli" | awk '{print $1}')"
+            path_hash="$(sha256sum "$path_cli" | awk '{print $1}')"
+            [ -n "$repo_hash" ] && [ "$repo_hash" = "$path_hash" ] && same_cli=1
+        elif cmp -s "$repo_cli" "$path_cli"; then
+            same_cli=1
+        fi
+    fi
+
+    if [ "$same_cli" -eq 1 ]; then
+        SPIRESCRY_CLI="$path_cli"
+    else
+        SPIRESCRY_CLI="$repo_cli"
+        if [ -n "$path_cli" ]; then
+            echo "spirescry pre-flight: PATH CLI differs from repo release; using $repo_cli (run ./build.sh deploy-cli before relying on PATH again)" >&2
+        else
+            echo "spirescry pre-flight: no PATH CLI; using $repo_cli" >&2
+        fi
+    fi
+    export SPIRESCRY_CLI
+}
+
+if spirescry_preflight; then
+    spirescry() { "$SPIRESCRY_CLI" "$@"; }
+else
+    echo "spirescry pre-flight failed: stop and fix the CLI before playing" >&2
+    return 1 2>/dev/null || false
+fi
+```
+
+A matching PATH CLI produces no warning and runs normally. A missing or
+stale PATH CLI automatically uses the repository release binary; a missing
+repository release binary is the hard stop because there is nothing trusted
+to compare or run.
+
 ## Boot
 
 Run the host as a long-lived task you own (a background task or

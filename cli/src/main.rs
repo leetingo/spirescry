@@ -113,7 +113,8 @@ enum Cmd {
     /// Play an exact hand-card selector (MODEL, MODEL+, MODEL@ENCHANTMENT, MODEL!AFFLICTION)
     Play {
         /// Exact obs.hand selector; identical selectors resolve in hand order
-        model: String,
+        #[arg(value_name = "MODEL")]
+        selector: String,
         /// Enemy combat id (omit to auto-target a lone enemy)
         #[arg(long)]
         target: Option<u32>,
@@ -177,8 +178,8 @@ fn main() -> ExitCode {
             cheat_args(name, values).and_then(|args| client.step("cheat", args))
         }
         Cmd::MapMove { col, row } => client.step("map-move", json!({ "col": col, "row": row })),
-        Cmd::Play { model, target } => {
-            let mut args = json!({ "model": model });
+        Cmd::Play { selector, target } => {
+            let mut args = json!({ "model": selector });
             if let Some(t) = target {
                 args["target"] = json!(t);
             }
@@ -519,8 +520,8 @@ mod tests {
             Cli::try_parse_from(["spirescry", "play", "StrikeIronclad", "--target", "7"]).unwrap();
 
         match cli.cmd {
-            Cmd::Play { model, target } => {
-                assert_eq!(model, "StrikeIronclad");
+            Cmd::Play { selector, target } => {
+                assert_eq!(selector, "StrikeIronclad");
                 assert_eq!(target, Some(7));
             }
             _ => panic!("expected play command"),
@@ -566,6 +567,7 @@ mod tests {
         assert!(help.contains("@ENCHANTMENT"));
         assert!(help.contains("!AFFLICTION"));
         assert!(help.contains("hand order"));
+        assert!(help.contains("<MODEL>"));
     }
 
     #[test]
