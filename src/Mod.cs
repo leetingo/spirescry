@@ -1,3 +1,4 @@
+using System.Reflection;
 using Godot;
 using MegaCrit.Sts2.Core.Logging;
 using MegaCrit.Sts2.Core.Modding;
@@ -15,6 +16,28 @@ public static class Mod
     public const string Id = "spirescry";
     public const string Version = "0.1.0";
 
+    // Bumped whenever the bridge's request/response contract changes
+    // shape — the CLI's detector for a host it doesn't understand.
+    public const int ProtocolVersion = 2;
+
+    // The short git hash build.sh stamps via -p:SourceRevisionId (the
+    // SDK appends it to InformationalVersion after a '+'). The stamp's
+    // prefix distinguishes it from the SDK's automatic full git SHA.
+    public static string BuildHash { get; } = ReadBuildHash();
+
+    private static string ReadBuildHash()
+    {
+        const string stampPrefix = "spirescry.";
+        var info = typeof(Mod).Assembly
+            .GetCustomAttribute<AssemblyInformationalVersionAttribute>()
+            ?.InformationalVersion;
+        var plus = info?.IndexOf('+') ?? -1;
+        var metadata = plus >= 0 ? info![(plus + 1)..] : "";
+        return metadata.StartsWith(stampPrefix, StringComparison.Ordinal)
+            ? metadata[stampPrefix.Length..]
+            : "unknown";
+    }
+
     public static void Initialize()
     {
         Boot.Start();
@@ -28,10 +51,35 @@ public static class Mod
 // segfault the CLR — only the type name and Message are safe.
 internal static class SafeLog
 {
-    public static void Info(string msg) => Log.Info($"[{Mod.Id}] {msg}", 1);
+    public static void Info(string msg)
+    {
+        var line = $"[{Mod.Id}] {msg}";
+        try { Log.Info(line, 1); }
+        catch { Fallback(line); }
+    }
 
-    public static void Error(string context, Exception ex) =>
-        Log.Error($"[{Mod.Id}] {context}: {ex.GetType().Name}: {ex.Message}", 1);
+    public static void Error(string context, Exception ex)
+    {
+        var line = $"[{Mod.Id}] {context}: {ex.GetType().Name}: {ex.Message}";
+        try
+        {
+            Log.Error(line, 1);
+        }
+        catch
+        {
+            // Error reporting is on the recovery path and must never mask
+            // the original exception. The pure host can temporarily lose
+            // the engine logger after a model hook faults; stderr remains
+            // available in both host and game boots.
+            Fallback(line);
+        }
+    }
+
+    private static void Fallback(string line)
+    {
+        try { Console.Error.WriteLine(line); }
+        catch { /* no logging sink is worth failing the request */ }
+    }
 }
 
 internal static class Boot

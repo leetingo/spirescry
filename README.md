@@ -41,7 +41,11 @@ in the event stream, or rejected with a reason.
 **`GET /obs`** returns a phase-shaped snapshot. Combat gets you
 (hp/block/energy/powers), hand, enemies (hp/block/powers/intents with
 damage × hits), potions, and pile contents; every out-of-combat phase
-carries a `player` footer (hp, gold, potions, relics, deck); the map gets
+carries a `player` footer (hp, gold, potions, relics, relicStates, deck);
+`player.relics` remains the stable ID-string list while `relicStates` adds
+`{model, counter, usedUp, description}` (`description` is `null` in compact
+mode). Combat's `you.relics` carries `{model, counter}` so every-N counters
+are visible where they tick. The map gets
 reachable nodes, the whole act graph, and the run seed; `game_over`
 reports outcome / seed / hp / gold plus where the run ended: `actNumber`
 (1-based), `actFloor` (within the act), `mapCoord` (`{col, row}`), and
@@ -51,7 +55,12 @@ index) and `floor` (run-cumulative) stay for compatibility.
 `?compact=1` (CLI: `obs --compact`) elides the big repeats — no act
 graph, deck and combat piles as counts-by-model (`"STRIKE_IRONCLAD+": 2`
 = two upgraded copies), hand cards keep their numbers (`vars`) but drop
-the description prose — for agents that poll often.
+the description prose — for agents that poll often. `obs --decision`
+adds legal verbs derived from the targets in that exact snapshot and
+deduplicates card prose across every visible card surface. Each card has
+a stable `textKey` that includes upgrade, enchantment, and affliction;
+pass cached keys back as repeatable `--known-card <key>` flags to omit
+their prose without any process-global or read-order-dependent state.
 
 Phases: `main_menu`, `map`, `combat`, `event`, `shop`, `rest_site`,
 `treasure`, `rewards`, `card_reward`, `relic_reward`, `card_select`,
@@ -59,19 +68,66 @@ Phases: `main_menu`, `map`, `combat`, `event`, `shop`, `rest_site`,
 `overlay`/`unknown` for anything unmapped, carrying the overlay's type
 name so a stuck screen is diagnosable from `/obs` alone.
 
-**`POST /step`** takes `{"action": ..., "args": ...}`. Verbs: `new-run`,
+Shop inventory keeps `cost` as its original gold-price field and also
+exposes the clearer `price` alias. Card stock adds `playCost` and `starCost`;
+upgrade candidates keep the string `upgradedPreview` and add
+`upgradedPlayCost` / `upgradedStarCost` beside it.
+
+**`POST /step`** takes `{"action": ..., "args": ...}`. Add
+`"follow": <ms>` (CLI: `--follow [ms]`) to wait past acceptance until
+the engine queues and tracked async work settle, or until a new decision
+surface appears. The response distinguishes `outcome: settled`,
+`next_decision`, and `timeout`, and includes resolution events plus a fresh
+decision `obs`. GUI callbacks that do not return a task must also expose the
+same boundary across three consecutive frames; guard checks still happen
+atomically before dispatch. This is a bounded settlement signal for work the
+bridge can observe, not a claim that every opaque engine continuation has
+completed.
+Verbs: `new-run`,
 `abandon`, `option`, `proceed`, `map-move`, `pick-reward`, `pick-card`,
 `pick-relic`, `confirm`, `skip`, `buy`, `leave`, `play`, `end-turn`,
 `potion-use`, `potion-discard`, `cheat` — each valid in its own phase.
 Errors ride on 4xx/5xx as `{"ok": false, "err": "<code>", "msg": "..."}`
-with codes that say what to change (`bad_phase`, `not_enough_energy`,
-`bad_target`, `not_ready`, …).
+with a stable machine-readable vocabulary:
 
-Combat hand entries expose `selector`; `play` accepts that exact value, using
-the same card specifiers as compact deck and pile counts:
-`MODEL` selects an unmodified base copy, `MODEL+` an upgraded copy, and
-`@ENCHANTMENT` / `!AFFLICTION` select those variants; otherwise-identical
-copies resolve by their stable order in the hand.
+| Code | Meaning |
+| --- | --- |
+| `bad_request` | The verb or arguments are malformed or unsupported. |
+| `bad_phase` | The verb does not apply to the current phase. |
+| `bad_index` | An index or named item is absent from the current observation. |
+| `bad_target` | The requested map/combat target is not legal now. |
+| `bad_state` | The request needs another decision or state change; waiting alone cannot make this same request valid. |
+| `not_ready` | A transient engine/UI window; waiting and retrying can make the same request valid. |
+| `not_playable` | The chosen card, potion, relic, or option is currently prohibited by game rules. |
+| `not_enough_gold` | The purchase exceeds current gold. |
+| `not_enough_energy` | The card exceeds current energy. |
+| `not_enough_stars` | The card exceeds current stars. |
+| `run_exists` | `new-run` was requested while a run is already loaded. |
+| `stale_state` | `--if-rev` no longer matches; rescry before deciding. |
+| `external_change` | `--if-run` names a run that is no longer live. |
+| `resolution_partial` | An inline engine action faulted after observable state changed. |
+| `resolution_failed` | An inline engine action faulted before observable state changed. |
+| `not_found` | The HTTP route does not exist. |
+| `internal` | The bridge hit an invariant or unexpected implementation failure. |
+
+The CLI prints failures on stderr and exits `75` (`EX_TEMPFAIL`) only for
+`not_ready`; every other bridge rejection, local validation error, transport
+failure, or malformed response exits `1`. Success exits `0`. Callers should
+branch on the exit status, not parse the rendered error text.
+
+**Combat targets.** `play <model> --target <id>` and
+`potion-use <slot> --target <id>` take the combat ID shown on an enemy in the
+current observation. An enemy-targeted card or potion auto-targets when
+exactly one enemy is alive; with multiple living enemies an explicit target
+is required. Self, ally, and untargeted effects do not need an enemy ID.
+
+Health, observations, and step responses carry a `runId`: `none` between
+runs and a fresh token whenever the engine replaces its live `RunState`.
+Verbs accept optimistic guards, checked atomically with dispatch:
+`--if-rev <rev>` rejects with `stale_state` when the board moved since it
+was read, while `--if-run <id>` rejects with `external_change` when a GUI
+action or another agent replaced the run. Run swaps also ride the event
+stream as `run:<id>` / `run:none`.
 
 **Event-driven waits.** Every snapshot carries a monotonic `rev`. Changes
 bump it from the engine's own C# events (action executor, combat manager,
@@ -79,10 +135,22 @@ overlay stack) plus a per-tick phase diff as the safety net; a `/step`
 accepted without either (in-phase inline mutations — reward claims, shop
 buys) bumps it itself. `obs?since=` responses name the events behind the
 bump (`phase:map->combat`, `action:PlayCardAction`, `enqueued:...`,
-`step:buy`, `wedge:...`). No sleep-polling anywhere.
+`step:buy`, `wedge:...`). The server clamps `wait` to `0..60000` ms. Omitting
+`--wait` (or passing `0`) is a no-wait poll; pass a positive value explicitly
+when the caller should park for a change.
 
-**`GET /health`** adds live introspection: the currently executing engine
-action and its state, `executorStuckMs`, and per-queue depth/paused flags.
+The event log retains the latest 64 revision events. After a burst larger
+than that, an old `--since` still returns immediately with `changed: true`
+and the authoritative current observation, but `events` contains only the
+retained suffix and may not begin at `since + 1`. Treat it as a wake-up and
+diagnostic trail, not a durable replay log. No sleep-polling anywhere.
+
+**`GET /health`** returns identity and compatibility fields (`ok`, `mod`,
+`version`, `buildHash`, `protocolVersion`, and advertised verb/cheat
+`capabilities`), the current `phase`, `rev`, and `runId`, plus live executor
+diagnostics. `executor` is `null` or `ActionType:State`, `executorStuckMs` is
+the time spent on that same action, and each `queues` entry reports its
+`owner`, `depth`, and `paused` state.
 
 **Tracing a session.** `STS2_AGENT_HTTP_LOG=1` on the host makes the
 bridge log one line per request — verb, status, `rev` movement, wall
@@ -93,11 +161,22 @@ side on stderr; both stamp the same UTC clock, so the two logs line up.
 (engine-headless: `spirescry-headless.log`), foreground included; the
 previous boot's log survives at `.log.1`.
 
-The pure host always records why it exits: clean process shutdowns,
+The pure host also records why it exits: clean process shutdowns,
 SIGINT/SIGTERM/SIGHUP/SIGQUIT, boot failures, and unhandled managed
 exceptions (with their stack). No process can log after an untrappable
 SIGKILL or an OOM-kill; in those cases an abruptly truncated log plus the
 operating system's process/pressure records are the available evidence.
+
+**Diagnostic reconstruction.** `spirescry runlog > run.json` records the
+current run's seed and accepted bridge verbs; every entry is attributed to
+one `runId`. A recipe is complete only when every verb used follow, reached
+`settled` or `next_decision`, and recorded a state fingerprint. From a clean
+`main_menu` (`runId: none`), `spirescry replay run.json` re-drives that recipe
+with CAS guards and follow settlement, checking every recorded state
+fingerprint and stopping at the first divergence.
+This is a debugging aid, not authoritative replay recording: the output is
+explicitly a new reconstruction with its own `runId`, and its final state
+must never be attributed to the source run.
 
 ## Three ways to run, one bridge
 
@@ -109,6 +188,8 @@ operating system's process/pressure records are the available evidence.
 # 3. pure .NET host — no game binary, no Godot engine, no Steam
 ./build.sh headless-setup   # one-time: deps + IL patch + loc tables + build
 ./build.sh host
+# Keep the host attached to this terminal/task (still logs to $TMPDIR):
+./build.sh host --foreground
 
 ./build.sh stop             # stops whichever is running
 ```
@@ -121,6 +202,11 @@ deferred `ICardSelector`s, a virtual rewards flow). Same protocol either
 way — in host mode actions also resolve inline, so `/step` returns with
 the effect already applied.
 
+`host --foreground` execs the host in the invoking process instead of
+starting a background child. Use it in CI, sandboxes, and agent runners that
+reap detached children; its lifetime then matches the terminal or task, and
+its output is still copied to `$TMPDIR/spirescry-host.log`.
+
 Host-mode differences: saves don't persist (runs are test-mode), card
 pickers auto-resolve once max cards are picked (`confirm` covers partial
 picks), and text comes from tables extracted out of your local install's
@@ -131,18 +217,26 @@ picks), and text comes from tables extracted out of your local install's
 - **A full run, both boots**: Neow to the finale, victory or defeat —
   including the ascension-10 two-boss ending (the first boss exits back to
   the map; `obs.next` carries the second).
-- **Every event**: all 57 event models render and interact
-  (`tests/eventsweep.py` forces each one via `cheat event`).
+- **Every event**: all 57 event models render; every unlocked first-level
+  option is forced on a fresh copy and drained to completion
+  (`tests/eventsweep.py --all-options`).
+- **Every content atom**: 85 encounters resolve; all 593 cards are tried
+  in their owning character's combat (playable effects execute, legality
+  rejects stay clean); 65 potions are used; all 297 relic pickup hooks
+  run. These sweeps catch single-model host/stub faults; the combinatorial
+  card × relic × enemy space remains sampled by real runs.
 - **Every selection surface**: deck pickers (rest-site upgrade, shop
   removal, transforms), choose-a-card offers, mid-combat hand selects,
   Neow's card-pack bundles, the crystal-sphere minigame (`map-move`
   clicks a cell, `option 0/1` picks the divination tool).
 - **Reproducibility**: `new-run --seed --ascension`.
 - **Dev cheats** for single-point verification:
-  `cheat goto|gold|hp|heal|wound-enemies|event|card|card-upgraded|potion|relic`
-  — jump anywhere on the act map, end fights fast, force any event room
-  by model id, graft cards and relics into the run (state reconstruction
-  after a host fault). No full-run replay needed to test one phase.
+  `cheat goto|gold|hp|stars|energy|heal|wound-enemies|event|combat|card|card-upgraded|relic|potion|async-fault`
+  — jump anywhere on the act map, end fights fast, force any event or
+  encounter by model id, graft content into the run, or deliberately fault
+  tracked async work to verify the failure event stream. `models
+  card|relic|potion|event|encounter|character` enumerates the current
+  game build instead of baking ids into tests.
 
 ## Testing
 
@@ -151,17 +245,18 @@ picks), and text comes from tables extracted out of your local install's
                          # diffs the recorded snapshot key sets — same
                          # phase must expose the same keys in each
 python3 tests/e2e.py --boot   # the pre-merge suite against a self-booted
-                              # host (port 7779): boot/protocol/lifecycle/
-                              # combat/cheat cases + the act-1 loop
-python3 tests/host_exit.py    # force signal + unhandled-exception exits and
-                              # assert that the host log keeps the evidence
-python3 tests/eventsweep.py   # force + exercise all 57 events (minutes)
+                              # host (port 7779): every phase, verb, and
+                              # content atom; intentionally long-running
+python3 tests/e2e.py --boot --quick  # iteration loop: skip exhaustive M*,
+                                     # click the first option per event
+python3 tests/eventsweep.py --all-options  # event sweep alone (e2e E1)
+python3 tests/host_exit.py  # force clean/signal/unhandled host exits and
+                            # assert the final log evidence
 ```
 
 CI runs only the pure unit tests (`unit-tests.yml`, GitHub-hosted): the
 host is built from the game's non-distributable dlls, so the end-to-end
-suite stays local — **run `python3 tests/e2e.py --boot` before merging**
-(add `--sweep` after engine updates or event-related changes).
+suite stays local — **run `python3 tests/e2e.py --boot` before merging**.
 
 ## Build
 
@@ -184,7 +279,7 @@ Environment:
 | `STS2_AGENT_HOST`   | `127.0.0.1`            | CLI only (also `--host`) — the bridge always binds 127.0.0.1    |
 | `STS2_AGENT_LANG`   | `eng`                  | host only — locale for the extracted text tables                |
 | `STS2_HEADLESS_LIB` | `headless/build/lib`   | host only — patched dll + deps + loc tables                     |
-| `STS2_HOST_DEBUG`   | unset                  | host only — `1` prints first-chance exception stacks to stderr  |
+| `STS2_HOST_DEBUG`   | unset                  | host only — `1` prints first-chance exception stacks except known stub misses; `2` prints all |
 | `STS2_AGENT_HTTP_LOG` | unset                | mod/host — `1` logs each bridge request: verb, status, rev movement, wall time |
 
 ## Architecture
@@ -226,9 +321,10 @@ but not a hard memory barrier.
 
 ## Non-goals
 
-Remote access or auth (loopback only), multiplayer, replay recording, a
-TUI. For those, this project's bigger sibling exists; spirescry stays the
-minimal single-player agent interface.
+Remote access or auth (loopback only), multiplayer, authoritative replay
+recording or run-history recovery, a TUI. The runlog above is only a
+verified diagnostic recipe; spirescry remains the minimal single-player
+agent interface.
 
 ---
 

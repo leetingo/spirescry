@@ -14,8 +14,9 @@ public sealed class Response
     public static Response Json(object payload, int status = 200) =>
         new() { Status = status, Body = JsonSerializer.Serialize(payload) };
 
-    public static Response Error(string code, string msg, int status = 400) =>
-        Json(new { ok = false, err = code, msg }, status);
+    public static Response Error(
+        string code, string msg, int status = 400, string? runId = null) =>
+        Json(new { ok = false, err = code, msg, runId = runId ?? Signals.RunId }, status);
 }
 
 // Loopback-only HTTP server. No auth: the bridge binds 127.0.0.1
@@ -89,16 +90,20 @@ public sealed class HttpBridge
             resp = (req.HttpMethod, path) switch
             {
                 ("GET", "/health") => await Handlers.Health(),
+                ("GET", "/models") => await Handlers.Models(req.QueryString["kind"]),
+                ("GET", "/runlog") => await Handlers.GetRunLog(),
                 ("GET", "/obs") => await Handlers.Obs(
-                    req.QueryString["since"], req.QueryString["wait"], req.QueryString["compact"]),
+                    req.QueryString["since"], req.QueryString["wait"],
+                    req.QueryString["compact"], req.QueryString["decision"],
+                    req.QueryString.GetValues("known")),
                 ("POST", "/step") => await Handlers.Step(body),
-                _ => Response.Error("not_found", $"no route {req.HttpMethod} {path}", 404),
+                _ => Response.Error(RejectionCodes.NotFound, $"no route {req.HttpMethod} {path}", 404),
             };
         }
         catch (Exception ex)
         {
             SafeLog.Error("http handler error", ex);
-            resp = Response.Error("internal", ex.Message, 500);
+            resp = Response.Error(RejectionCodes.Internal, ex.Message, 500);
         }
         if (timer is not null)
             SafeLog.Info(

@@ -5,13 +5,18 @@ using MegaCrit.Sts2.Core.Entities.Cards;
 using MegaCrit.Sts2.Core.Entities.Creatures;
 using MegaCrit.Sts2.Core.Entities.Players;
 using MegaCrit.Sts2.Core.Events.Custom.CrystalSphereEvent.CrystalSphereItems;
+using MegaCrit.Sts2.Core.Events;
+using MegaCrit.Sts2.Core.HoverTips;
 using MegaCrit.Sts2.Core.Localization;
+using MegaCrit.Sts2.Core.Models.Events;
 using MegaCrit.Sts2.Core.Models;
+using MegaCrit.Sts2.Core.Models.Powers;
 using MegaCrit.Sts2.Core.MonsterMoves.Intents;
 using MegaCrit.Sts2.Core.Nodes;
 using MegaCrit.Sts2.Core.Nodes.Cards;
 using MegaCrit.Sts2.Core.Nodes.Cards.Holders;
 using MegaCrit.Sts2.Core.Nodes.Combat;
+using MegaCrit.Sts2.Core.Nodes.GodotExtensions;
 using MegaCrit.Sts2.Core.Nodes.Relics;
 using MegaCrit.Sts2.Core.Nodes.Rewards;
 using MegaCrit.Sts2.Core.Nodes.Rooms;
@@ -32,13 +37,24 @@ public static class Snapshotter
     // agents that poll often. Set per snapshot; safe as a static because
     // the pump runs one job at a time on the main thread.
     private static bool _compact;
+    private static bool _decision;
+    private static HashSet<string> _knownCardTexts = new(StringComparer.Ordinal);
+    private static HashSet<string> _emittedCardTexts = new(StringComparer.Ordinal);
 
     // Must be called on the main thread.
     public static object ForCurrentPhase() => ForCurrentPhase(false);
 
-    public static object ForCurrentPhase(bool compact)
+    public static object ForCurrentPhase(bool compact) => ForCurrentPhase(compact, false, []);
+
+    public static object ForCurrentPhase(
+        bool compact, bool decision, IEnumerable<string> knownCardTexts)
     {
-        _compact = compact;
+        _compact = compact || decision;
+        _decision = decision;
+        // Per-request scope: repeated GETs are identical. The caller owns
+        // cross-request caching explicitly through ?known= / --known-card.
+        _knownCardTexts = knownCardTexts.ToHashSet(StringComparer.Ordinal);
+        _emittedCardTexts = new HashSet<string>(StringComparer.Ordinal);
         var phase = PhaseDetector.Current();
         return phase switch
         {
@@ -70,9 +86,10 @@ public static class Snapshotter
     // Bundle offers: pick one pack of cards (Neow's Scroll Boxes, …).
     private static object BundleSelectSnapshot(string phase)
     {
+        var gui = RunMode.IsHeadless ? null : Screens.Top<NChooseABundleSelectionScreen>();
         var bundles = RunMode.IsHeadless
             ? HeadlessBundle.Bundles
-            : Screens.Top<NChooseABundleSelectionScreen>() is { } screen
+            : gui is { } screen
                 ? Screens.Bundles(screen)
                 : null;
         if (bundles is null || bundles.Count == 0) return new { phase, available = false };
@@ -80,6 +97,12 @@ public static class Snapshotter
         {
             phase,
             player = FooterView(),
+            confirmable = gui is not null
+                && Reflect.Field<NClickableControl>(gui, "_confirmButton") is { IsEnabled: true },
+            cancelable = RunMode.IsHeadless
+                ? HeadlessBundle.IsActive
+                : gui is not null
+                    && Reflect.Field<NClickableControl>(gui, "_skipButton") is { IsEnabled: true },
             bundles = bundles.Select((b, i) => new
             {
                 idx = i,
@@ -211,7 +234,10 @@ public static class Snapshotter
             hp = creature is null ? null : new[] { creature.CurrentHp, creature.MaxHp },
             gold = player.Gold,
             potions = PotionViews(player),
+            // Keep the original ID list stable for existing agents; rich,
+            // mutable state is additive so a schema upgrade is not required.
             relics = player.Relics.Select(r => r.Id.Entry).ToArray(),
+            relicStates = player.Relics.Select(RelicStateView).ToArray(),
             deck = DeckView(player),
         };
     }
@@ -241,6 +267,22 @@ public static class Snapshotter
             .ToDictionary(g => g.Key, g => g.Count());
     }
 
+    // The GUI inventory badge's number: DisplayAmount, shown only for
+    // relics that opt in. null = this relic keeps no visible count.
+    private static int? RelicCounter(RelicModel r) =>
+        r.ShowCounter ? r.DisplayAmount : null;
+
+    // A relic's whole observable story: its count, whether a one-shot
+    // already fired, and the text — the pickup offer was the only place
+    // an agent could ever read it.
+    private static object RelicStateView(RelicModel r) => new
+    {
+        model = r.Id.Entry,
+        counter = RelicCounter(r),
+        usedUp = r.IsUsedUp,
+        description = _compact ? null : SafeText(r.DynamicDescription),
+    };
+
     // Empty slots and queued/consumed potions are omitted; `slot` is what
     // potion-use / potion-discard take.
     private static object[] PotionViews(Player player)
@@ -259,6 +301,28 @@ public static class Snapshotter
             });
         }
         return result.ToArray();
+    }
+
+    // Channeled orbs in slot order (index 0 evokes first) plus the slot
+    // count — the Defect's whole economy. null for characters with no orb
+    // capacity, so other snapshots stay clean.
+    private static object? OrbViews(PlayerCombatState pcs)
+    {
+        var q = pcs.OrbQueue
+            ?? throw new InvalidOperationException("player orb queue is unavailable");
+        if (q.Capacity == 0) return null;
+        return new
+        {
+            slots = q.Capacity,
+            channeled = q.Orbs
+                .Where(o => o != null)
+                .Select(o => (object)new
+                {
+                    id = o.Id.Entry,
+                    passive = o.PassiveVal,
+                    evoke = o.EvokeVal,
+                }).ToArray(),
+        };
     }
 
     private static object[] PowerViews(Creature c)
@@ -283,11 +347,15 @@ public static class Snapshotter
     {
         try
         {
-            var description = power.SmartDescription;
-            description.Add("Amount", power.Amount);
-            AddPowerContext(power, description);
-            power.DynamicVars.AddTo(description);
-            return SafeText(description);
+            var rendered = SafeText(power.SmartDescription, description =>
+            {
+                description.Add("Amount", power.Amount);
+                AddPowerContext(power, description);
+                power.DynamicVars.AddTo(description);
+            });
+            return string.IsNullOrEmpty(rendered)
+                ? SafeText(power.Description)
+                : rendered;
         }
         catch { return SafeText(power.Description); }
     }
@@ -341,27 +409,47 @@ public static class Snapshotter
         if (rs is null || inv is null) return new { phase, available = false };
         var player = LocalContext.GetMe(rs);
 
-        object CardEntry(MegaCrit.Sts2.Core.Entities.Merchant.MerchantCardEntry e, int i) => new
+        // `cost` stays the gold amount for wire compatibility; `price`
+        // names it explicitly. Cards add playCost/starCost so their combat
+        // economy is visible before purchase without changing old clients.
+        object CardEntry(MegaCrit.Sts2.Core.Entities.Merchant.MerchantCardEntry e, int i)
         {
-            idx = i,
-            model = e.CreationResult?.Card?.Id.Entry,
-            title = e.CreationResult?.Card?.Title,
-            description = e.CreationResult?.Card is { } c ? CardDescription(c) : null,
-            cost = e.Cost,
-            stocked = e.IsStocked,
-            affordable = e.EnoughGold,
-        };
+            var card = e.CreationResult?.Card;
+            var showText = card is not null && ShouldShowCardText(card);
+            return new
+            {
+                idx = i,
+                model = card?.Id.Entry,
+                title = card?.Title,
+                textKey = card is null ? null : CardTextKey(card),
+                description = showText ? CardDescription(card!) : null,
+                cost = e.Cost,
+                price = e.Cost,
+                playCost = card?.EnergyCost.Canonical,
+                starCost = card is null ? null : StarCost(card),
+                stocked = e.IsStocked,
+                affordable = e.EnoughGold,
+                purchasable = e.IsStocked && e.EnoughGold,
+            };
+        }
         // Model goes null once the entry is purchased — like CardEntry,
         // render the sold-out tile instead of throwing.
-        object StockEntry(string? model, LocString? title, MegaCrit.Sts2.Core.Entities.Merchant.MerchantEntry e, int i) => new
+        object StockEntry(string? model, LocString? title, MegaCrit.Sts2.Core.Entities.Merchant.MerchantEntry e, int i)
         {
-            idx = i,
-            model,
-            title = SafeText(title),
-            cost = e.Cost,
-            stocked = e.IsStocked,
-            affordable = e.EnoughGold,
-        };
+            var potionHasRoom = e is not MegaCrit.Sts2.Core.Entities.Merchant.MerchantPotionEntry
+                || player?.HasOpenPotionSlots == true;
+            return new
+            {
+                idx = i,
+                model,
+                title = SafeText(title),
+                cost = e.Cost,
+                price = e.Cost,
+                stocked = e.IsStocked,
+                affordable = e.EnoughGold,
+                purchasable = e.IsStocked && e.EnoughGold && potionHasRoom,
+            };
+        }
         return new
         {
             phase,
@@ -374,7 +462,14 @@ public static class Snapshotter
             potions = inv.PotionEntries
                 .Select((e, i) => StockEntry(e.Model?.Id.Entry, e.Model?.Title, e, i)).ToArray(),
             cardRemoval = inv.CardRemovalEntry is { } cr
-                ? new { cost = cr.Cost, used = cr.Used, affordable = cr.EnoughGold }
+                ? new
+                {
+                    cost = cr.Cost,
+                    price = cr.Cost,
+                    used = cr.Used,
+                    affordable = cr.EnoughGold,
+                    purchasable = !cr.Used && cr.EnoughGold,
+                }
                 : null,
         };
     }
@@ -387,6 +482,8 @@ public static class Snapshotter
         {
             phase,
             player = FooterView(),
+            proceedAvailable = RunMode.IsHeadless
+                || NRestSiteRoom.Instance?.ProceedButton is { Visible: true },
             options = options.Select((o, i) => new
             {
                 idx = i,
@@ -398,36 +495,14 @@ public static class Snapshotter
         };
     }
 
-    // relics[] stays empty until the chest is opened (pick-relic opens it).
-    // One chest per room instance: DoNormalRewards grants the chest's
-    // gold, so re-running it on later reads (the relic offer empties once
-    // picking ends) would mint gold on every obs.
-    private static TreasureRoom? _openedChest;
-
+    // Observation never opens the chest. In headless mode pick-relic/skip
+    // run the room rewards once; the synchronizer then makes the offer
+    // visible here just as the GUI's chest-open callback does.
     private static object TreasureSnapshot(string phase)
     {
         var room = NRun.Instance?.TreasureRoom;
         var opened = room is not null && Screens.ChestOpened(room);
         var sync = RunManager.Instance?.TreasureRoomRelicSynchronizer;
-
-        // Headless: no chest button to click — open the chest through the
-        // room model the first time the agent looks at it.
-        if (RunMode.IsHeadless
-            && RunManager.Instance?.DebugOnlyGetState()?.CurrentRoom is TreasureRoom tr)
-        {
-            if (!ReferenceEquals(_openedChest, tr)
-                && sync is { CurrentRelics: null or { Count: 0 } })
-            {
-                try
-                {
-                    tr.DoNormalRewards().GetAwaiter().GetResult();
-                    tr.DoExtraRewardsIfNeeded().GetAwaiter().GetResult();
-                    _openedChest = tr;
-                }
-                catch (Exception ex) { SafeLog.Error("headless treasure open", ex); }
-            }
-            opened = opened || ReferenceEquals(_openedChest, tr);
-        }
 
         var relics = sync?.CurrentRelics;
         return new
@@ -435,6 +510,8 @@ public static class Snapshotter
             phase,
             // Headless has no chest-flag node; offered relics == open chest.
             chestOpened = opened || relics is { Count: > 0 },
+            proceedAvailable = RunMode.IsHeadless
+                || NRun.Instance?.TreasureRoom?.ProceedButton is { Visible: true },
             player = FooterView(),
             relics = (relics ?? []).Select(RelicView).ToArray(),
         };
@@ -560,33 +637,72 @@ public static class Snapshotter
         catch { return SafeText(card.Description); }
     }
 
+    // A caller-cache key for exactly the prose-bearing card variant. Card
+    // model alone is insufficient: upgrades, enchantments, and afflictions
+    // all change the rendered rules text while leaving Id.Entry unchanged.
+    private static string CardTextKey(CardModel card) => DecisionProjection.CardTextKey(
+        card.Id.Entry,
+        card.CurrentUpgradeLevel,
+        card.Enchantment?.Id.Entry,
+        card.Affliction?.Id.Entry);
+
+    private static bool ShouldShowCardText(CardModel card, bool compactElides = false)
+    {
+        if (!_decision) return !compactElides || !_compact;
+        var key = CardTextKey(card);
+        return !_knownCardTexts.Contains(key) && _emittedCardTexts.Add(key);
+    }
+
+    private static bool CanPlayCard(CardModel card)
+    {
+        try { return card.CanPlay(out _, out _); }
+        catch { return false; }
+    }
+
     // Shared per-card views — both boots build their snapshots through
     // these, so the shapes can't drift between modes (tests/parity.py
     // compares the key sets).
-    private static object RewardCardView(CardModel c, int i) => new
+    private static object RewardCardView(CardModel c, int i)
     {
-        idx = i,
-        model = c.Id.Entry,
-        title = c.Title,
-        cost = c.EnergyCost.Canonical,
-        starCost = StarCost(c),
-        type = c.Type.ToString().ToLowerInvariant(),
-        rarity = c.Rarity.ToString().ToLowerInvariant(),
-        description = CardDescription(c),
-    };
+        var showText = ShouldShowCardText(c);
+        return new
+        {
+            idx = i,
+            model = c.Id.Entry,
+            title = c.Title,
+            cost = c.EnergyCost.Canonical,
+            starCost = StarCost(c),
+            type = c.Type.ToString().ToLowerInvariant(),
+            rarity = c.Rarity.ToString().ToLowerInvariant(),
+            textKey = CardTextKey(c),
+            description = showText ? CardDescription(c) : null,
+        };
+    }
 
-    private static object SelectCardView(CardModel c, int i, bool selected) => new
+    private static object SelectCardView(CardModel c, int i, bool selected)
     {
-        idx = i,
-        model = c.Id.Entry,
-        title = c.Title,
-        cost = c.EnergyCost.Canonical,
-        starCost = StarCost(c),
-        upgraded = c.IsUpgraded,
-        selected,
-        description = CardDescription(c),
-        upgradedPreview = UpgradePreview(c),
-    };
+        var showText = ShouldShowCardText(c);
+        var preview = UpgradePreview(c);
+        return new
+        {
+            idx = i,
+            model = c.Id.Entry,
+            title = c.Title,
+            cost = c.EnergyCost.Canonical,
+            starCost = StarCost(c),
+            upgraded = c.IsUpgraded,
+            enchant = c.Enchantment?.Id.Entry,
+            affliction = c.Affliction?.Id.Entry,
+            selected,
+            textKey = CardTextKey(c),
+            description = showText ? CardDescription(c) : null,
+            // Preserve upgradedPreview's string/null wire type; numeric
+            // upgrade economics do not need to be hidden with cached prose.
+            upgradedPreview = showText ? preview?.description : null,
+            upgradedPlayCost = preview?.playCost,
+            upgradedStarCost = preview?.starCost,
+        };
+    }
 
     // -1 = the card has no star cost (the second combat currency);
     // surface null so energy-only cards stay clean. X-star cards report
@@ -606,7 +722,7 @@ public static class Snapshotter
     // mutate a card's dynamic vars in place, so the upgraded numbers only
     // exist on an upgraded instance: build a throwaway twin from the
     // canonical model and replay the upgrades one level past the card.
-    private static string? UpgradePreview(CardModel c)
+    private static (string description, int playCost, int? starCost)? UpgradePreview(CardModel c)
     {
         if (!c.IsUpgradable) return null;
         try
@@ -614,17 +730,29 @@ public static class Snapshotter
             var twin = ModelDb.GetById<CardModel>(c.Id).ToMutable();
             for (var lvl = 0; lvl <= c.CurrentUpgradeLevel; lvl++)
                 twin.UpgradeInternal();
-            return CardDescription(twin);
+            return (CardDescription(twin), twin.EnergyCost.Canonical, StarCost(twin));
         }
         catch { return null; }
     }
 
-    private static object HandCardView(string? model, bool upgraded, int i) => new
+    private static object HandCardView(CardModel? card, int i)
     {
-        idx = i,
-        model,
-        upgraded,
-    };
+        var showText = card is not null
+            && ShouldShowCardText(card, compactElides: true);
+        return new
+        {
+            idx = i,
+            model = card?.Id.Entry,
+            cost = card?.EnergyCost.GetAmountToSpend(),
+            starCost = card is null ? null : StarCost(card),
+            upgraded = card?.IsUpgraded ?? false,
+            enchant = card?.Enchantment?.Id.Entry,
+            affliction = card?.Affliction?.Id.Entry,
+            textKey = card is null ? null : CardTextKey(card),
+            description = showText ? CardText(card!, PileType.Hand) : null,
+            vars = card is null ? null : CardVars(card),
+        };
+    }
 
     private static object MapSnapshot(string phase)
     {
@@ -664,6 +792,12 @@ public static class Snapshotter
             ["col"] = p.coord.col,
             ["row"] = p.coord.row,
             ["type"] = p.PointType.ToString().ToLowerInvariant(),
+            // Outgoing edges — route planning needs the graph's links, not
+            // just its nodes.
+            ["next"] = p.Children
+                .Where(ch => ch != null)
+                .Select(ch => new[] { ch.coord.col, ch.coord.row })
+                .ToArray(),
         };
         var markers = MapMarkers(p);
         if (markers.Length > 0) view["markers"] = markers;
@@ -721,42 +855,114 @@ public static class Snapshotter
     {
         var ev = Screens.CurrentEvent();
         if (ev is null) return new { phase, available = false };
+        var owner = ev.Owner;
 
-        // Fills per-event vars into option text. Neow-style events format
-        // through a separate dialogue table and can throw here — their
-        // options still read fine with default vars.
-        try { ev.CalculateVars(); } catch { }
-        // The GUI's event nodes copy the event's DynamicVars into each
-        // text's LocString before rendering; headless has no nodes, so do
-        // it here or var-bearing descriptions ({SoloGold}, …) fail to
-        // format and degrade to raw text.
-        try
-        {
-            if (ev.Description is { } pageDesc) ev.DynamicVars.AddTo(pageDesc);
-            foreach (var o in ev.CurrentOptions ?? [])
-            {
-                if (o?.Title is { } t) ev.DynamicVars.AddTo(t);
-                if (o?.Description is { } d) ev.DynamicVars.AddTo(d);
-            }
-        }
-        catch { }
+        // EventRoom already called CalculateVars exactly once when the
+        // event began. Never call it while observing: several events roll
+        // RNG or advance counters there, so a read would change both the
+        // advertised choice and the effect that the click later executes.
         return new
         {
             phase,
             id = ev.Id.Entry,
             player = FooterView(),
             title = SafeText(ev.Title),
-            description = SafeText(ev.Description),
+            description = SafeText(ev.Description, local =>
+            {
+                owner?.Character.AddDetailsTo(local);
+                local.Add("IsMultiplayer",
+                    owner is not null && owner.RunState.Players.Count > 1);
+                ev.DynamicVars.AddTo(local);
+            }),
             finished = ev.IsFinished,
+            fakeMerchant = ev is FakeMerchant fake ? FakeMerchantView(fake) : null,
             options = (ev.CurrentOptions ?? []).Select((o, i) => new
             {
                 idx = i,
-                title = SafeText(o.Title),
-                description = SafeText(o.Description),
+                title = SafeText(o.Title, ev.DynamicVars.AddTo),
+                description = SafeText(o.Description, ev.DynamicVars.AddTo),
                 locked = o.IsLocked,
                 chosen = o.WasChosen,
                 proceed = o.IsProceed,
+                // The GUI marks choices that kill this player with a red
+                // pulse. Null means the option has no lethal predicate.
+                lethal = OptionLethal(o, owner),
+                // GUI hover cards/tooltips are decision state, not
+                // decoration: event choices often name a relic, curse, or
+                // enchantment without explaining its effect in the body.
+                hints = EventHints(o),
+                relic = o.Relic is { } r ? new
+                {
+                    model = r.Id.Entry,
+                    title = SafeText(r.Title),
+                    description = SafeText(r.DynamicDescription),
+                } : null,
             }).ToArray(),
+        };
+    }
+
+    private static object FakeMerchantView(FakeMerchant fake)
+    {
+        var owner = fake.Owner;
+        var inventory = fake.Inventory;
+        return new
+        {
+            available = inventory is not null,
+            canFight = owner?.PotionSlots.Any(p => p?.Id.Entry == "FOUL_POTION") == true,
+            relics = (inventory?.RelicEntries ?? [])
+                .Select((entry, i) => new
+                {
+                    idx = i,
+                    model = entry.Model?.Id.Entry,
+                    title = entry.Model is { } relic ? SafeText(relic.Title) : null,
+                    description = entry.Model is { } described
+                        ? SafeText(described.DynamicDescription)
+                        : null,
+                    price = entry.Cost,
+                    // Keep `cost` as an alias for clients that already
+                    // consume the ordinary shop's legacy gold-price field.
+                    cost = entry.Cost,
+                    stocked = entry.IsStocked,
+                    affordable = entry.EnoughGold,
+                }).ToArray(),
+        };
+    }
+
+    private static bool? OptionLethal(EventOption option, Player? owner)
+    {
+        if (option.WillKillPlayer is null) return null;
+        if (owner is null) return null;
+        return option.WillKillPlayer(owner);
+    }
+
+    private static object[] EventHints(EventOption option) =>
+        (option.HoverTips ?? []).Select(EventHintView).ToArray();
+
+    private static object EventHintView(IHoverTip hint)
+    {
+        if (hint is CardHoverTip card)
+            return new
+            {
+                kind = "card",
+                model = card.Card.Id.Entry,
+                title = RichText.NormalizeIcons(card.Card.Title ?? ""),
+                description = CardDescription(card.Card),
+                upgraded = card.Card.IsUpgraded,
+            };
+        if (hint is HoverTip text)
+            return new
+            {
+                kind = "text",
+                model = text.CanonicalModel?.Id.Entry,
+                title = RichText.NormalizeIcons(text.Title ?? ""),
+                description = RichText.NormalizeIcons(text.Description ?? ""),
+            };
+        return new
+        {
+            kind = hint.GetType().Name,
+            model = hint.CanonicalModel?.Id.Entry,
+            title = "",
+            description = "",
         };
     }
 
@@ -798,22 +1004,23 @@ public static class Snapshotter
 
     // Missing locale keys throw from GetFormattedText (Neow-style events
     // store their body elsewhere) — fall back to the raw entry key.
-    private static string SafeText(LocString? s)
+    private static string SafeText(LocString? s, Action<LocString>? addVariables = null)
     {
         if (s is null) return "";
         try
         {
             if (s.IsEmpty) return "";
-            // Card rendering injects these vars before formatting; power/
-            // potion texts arrive without them and icon formatters otherwise
-            // fail the whole string. AddObj is idempotent for existing vars.
-            try
-            {
-                s.AddObj("energyPrefix", "");
-                s.AddObj("singleStarIcon", "[star]");
-            }
-            catch { }
-            var text = s.GetFormattedText();
+            // Formatting variables belong to this observation, not the
+            // shared model LocString. Copy its keys and existing variables
+            // before supplying card-pipeline defaults for power/potion text.
+            var local = new LocString(s.LocTable, s.LocEntryKey);
+            local.AddVariablesFrom(s);
+            addVariables?.Invoke(local);
+            if (!local.Variables.ContainsKey("energyPrefix"))
+                local.AddObj("energyPrefix", "");
+            if (!local.Variables.ContainsKey("singleStarIcon"))
+                local.AddObj("singleStarIcon", "[star]");
+            var text = local.GetFormattedText();
             // The host's GetFormattedText finalizer degrades hard failures
             // to the entry key; a key echo means the entry doesn't exist —
             // the GUI renders nothing there, so neither do we.
@@ -832,25 +1039,34 @@ public static class Snapshotter
     {
         var combat = CombatManager.Instance;
         var state = combat?.DebugOnlyGetState();
-        if (state is null) return new { phase, available = false };
+        if (combat is null || state is null) return new { phase, available = false };
         var player = LocalContext.GetMe(state);
         var pcs = player?.PlayerCombatState;
         var creature = player?.Creature;
         if (pcs is null || creature is null)
             return new { phase, available = false };
+        var facing = FacingOf(creature);
 
         return new
         {
             phase,
             turn = state.RoundNumber,
             side = state.CurrentSide.ToString().ToLowerInvariant(),
+            actionsDisabled = combat.PlayerActionsDisabled,
             you = new
             {
                 hp = new[] { creature.CurrentHp, creature.MaxHp },
                 block = creature.Block,
                 energy = new[] { pcs.Energy, pcs.MaxEnergy },
                 stars = pcs.Stars,
+                orbs = OrbViews(pcs),
                 powers = PowerViews(creature),
+                // Counters tick mid-combat (every-N relics); the full
+                // relic story lives in the out-of-combat footer.
+                relics = player!.Relics
+                    .Select(r => (object)new { model = r.Id.Entry, counter = RelicCounter(r) })
+                    .ToArray(),
+                facing,
             },
             potions = PotionViews(player!),
             piles = new
@@ -866,6 +1082,7 @@ public static class Snapshotter
                     // Compact keeps the numbers (vars) and drops the prose —
                     // the refresh still runs so vars carry modified values.
                     if (_compact) RefreshCardPreview(c);
+                    var showText = ShouldShowCardText(c, compactElides: true);
                     return (object)new
                     {
                         model = c.Id.Entry,
@@ -874,8 +1091,12 @@ public static class Snapshotter
                         starCost = StarCost(c),
                         target = c.TargetType.ToString().ToLowerInvariant(),
                         upgraded = c.IsUpgraded,
+                        enchant = c.Enchantment?.Id.Entry,
+                        affliction = c.Affliction?.Id.Entry,
                         unplayable = c.Keywords.Contains(CardKeyword.Unplayable),
-                        description = _compact ? null : CardText(c, PileType.Hand),
+                        playable = CanPlayCard(c),
+                        textKey = CardTextKey(c),
+                        description = showText ? CardText(c, PileType.Hand) : null,
                         vars = CardVars(c),
                     };
                 })
@@ -890,6 +1111,8 @@ public static class Snapshotter
                     hp = new[] { c.CurrentHp, c.MaxHp },
                     block = c.Block,
                     alive = c.IsAlive,
+                    side = SideOf(c),
+                    isBehind = IsBehind(c, facing),
                     powers = PowerViews(c),
                     intents = IntentViews(state, c),
                 })
@@ -897,9 +1120,33 @@ public static class Snapshotter
         };
     }
 
-    // Damage rides the intent's own calculator — the number the intent pip
-    // shows, strength/weak already applied. NextMove can be mid-roll during
-    // turn transitions; an empty list means "poll again".
+    // Surround fights: the engine keeps the player's orientation as
+    // SurroundedPower.Facing on the player, and marks each flanker with a
+    // BackAttackLeft/RightPower. SurroundedPower's damage hook grants ×1.5
+    // to the enemy on the side the player faces away from — these fields
+    // expose exactly the state that hook reads. Null/false outside
+    // surround fights.
+    private static string? FacingOf(Creature creature) =>
+        creature.GetPower<SurroundedPower>()?.Facing.ToString().ToLowerInvariant();
+
+    private static string? SideOf(Creature enemy) =>
+        enemy.HasPower<BackAttackLeftPower>() ? "left"
+        : enemy.HasPower<BackAttackRightPower>() ? "right"
+        : null;
+
+    private static bool IsBehind(Creature enemy, string? facing) => facing switch
+    {
+        "right" => enemy.HasPower<BackAttackLeftPower>(),
+        "left" => enemy.HasPower<BackAttackRightPower>(),
+        _ => false,
+    };
+
+    // `damage` rides the intent's own calculator — the number the intent
+    // pip shows, every modifier already applied (strength/weak, and in
+    // surround fights the ×1.5 back attack). `baseDamage` is the raw roll
+    // before the hooks, so an agent can see the modifier gap without
+    // diffing turns. NextMove can be mid-roll during turn transitions; an
+    // empty list means "poll again".
     private static object[] IntentViews(CombatState state, Creature enemy)
     {
         try
@@ -909,11 +1156,32 @@ public static class Snapshotter
                 {
                     type = i.IntentType.ToString().ToLowerInvariant(),
                     damage = i is AttackIntent a ? a.GetSingleDamage(state.Allies, enemy) : (int?)null,
+                    baseDamage = i is AttackIntent c && c.DamageCalc is { } calc
+                        ? (int?)(int)calc()
+                        : null,
                     hits = i is AttackIntent b ? b.Repeats : (int?)null,
+                    // The game's own hover text — defend/buff magnitudes
+                    // are hidden by design (the GUI shows none either),
+                    // but status-card intents name their payload here.
+                    description = IntentTip(i, state, enemy),
                 })
                 .ToArray();
         }
         catch { return []; }
+    }
+
+    private static string? IntentTip(AbstractIntent i, CombatState state, Creature enemy)
+    {
+        if (_compact) return null;
+        try
+        {
+            if (!i.HasIntentTip) return null;
+            var tip = i.GetHoverTip(state.Allies, enemy);
+            return string.IsNullOrEmpty(tip.Description)
+                ? null
+                : RichText.NormalizeIcons(tip.Description);
+        }
+        catch { return null; }
     }
 
     // Every grid picker (deck removal / upgrade / transform / enchant,
@@ -934,9 +1202,10 @@ public static class Snapshotter
                 prompt = "",
                 min = HeadlessPicker.MinSelect,
                 max = HeadlessPicker.MaxSelect,
+                confirmable = picked.Count >= HeadlessPicker.MinSelect,
                 selected = picked.Select(c => c.Id.Entry).ToArray(),
                 cards = HeadlessPicker.Candidates
-                    .Select((c, i) => HandCardView(c.Id.Entry, c.IsUpgraded, i)).ToArray(),
+                    .Select((c, i) => HandCardView(c, i)).ToArray(),
             };
         return new
         {
@@ -946,6 +1215,7 @@ public static class Snapshotter
             min = HeadlessPicker.MinSelect,
             max = HeadlessPicker.MaxSelect,
             cancelable = true,
+            confirmable = picked.Count >= HeadlessPicker.MinSelect,
             cards = HeadlessPicker.Candidates
                 .Select((c, i) => SelectCardView(c, i, picked.Contains(c))).ToArray(),
         };
@@ -977,6 +1247,7 @@ public static class Snapshotter
                 min = 1,
                 max = 1,
                 cancelable = Screens.ChooseSkipEnabled(choose),
+                confirmable = false,
                 cards = chooseCards.ToArray(),
             };
         }
@@ -988,6 +1259,15 @@ public static class Snapshotter
 
         var prefs = Screens.Prefs(screen);
         var selected = Screens.SelectedCards(screen).ToHashSet();
+        var selectedCount = selected.Count;
+        var confirmable = screen switch
+        {
+            NSimpleCardSelectScreen or NCombatPileCardSelectScreen =>
+                Reflect.Field<NClickableControl>(screen, "_confirmButton") is { IsEnabled: true },
+            NDeckTransformSelectScreen => selectedCount >= prefs.MinSelect,
+            NDeckCardSelectScreen => selectedCount >= prefs.MinSelect,
+            _ => selectedCount >= prefs.MaxSelect,
+        };
         return new
         {
             phase,
@@ -996,6 +1276,7 @@ public static class Snapshotter
             min = prefs.MinSelect,
             max = prefs.MaxSelect,
             cancelable = prefs.Cancelable,
+            confirmable,
             cards = cards.Select((c, i) => SelectCardView(c, i, selected.Contains(c))).ToArray(),
         };
     }
@@ -1012,6 +1293,8 @@ public static class Snapshotter
 
         var prefs = Screens.Prefs(hand);
         var selected = Screens.SelectedCards(hand);
+        var confirmable = Reflect.Field<NClickableControl>(
+            hand, "_selectModeConfirmButton") is { IsEnabled: true };
         return new
         {
             phase,
@@ -1019,9 +1302,10 @@ public static class Snapshotter
             prompt = SafeText(prefs.Prompt),
             min = prefs.MinSelect,
             max = prefs.MaxSelect,
+            confirmable,
             selected = selected.Select(c => c.Id.Entry).ToArray(),
             cards = hand.ActiveHolders.Select((h, i) =>
-                HandCardView(h.CardNode?.Model?.Id.Entry, h.CardNode?.Model?.IsUpgraded ?? false, i))
+                HandCardView(h.CardNode?.Model, i))
                 .ToArray(),
         };
     }

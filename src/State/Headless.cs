@@ -10,6 +10,23 @@ using CrystalMinigame = MegaCrit.Sts2.Core.Events.Custom.CrystalSphereEvent.Crys
 
 namespace Spirescry.State;
 
+// TreasureRoom.Enter primes relic picking before the GUI chest is clicked.
+// The headless host gates that engine callback so merely entering/observing
+// the room cannot reveal rewards; a bridge verb opens the gate explicitly.
+public static class HeadlessTreasure
+{
+    private static int _openDepth;
+
+    public static bool CanBeginRelicPicking => _openDepth > 0;
+
+    public static void Open(Action beginRelicPicking)
+    {
+        _openDepth++;
+        try { beginRelicPicking(); }
+        finally { _openDepth--; }
+    }
+}
+
 // The real GUI/headless boundary is completion ownership: every pending
 // player choice is a TaskCompletionSource the engine awaits, and someone
 // must hold it. In GUI boots the engine's own screens hold it (the bridge
@@ -19,10 +36,10 @@ namespace Spirescry.State;
 //
 // Headless has no UI screens, so two stand-ins replace them:
 //
-// HeadlessPicker — one deferred ICardSelector for every card pick the
-// engine would normally route to a selection screen (rest-site upgrade,
-// shop removal, event transforms, mid-combat hand/pile picks). Around()
-// wraps the engine call that may ask for cards; if the engine does, its
+// HeadlessPicker — one persistent deferred ICardSelector for every card
+// pick the engine would normally route to a selection screen (rest-site
+// upgrade, shop removal, event transforms, mid-combat hand/pile picks,
+// and choices fired later by turn-start powers). If the engine asks, its
 // await parks on a TCS, the phase flips to card_select/hand_select, and
 // the agent's pick-card/confirm resolves it inline.
 //
@@ -42,31 +59,21 @@ public static class HeadlessPicker
     public static int MinSelect { get; private set; }
     public static int MaxSelect { get; private set; }
 
-    // Wrap any engine call that may open a card pick: pre-arm the deferred
-    // picker, drop it if the call never asked. Owning the pairing here
-    // (instead of at every call site) makes a leaked selector scope —
-    // a Push without its PopIfInactive — impossible. No-op in GUI boots.
-    public static void Around(Action engineCall)
+    // Install once for the host lifetime. A per-verb scope misses choices
+    // that fire later (TOOLS_OF_THE_TRADE at the next turn start).
+    public static void Install()
     {
-        Push();
-        engineCall();
-        PopIfInactive();
-    }
-
-    private static void Push()
-    {
-        if (!RunMode.IsHeadless) return;
-        if (_scope is not null) return;
+        if (!RunMode.IsHeadless || _scope is not null) return;
         _scope = CardSelectCmd.PushSelector(new Deferred());
     }
 
-    private static void PopIfInactive()
+    // Call sites keep Around for readability: it documents that the
+    // operation may park on a choice, while Install makes that guarantee
+    // hold for delayed hooks too. No-op beyond ensuring installation.
+    public static void Around(Action engineCall)
     {
-        if (!RunMode.IsHeadless) return;
-        if (_tcs is not null) return;
-        var s = _scope;
-        _scope = null;
-        s?.Dispose();
+        Install();
+        engineCall();
     }
 
     // Toggle a candidate; auto-resolve when MaxSelect is reached (Confirm
@@ -103,17 +110,14 @@ public static class HeadlessPicker
     private static void Resolve(IEnumerable<CardModel> picked)
     {
         var tcs = _tcs!;
-        var scope = _scope;
         _tcs = null;
         _candidates = [];
         _picked.Clear();
         MinSelect = MaxSelect = 0;
-        _scope = null;
         // Synchronous continuation: the engine's awaiting chain (card
         // effect, purchase, event option) completes inline before this
         // returns — headless has no frame loop to resume it later.
         tcs.TrySetResult(picked);
-        scope?.Dispose();
     }
 
     private sealed class Deferred : ICardSelector

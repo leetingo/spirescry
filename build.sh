@@ -37,6 +37,22 @@ fi
 # and the CLI's clap default.
 : "${STS2_AGENT_PORT:=7777}"
 
+HOST_DLL="$REPO/headless/Host/bin/Release/spirescry_host.dll"
+
+# Stamped into both builds; /health reports it as buildHash so a running
+# host can be matched to a source revision.
+GIT_HASH=unknown
+if command -v git >/dev/null 2>&1 &&
+   git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    GIT_HASH="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+    if [ -n "$(git status --porcelain --untracked-files=all 2>/dev/null)" ]; then
+        GIT_HASH="$GIT_HASH-dirty"
+    fi
+fi
+# Prefix our explicit stamp so Mod can distinguish it from the SDK's
+# automatic full-commit metadata in ordinary `dotnet build` output.
+SOURCE_REVISION_ID="spirescry.$GIT_HASH"
+
 step() { printf '\033[1;34m▶\033[0m %s\n' "$*"; }
 ok()   { printf '\033[1;32m✓\033[0m %s\n' "$*"; }
 die()  { printf '\033[1;31m✗\033[0m %s\n' "$*" >&2; exit 1; }
@@ -116,7 +132,8 @@ headless_setup() {
     fi
 
     step "build host"
-    dotnet build -c Release headless/Host/Host.csproj --nologo --verbosity minimal
+    dotnet build -c Release -p:SourceRevisionId="$SOURCE_REVISION_ID" \
+        headless/Host/Host.csproj --nologo --verbosity minimal
     [ -x headless/Host/bin/Release/spirescry_host ] || die "host build produced no binary"
     ok "headless/Host/bin/Release/spirescry_host"
 }
@@ -125,6 +142,110 @@ headless_setup() {
 # needs last boot's log, and `>` used to destroy it at relaunch.
 rotate_log() {
     [ -f "$1" ] && mv -f "$1" "$1.1"
+    return 0
+}
+
+# A PID alone is not an identity: after a process exits, the kernel can reuse
+# it for an unrelated program. Capture both start time and command, and treat a
+# zombie as already stopped. All signals below are gated by this snapshot.
+process_snapshot() {
+    local snapshot snapshot_status
+    snapshot=""
+    if snapshot="$(ps -p "$1" -o lstart= -o command= 2>&1)"; then
+        snapshot="$(printf '%s\n' "$snapshot" | sed -E 's/^[[:space:]]+//')"
+        [ -n "$snapshot" ] || return 2
+        printf '%s\n' "$snapshot"
+        return 0
+    else
+        snapshot_status=$?
+    fi
+    # BSD/GNU ps use 1 for a well-formed query that selected no process.
+    # Invocation/permission failures use another status and stay unknown.
+    [ "$snapshot_status" = 1 ] && return 1
+    return 2
+}
+
+process_state() {
+    local state state_status
+    state=""
+    if state="$(ps -p "$1" -o stat= 2>&1)"; then
+        state="$(printf '%s\n' "$state" | sed -E 's/^[[:space:]]+//')"
+        if [ -z "$state" ]; then
+            printf 'unknown\n'
+        elif [[ "$state" = Z* ]]; then
+            printf 'dead\n'
+        else
+            printf 'live\n'
+        fi
+        return 0
+    else
+        state_status=$?
+    fi
+    if [ "$state_status" = 1 ]; then
+        printf 'dead\n'
+    else
+        printf 'unknown\n'
+    fi
+}
+
+process_is_same() {
+    local observed_state current current_status
+    observed_state="$(process_state "$1")"
+    [ "$observed_state" = unknown ] && return 2
+    [ "$observed_state" = live ] || return 1
+    current=""
+    current_status=0
+    current="$(process_snapshot "$1")" || current_status=$?
+    [ "$current_status" = 2 ] && return 2
+    [ "$current_status" = 0 ] && [ "$current" = "$2" ]
+}
+
+is_this_host_snapshot() {
+    # Spaces on both sides make this an argument match, not a loose substring
+    # such as /tmp/not-spirescry_host.dll.backup.
+    case " $1 " in
+        *" $HOST_DLL "*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+is_this_game_snapshot() {
+    case "$1" in
+        *"$STS2_GAME_DIR/"*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# stop_exact_process <pid> <captured-snapshot> <label>
+#
+# Re-check the snapshot before every escalation so a PID recycled between
+# TERM and KILL can never make us kill its new owner.
+stop_exact_process() {
+    target_pid="$1"
+    target_snapshot="$2"
+    target_label="$3"
+
+    same_status=0
+    process_is_same "$target_pid" "$target_snapshot" || same_status=$?
+    [ "$same_status" = 2 ] && \
+        die "cannot inspect $target_label PID $target_pid safely — refusing to signal it"
+    [ "$same_status" = 0 ] || return 0
+    kill -TERM "$target_pid" 2>/dev/null || true
+    sleep 1
+    same_status=0
+    process_is_same "$target_pid" "$target_snapshot" || same_status=$?
+    [ "$same_status" = 2 ] && \
+        die "cannot re-check $target_label PID $target_pid after SIGTERM"
+    if [ "$same_status" = 0 ]; then
+        kill -KILL "$target_pid" 2>/dev/null || true
+        sleep 1
+    fi
+    same_status=0
+    process_is_same "$target_pid" "$target_snapshot" || same_status=$?
+    [ "$same_status" = 2 ] && \
+        die "cannot re-check $target_label PID $target_pid after SIGKILL"
+    [ "$same_status" = 0 ] && \
+        die "$target_label PID $target_pid survived SIGKILL (permissions?)"
     return 0
 }
 
@@ -137,7 +258,7 @@ rotate_log() {
 # output still tees into the log file, so diagnostics survive the
 # terminal — the tee children hang off the host process and exit with it.
 launch_host() {
-    [ -f headless/Host/bin/Release/spirescry_host.dll ] || die "host not built — run: ./build.sh headless-setup"
+    [ -f "$HOST_DLL" ] || die "host not built — run: ./build.sh headless-setup"
     ! pgrep -qf spirescry_host || die "host already running — ./build.sh stop first"
     log="${TMPDIR:-/tmp}/spirescry-host.log"
     rotate_log "$log"
@@ -145,18 +266,30 @@ launch_host() {
     # runtime regardless of DOTNET_ROOT.
     if [ "${1:-}" = "--foreground" ]; then
         step "launch host, foreground (bridge port $STS2_AGENT_PORT, log $log)"
-        exec dotnet headless/Host/bin/Release/spirescry_host.dll \
+        exec dotnet "$HOST_DLL" \
             > >(tee -a "$log") 2> >(tee -a "$log" >&2)
     fi
+    pidfile="${TMPDIR:-/tmp}/spirescry-host.pid"
     step "launch host (bridge port $STS2_AGENT_PORT, log $log)"
-    nohup dotnet headless/Host/bin/Release/spirescry_host.dll > "$log" 2>&1 &
+    nohup dotnet "$HOST_DLL" > "$log" 2>&1 &
+    host_pid=$!
+    host_snapshot_status=0
+    host_snapshot="$(process_snapshot "$host_pid")" || host_snapshot_status=$?
+    [ "$(process_state "$host_pid")" = live ] \
+        && [ "$host_snapshot_status" = 0 ] \
+        && is_this_host_snapshot "$host_snapshot" || \
+        die "launched host PID $host_pid could not be identified"
+    pidtmp="$(mktemp "${pidfile}.XXXXXX")"
+    printf '%s\n%s\n' "$host_pid" "$host_snapshot" > "$pidtmp"
+    mv -f "$pidtmp" "$pidfile"
     wait_bridge 30 "$log"
 }
 
 build_mod() {
     [ -f lib/sts2.dll ] || die "lib/sts2.dll missing — run: ./build.sh libs"
     step "build mod (Release)"
-    dotnet build -c Release src/Spirescry.csproj --nologo --verbosity minimal
+    dotnet build -c Release -p:SourceRevisionId="$SOURCE_REVISION_ID" \
+        src/Spirescry.csproj --nologo --verbosity minimal
     [ -f src/bin/Release/spirescry.dll ] || die "mod build did not produce spirescry.dll"
     ok "src/bin/Release/spirescry.dll"
 }
@@ -186,7 +319,7 @@ deploy_cli() {
     # artifact before copying so the installed binary remains valid and
     # byte-identical — the play skill's pre-flight can then compare hashes.
     if [ "$(uname -s)" = "Darwin" ] && command -v codesign >/dev/null 2>&1; then
-        codesign --force --sign - cli/target/release/spirescry >/dev/null 2>&1 || true
+        codesign --force --sign - cli/target/release/spirescry >/dev/null 2>&1
     fi
     step "deploy cli → $SPIRESCRY_CLI_BIN/spirescry"
     cp cli/target/release/spirescry "$SPIRESCRY_CLI_BIN/spirescry"
@@ -209,11 +342,94 @@ launch_headless() {
     wait_bridge 60 "$log"
 }
 
+# Kill by PID file first (works where sandboxes hide other processes from
+# pgrep), then use pgrep only to discover candidates and validate every PID
+# before signalling it. Exit non-zero whenever "nothing running" cannot be
+# established honestly.
 stop_game() {
     need_game_dir
+    pidfile="${TMPDIR:-/tmp}/spirescry-host.pid"
     stopped=0
-    pkill -f "$STS2_GAME_DIR" && stopped=1
-    pkill -f spirescry_host && stopped=1
+    enumeration_failed=0
+    if [ -f "$pidfile" ]; then
+        IFS= read -r host_pid < "$pidfile" || host_pid=""
+        if [[ ! "$host_pid" =~ ^[0-9]+$ ]] || [ "${#host_pid}" -gt 10 ] || [ "$host_pid" -le 1 ]; then
+            die "invalid host pidfile $pidfile — refusing to signal anything"
+        fi
+
+        saved_snapshot="$(sed -n '2p' "$pidfile")"
+        current_snapshot_status=0
+        current_snapshot="$(process_snapshot "$host_pid")" || current_snapshot_status=$?
+        current_state="$(process_state "$host_pid")"
+        if [ "$current_state" = unknown ]; then
+            die "cannot inspect PID $host_pid in $pidfile — refusing to signal or discard it"
+        elif [ "$current_state" = dead ]; then
+            # A dead PID is an ordinary stale file and is safe to clean up.
+            rm -f "$pidfile"
+        elif [ "$current_snapshot_status" != 0 ]; then
+            die "cannot read identity for live PID $host_pid in $pidfile — refusing to signal it"
+        elif ! is_this_host_snapshot "$current_snapshot"; then
+            die "PID $host_pid in $pidfile does not belong to this host — refusing to signal it"
+        elif [ -z "$saved_snapshot" ]; then
+            die "host pidfile $pidfile has no saved process snapshot — refusing to signal PID $host_pid"
+        elif [ "$saved_snapshot" != "$current_snapshot" ]; then
+            die "PID $host_pid in $pidfile was reused or restarted — refusing to signal it"
+        else
+            stop_exact_process "$host_pid" "$current_snapshot" "host"
+            rm -f "$pidfile"
+            stopped=1
+        fi
+    fi
+
+    # Foreground hosts and the engine boot have no PID file. pgrep is only a
+    # discovery aid: broad pkill patterns never receive a signal directly.
+    if command -v pgrep >/dev/null 2>&1; then
+        host_pgrep_status=0
+        host_pids="$(pgrep -f spirescry_host 2>/dev/null)" || host_pgrep_status=$?
+        if [ "$host_pgrep_status" = 0 ]; then
+            for candidate_pid in $host_pids; do
+                candidate_snapshot_status=0
+                candidate_snapshot="$(process_snapshot "$candidate_pid")" || candidate_snapshot_status=$?
+                candidate_state="$(process_state "$candidate_pid")"
+                if [ "$candidate_state" = unknown ] \
+                    || { [ "$candidate_state" = live ] && [ "$candidate_snapshot_status" != 0 ]; }; then
+                    enumeration_failed=1
+                elif [ "$candidate_state" = live ] && is_this_host_snapshot "$candidate_snapshot"; then
+                    stop_exact_process "$candidate_pid" "$candidate_snapshot" "host"
+                    stopped=1
+                fi
+            done
+        elif [ "$host_pgrep_status" -gt 1 ]; then
+            enumeration_failed=1
+        fi
+        game_pgrep_status=0
+        game_pids="$(pgrep -f "$STS2_GAME_DIR" 2>/dev/null)" || game_pgrep_status=$?
+        if [ "$game_pgrep_status" = 0 ]; then
+            for candidate_pid in $game_pids; do
+                candidate_snapshot_status=0
+                candidate_snapshot="$(process_snapshot "$candidate_pid")" || candidate_snapshot_status=$?
+                candidate_state="$(process_state "$candidate_pid")"
+                if [ "$candidate_state" = unknown ] \
+                    || { [ "$candidate_state" = live ] && [ "$candidate_snapshot_status" != 0 ]; }; then
+                    enumeration_failed=1
+                elif [ "$candidate_state" = live ] && is_this_game_snapshot "$candidate_snapshot"; then
+                    stop_exact_process "$candidate_pid" "$candidate_snapshot" "game"
+                    stopped=1
+                fi
+            done
+        elif [ "$game_pgrep_status" -gt 1 ]; then
+            enumeration_failed=1
+        fi
+    else
+        enumeration_failed=1
+    fi
+
+    if curl -sf "http://127.0.0.1:$STS2_AGENT_PORT/health" > /dev/null 2>&1; then
+        die "a bridge still answers on port $STS2_AGENT_PORT — kill it manually (permissions?)"
+    fi
+    if [ "$stopped" = 0 ] && [ "$enumeration_failed" = 1 ]; then
+        die "could not enumerate processes and no valid host pidfile was available"
+    fi
     if [ "$stopped" = 1 ]; then ok "stopped"; else ok "nothing running"; fi
 }
 

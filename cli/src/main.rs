@@ -15,6 +15,63 @@ use serde_json::{json, Value};
 const DEFAULT_HTTP_TIMEOUT_MS: u64 = 70_000;
 const HTTP_TIMEOUT_GRACE_MS: u64 = 10_000;
 const DEFAULT_OBS_WAIT_MS: i32 = 5_000;
+const PROTOCOL_VERSION: u64 = 2;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CliError {
+    Transient(String),
+    Fatal(String),
+}
+
+impl CliError {
+    fn transient(message: impl Into<String>) -> Self {
+        Self::Transient(message.into())
+    }
+
+    fn fatal(message: impl Into<String>) -> Self {
+        Self::Fatal(message.into())
+    }
+
+    fn message(&self) -> &str {
+        match self {
+            Self::Transient(message) | Self::Fatal(message) => message,
+        }
+    }
+
+    #[cfg(test)]
+    fn contains(&self, needle: &str) -> bool {
+        self.message().contains(needle)
+    }
+
+    fn exit_status(&self) -> u8 {
+        match self {
+            Self::Transient(_) => 75,
+            Self::Fatal(_) => 1,
+        }
+    }
+}
+
+impl std::fmt::Display for CliError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.message())
+    }
+}
+
+impl std::error::Error for CliError {}
+
+impl From<String> for CliError {
+    fn from(message: String) -> Self {
+        Self::fatal(message)
+    }
+}
+
+impl From<&str> for CliError {
+    fn from(message: &str) -> Self {
+        Self::fatal(message)
+    }
+}
+
+type CliResult<T> = Result<T, CliError>;
 
 #[derive(Parser)]
 #[command(name = "spirescry", version, about)]
@@ -31,6 +88,21 @@ struct Cli {
     /// Trace each HTTP round-trip (request, status, wall time) on stderr
     #[arg(long, short = 'v', global = true)]
     verbose: bool,
+    /// Reject the verb if the revision moved since the board was read
+    #[arg(long, global = true)]
+    if_rev: Option<u64>,
+    /// Reject the verb if the live run id no longer matches
+    #[arg(long, global = true)]
+    if_run: Option<String>,
+    /// Wait for action settlement or the next decision (default 5000 ms)
+    #[arg(
+        long,
+        global = true,
+        value_name = "MS",
+        num_args = 0..=1,
+        default_missing_value = "5000"
+    )]
+    follow: Option<u32>,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -50,6 +122,12 @@ enum Cmd {
         /// Elide the big repeats: no map graph, deck as counts-by-model
         #[arg(long)]
         compact: bool,
+        /// Compact decision projection with state-derived legal verbs
+        #[arg(long)]
+        decision: bool,
+        /// Card text keys already cached by the caller (repeatable)
+        #[arg(long = "known-card", requires = "decision")]
+        known_cards: Vec<String>,
     },
     /// Start a singleplayer run from the main menu
     NewRun {
@@ -98,7 +176,10 @@ enum Cmd {
     /// Confirm the current card selection (deck pickers, hand select)
     Confirm,
     /// Skip a card/relic offer, or cancel a cancelable deck picker
-    Skip,
+    Skip {
+        #[arg(value_parser = clap::value_parser!(i32).range(0..))]
+        idx: Option<i32>,
+    },
     /// Travel to a map node; in crystal_sphere, click a board cell instead
     MapMove {
         /// Map-node column from obs.next, or crystal_sphere cell column
@@ -108,7 +189,12 @@ enum Cmd {
         #[arg(value_parser = clap::value_parser!(i32).range(0..))]
         row: i32,
     },
-    /// Dev/verification cheats: goto <col> <row> | gold <n> | hp <n> | heal | wound-enemies | event <ID> | card <ID> | card-upgraded <ID> | potion <ID> | relic <ID>
+    /// List model entries: kind is card/relic/potion/event/encounter/character
+    Models { kind: String },
+    /// Dev/verification cheats.
+    ///
+    /// Run `cheat --help` for examples. The connected host's `health`
+    /// capabilities list is the source of truth for available cheats.
     Cheat { name: String, values: Vec<String> },
     /// Play an exact hand-card selector (MODEL, MODEL+, MODEL@ENCHANTMENT, MODEL!AFFLICTION)
     Play {
@@ -134,6 +220,13 @@ enum Cmd {
         #[arg(value_parser = clap::value_parser!(i32).range(0..))]
         slot: i32,
     },
+    /// Dump the current run's diagnostic reconstruction recipe
+    Runlog,
+    /// Re-drive and verify a saved diagnostic recipe from a clean menu
+    Replay {
+        /// JSON file saved from `spirescry runlog`
+        file: String,
+    },
 }
 
 fn main() -> ExitCode {
@@ -141,15 +234,34 @@ fn main() -> ExitCode {
     let client = Client {
         base: format!("http://{}:{}", cli.host, cli.port),
         verbose: cli.verbose,
+        if_rev: cli.if_rev,
+        if_run: cli.if_run.clone(),
+        follow: cli.follow,
     };
     let result = match &cli.cmd {
         Cmd::Health => client.get("/health", Duration::from_millis(DEFAULT_HTTP_TIMEOUT_MS)),
+        Cmd::Models { kind } => client.compatible_get(
+            &format!("/models?kind={}", kind),
+            Duration::from_millis(DEFAULT_HTTP_TIMEOUT_MS),
+        ),
         Cmd::Obs {
             since,
             wait,
             compact,
+            decision,
+            known_cards,
         } => obs_request(*since, *wait, *compact)
-            .and_then(|(path, timeout)| client.get(&path, timeout)),
+            .map_err(CliError::from)
+            .and_then(|(mut path, timeout)| {
+                if *decision {
+                    let separator = if path.contains('?') { '&' } else { '?' };
+                    path = format!("{path}{separator}decision=1");
+                    for key in known_cards {
+                        path = format!("{path}&known={}", query_component(key));
+                    }
+                }
+                client.compatible_get(&path, timeout)
+            }),
         Cmd::NewRun {
             character,
             seed,
@@ -170,13 +282,13 @@ fn main() -> ExitCode {
         Cmd::PickReward { idx } => client.step("pick-reward", json!({ "idx": idx })),
         Cmd::PickCard { idx } => client.step("pick-card", json!({ "idx": idx })),
         Cmd::Confirm => client.step("confirm", json!({})),
-        Cmd::Skip => client.step("skip", json!({})),
+        Cmd::Skip { idx } => client.step("skip", skip_args(*idx)),
         Cmd::Buy { kind, idx } => client.step("buy", json!({ "kind": kind, "idx": idx })),
         Cmd::Leave => client.step("leave", json!({})),
         Cmd::PickRelic { idx } => client.step("pick-relic", json!({ "idx": idx })),
-        Cmd::Cheat { name, values } => {
-            cheat_args(name, values).and_then(|args| client.step("cheat", args))
-        }
+        Cmd::Cheat { name, values } => cheat_args(name, values)
+            .map_err(CliError::from)
+            .and_then(|args| client.step("cheat", args)),
         Cmd::MapMove { col, row } => client.step("map-move", json!({ "col": col, "row": row })),
         Cmd::Play { selector, target } => {
             let mut args = json!({ "model": selector });
@@ -194,6 +306,10 @@ fn main() -> ExitCode {
             client.step("potion-use", args)
         }
         Cmd::PotionDiscard { slot } => client.step("potion-discard", json!({ "slot": slot })),
+        Cmd::Runlog => {
+            client.compatible_get("/runlog", Duration::from_millis(DEFAULT_HTTP_TIMEOUT_MS))
+        }
+        Cmd::Replay { file } => replay(&client, file),
     };
     match result {
         Ok(v) => {
@@ -211,13 +327,7 @@ fn main() -> ExitCode {
         }
         Err(e) => {
             eprintln!("spirescry: {}", e);
-            // EX_TEMPFAIL: callers can retry on the exit code instead of
-            // grepping stderr for the transient signal.
-            if e.starts_with("not_ready") {
-                ExitCode::from(75)
-            } else {
-                ExitCode::FAILURE
-            }
+            ExitCode::from(e.exit_status())
         }
     }
 }
@@ -248,6 +358,13 @@ fn obs_request(
     Ok((path, Duration::from_millis(timeout_ms)))
 }
 
+fn skip_args(idx: Option<i32>) -> Value {
+    match idx {
+        Some(i) => json!({ "idx": i }),
+        None => json!({}),
+    }
+}
+
 // Positional sugar for the known cheat arg shapes; the bridge's own
 // per-cheat validation is the source of truth.
 fn cheat_args(name: &str, values: &[String]) -> Result<Value, String> {
@@ -261,15 +378,243 @@ fn cheat_args(name: &str, values: &[String]) -> Result<Value, String> {
             args["col"] = json!(num(col)?);
             args["row"] = json!(num(row)?);
         }
-        ("gold", [value]) | ("hp", [value]) => args["value"] = json!(num(value)?),
+        ("gold", [value]) | ("hp", [value]) | ("stars", [value]) | ("energy", [value]) => {
+            args["value"] = json!(num(value)?)
+        }
         ("event", [id])
+        | ("combat", [id])
         | ("card", [id])
         | ("card-upgraded", [id])
-        | ("potion", [id])
-        | ("relic", [id]) => args["id"] = json!(id),
+        | ("relic", [id])
+        | ("potion", [id]) => args["id"] = json!(id),
         _ => {}
     }
     Ok(args)
+}
+
+trait ReplayTransport {
+    fn get(&self, path: &str) -> CliResult<Value>;
+    fn post(&self, path: &str, body: Value) -> CliResult<Value>;
+}
+
+fn replay(client: &impl ReplayTransport, file: &str) -> CliResult<Value> {
+    let text = std::fs::read_to_string(file).map_err(|e| format!("read {}: {}", file, e))?;
+    let log: Value = serde_json::from_str(&text).map_err(|e| format!("parse {}: {}", file, e))?;
+    replay_value(client, &log)
+}
+
+fn replay_value(client: &impl ReplayTransport, log: &Value) -> CliResult<Value> {
+    if log.get("complete").and_then(Value::as_bool) != Some(true) {
+        return Err("runlog is incomplete (it must start with new-run, contain one RunId, and fingerprint every followed verb)".into());
+    }
+    let source_run_id = log
+        .get("runId")
+        .and_then(Value::as_str)
+        .filter(|id| *id != "none")
+        .ok_or("runlog has no source runId")?;
+    let verbs = log
+        .get("verbs")
+        .and_then(Value::as_array)
+        .ok_or("runlog has no verbs array")?;
+    if verbs
+        .first()
+        .and_then(|v| v.get("action"))
+        .and_then(Value::as_str)
+        != Some("new-run")
+    {
+        return Err("runlog does not start with new-run".into());
+    }
+    if let Some((idx, _)) = verbs
+        .iter()
+        .enumerate()
+        .find(|(_, verb)| verb.get("runId").and_then(Value::as_str) != Some(source_run_id))
+    {
+        return Err(format!("runlog crosses RunIds at verb {}", idx + 1).into());
+    }
+    if let Some((idx, _)) = verbs.iter().enumerate().find(|(_, verb)| {
+        !matches!(
+            verb.get("outcome").and_then(Value::as_str),
+            Some("settled" | "next_decision")
+        ) || verb
+            .get("fingerprint")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .is_none()
+    }) {
+        return Err(format!(
+            "runlog verb {} has no verifiable settled fingerprint",
+            idx + 1
+        )
+        .into());
+    }
+
+    // Fail before the first state-changing request. A recipe can name a
+    // capability that is missing only near its end; discovering that after
+    // new-run would leave a partially reconstructed live run behind.
+    let health = client.get("/health")?;
+    validate_health(&health, None, None)?;
+    for (idx, verb) in verbs.iter().enumerate() {
+        let action = verb
+            .get("action")
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("verb {} has no action", idx + 1))?;
+        let cheat = if action == "cheat" {
+            Some(
+                verb.pointer("/args/name")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| format!("verb {} cheat has no args.name", idx + 1))?,
+            )
+        } else {
+            None
+        };
+        validate_health(&health, Some(action), cheat)?;
+    }
+
+    let mut current = client.get("/obs")?;
+    if current.get("phase").and_then(Value::as_str) != Some("main_menu")
+        || current.get("runId").and_then(Value::as_str) != Some("none")
+    {
+        return Err(format!(
+            "replay requires a clean main_menu with runId none; current phase={} runId={}",
+            current.get("phase").and_then(Value::as_str).unwrap_or("?"),
+            current.get("runId").and_then(Value::as_str).unwrap_or("?"),
+        )
+        .into());
+    }
+
+    let seed = log.get("seed").and_then(Value::as_str);
+    let mut verified = 0usize;
+    for (idx, verb) in verbs.iter().enumerate() {
+        let action = verb
+            .get("action")
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("verb {} has no action", idx + 1))?;
+        let expected_phase = verb
+            .get("phaseBefore")
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("verb {} has no phaseBefore", idx + 1))?;
+        let actual_phase = current.get("phase").and_then(Value::as_str).unwrap_or("?");
+        if actual_phase != expected_phase {
+            return Err(format!(
+                "divergence at verb {} ({}): phase before was {}, reconstructed {}",
+                idx + 1,
+                action,
+                expected_phase,
+                actual_phase,
+            )
+            .into());
+        }
+
+        let mut args = verb.get("args").cloned().unwrap_or_else(|| json!({}));
+        if action == "new-run" {
+            if let Some(seed) = seed {
+                args["seed"] = json!(seed);
+            }
+        }
+        let rev = current
+            .get("rev")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| format!("verb {} precondition has no rev", idx + 1))?;
+        let run_id = current
+            .get("runId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("verb {} precondition has no runId", idx + 1))?;
+        eprintln!("replay {}/{}: {} {}", idx + 1, verbs.len(), action, args);
+        let response = client.post(
+            "/step",
+            json!({
+                "action": action,
+                "args": args,
+                "ifRev": rev,
+                "ifRun": run_id,
+                "follow": 10_000,
+            }),
+        )?;
+        if response.get("settled").and_then(Value::as_bool) != Some(true) {
+            return Err(format!(
+                "divergence at verb {} ({}): reconstruction timed out",
+                idx + 1,
+                action,
+            )
+            .into());
+        }
+        let next = response
+            .get("obs")
+            .cloned()
+            .ok_or_else(|| format!("verb {} follow response has no obs", idx + 1))?;
+
+        if let Some(expected) = verb.get("phaseAfter").and_then(Value::as_str) {
+            let actual = next.get("phase").and_then(Value::as_str).unwrap_or("?");
+            if actual != expected {
+                return Err(format!(
+                    "divergence at verb {} ({}): phase after was {}, reconstructed {}",
+                    idx + 1,
+                    action,
+                    expected,
+                    actual,
+                )
+                .into());
+            }
+        }
+        let expected = verb
+            .get("fingerprint")
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("verb {} has no fingerprint", idx + 1))?;
+        let actual = state_fingerprint(&next);
+        if actual != expected {
+            return Err(format!(
+                "divergence at verb {} ({}): fingerprint {} != {}",
+                idx + 1,
+                action,
+                expected,
+                actual,
+            )
+            .into());
+        }
+        verified += 1;
+        current = next;
+    }
+
+    Ok(json!({
+        "ok": true,
+        "kind": "diagnostic_reconstruction_result",
+        "sourceRunId": source_run_id,
+        "reconstructionRunId": current.get("runId").cloned().unwrap_or(Value::Null),
+        "verifiedFingerprints": verified,
+        "totalVerbs": verbs.len(),
+        "attribution": "the final observation belongs to the reconstruction, not the source run",
+        "reconstructedFinalObs": current,
+    }))
+}
+
+fn state_fingerprint(value: &Value) -> String {
+    let mut stable = value.clone();
+    remove_volatile(&mut stable);
+    let bytes = serde_json::to_vec(&stable).unwrap_or_default();
+    let mut hash: u64 = 14_695_981_039_346_656_037;
+    for byte in bytes {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(1_099_511_628_211);
+    }
+    format!("{hash:016x}")
+}
+
+fn remove_volatile(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            map.remove("rev");
+            map.remove("runId");
+            for child in map.values_mut() {
+                remove_volatile(child);
+            }
+        }
+        Value::Array(items) => {
+            for child in items {
+                remove_volatile(child);
+            }
+        }
+        _ => {}
+    }
 }
 
 // The HTTP side of every subcommand. --verbose traces round-trips on
@@ -278,17 +623,20 @@ fn cheat_args(name: &str, values: &[String]) -> Result<Value, String> {
 struct Client {
     base: String,
     verbose: bool,
+    if_rev: Option<u64>,
+    if_run: Option<String>,
+    follow: Option<u32>,
 }
 
 impl Client {
-    fn get(&self, path: &str, timeout: Duration) -> Result<Value, String> {
+    fn get(&self, path: &str, timeout: Duration) -> CliResult<Value> {
         let url = format!("{}{}", self.base, path);
         self.exchange(format!("GET {}", url), || {
             ureq::get(&url).timeout(timeout).call().map_err(Box::new)
         })
     }
 
-    fn post(&self, path: &str, body: Value) -> Result<Value, String> {
+    fn post(&self, path: &str, body: Value) -> CliResult<Value> {
         let url = format!("{}{}", self.base, path);
         let request_line = format!("POST {} {}", url, body);
         self.exchange(request_line, || {
@@ -299,15 +647,36 @@ impl Client {
         })
     }
 
-    fn step(&self, action: &str, args: Value) -> Result<Value, String> {
-        self.post("/step", json!({ "action": action, "args": args }))
+    fn step(&self, action: &str, args: Value) -> CliResult<Value> {
+        let health = self.get("/health", Duration::from_millis(DEFAULT_HTTP_TIMEOUT_MS))?;
+        let cheat = (action == "cheat")
+            .then(|| args.get("name").and_then(Value::as_str))
+            .flatten();
+        validate_health(&health, Some(action), cheat)?;
+        let mut body = json!({ "action": action, "args": args });
+        if let Some(rev) = self.if_rev {
+            body["ifRev"] = json!(rev);
+        }
+        if let Some(run) = &self.if_run {
+            body["ifRun"] = json!(run);
+        }
+        if let Some(ms) = self.follow {
+            body["follow"] = json!(ms);
+        }
+        self.post("/step", body)
+    }
+
+    fn compatible_get(&self, path: &str, timeout: Duration) -> CliResult<Value> {
+        let health = self.get("/health", Duration::from_millis(DEFAULT_HTTP_TIMEOUT_MS))?;
+        validate_health(&health, None, None)?;
+        self.get(path, timeout)
     }
 
     fn exchange(
         &self,
         request_line: String,
         send: impl FnOnce() -> Result<ureq::Response, Box<ureq::Error>>,
-    ) -> Result<Value, String> {
+    ) -> CliResult<Value> {
         if self.verbose {
             eprintln!("spirescry: [{}] > {}", utc_clock(), request_line);
         }
@@ -332,6 +701,77 @@ impl Client {
     }
 }
 
+impl ReplayTransport for Client {
+    fn get(&self, path: &str) -> CliResult<Value> {
+        Client::get(self, path, Duration::from_millis(DEFAULT_HTTP_TIMEOUT_MS))
+    }
+
+    fn post(&self, path: &str, body: Value) -> CliResult<Value> {
+        Client::post(self, path, body)
+    }
+}
+
+fn validate_health(health: &Value, action: Option<&str>, cheat: Option<&str>) -> CliResult<()> {
+    let host_protocol = health
+        .get("protocolVersion")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| {
+            "incompatible host: /health has no numeric protocolVersion; update the running host"
+                .to_string()
+        })?;
+    if host_protocol != PROTOCOL_VERSION {
+        let build = health
+            .get("buildHash")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        return Err(format!(
+            "incompatible host protocol {} (CLI expects {}, build {})",
+            host_protocol, PROTOCOL_VERSION, build
+        )
+        .into());
+    }
+
+    if let Some(action) = action {
+        let verbs = health
+            .pointer("/capabilities/verbs")
+            .and_then(Value::as_array)
+            .ok_or_else(|| "incompatible host: /health has no capabilities.verbs".to_string())?;
+        if !verbs.iter().any(|verb| verb.as_str() == Some(action)) {
+            let supported = verbs
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(format!(
+                "bad_request: host does not advertise '{}' (supported: {})",
+                action, supported
+            )
+            .into());
+        }
+    }
+
+    if let Some(cheat) = cheat {
+        let cheats = health
+            .pointer("/capabilities/cheats")
+            .and_then(Value::as_array)
+            .ok_or_else(|| "incompatible host: /health has no capabilities.cheats".to_string())?;
+        if !cheats.iter().any(|item| item.as_str() == Some(cheat)) {
+            let supported = cheats
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(format!(
+                "bad_request: host does not advertise cheat '{}' (supported: {})",
+                cheat, supported
+            )
+            .into());
+        }
+    }
+
+    Ok(())
+}
+
 // HH:MM:SS.mmm UTC — hand-rolled from the epoch to keep the CLI
 // dependency-free.
 fn utc_clock() -> String {
@@ -348,25 +788,48 @@ fn utc_clock() -> String {
     )
 }
 
-fn handle(result: Result<ureq::Response, Box<ureq::Error>>) -> Result<Value, String> {
+fn query_component(value: &str) -> String {
+    value
+        .bytes()
+        .flat_map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                vec![b as char]
+            }
+            _ => format!("%{b:02X}").chars().collect(),
+        })
+        .collect()
+}
+
+fn handle(result: Result<ureq::Response, Box<ureq::Error>>) -> CliResult<Value> {
     let resp = match result {
         Ok(resp) => resp,
+        // Bridge errors ride on 4xx/5xx with a JSON body — parse it.
         Err(error) => match *error {
-            // Bridge errors ride on 4xx/5xx with a JSON body — parse it.
             ureq::Error::Status(_, resp) => resp,
-            ureq::Error::Transport(error) => return Err(error.to_string()),
+            ureq::Error::Transport(error) => {
+                return Err(CliError::fatal(error.to_string()));
+            }
         },
     };
     let value: Value = resp
         .into_json()
-        .map_err(|e| format!("non-json response: {}", e))?;
+        .map_err(|e| CliError::fatal(format!("non-json response: {}", e)))?;
+    parse_bridge_value(value)
+}
+
+fn parse_bridge_value(value: Value) -> CliResult<Value> {
     if value.get("ok").and_then(Value::as_bool) == Some(false) {
         let err = value
             .get("err")
             .and_then(Value::as_str)
             .unwrap_or("unknown");
         let msg = value.get("msg").and_then(Value::as_str).unwrap_or("");
-        return Err(format!("{}: {}", err, msg));
+        let rendered = format!("{}: {}", err, msg);
+        return if err == "not_ready" {
+            Err(CliError::transient(rendered))
+        } else {
+            Err(CliError::fatal(rendered))
+        };
     }
     Ok(value)
 }
@@ -375,12 +838,75 @@ fn handle(result: Result<ureq::Response, Box<ureq::Error>>) -> Result<Value, Str
 mod tests {
     use super::*;
     use clap::{CommandFactory, Parser};
+    use std::cell::{Cell, RefCell};
     use std::net::TcpListener;
     use std::thread;
     use std::time::Instant;
 
     fn strings(values: &[&str]) -> Vec<String> {
         values.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn health(protocol: u64, verbs: &[&str], cheats: &[&str]) -> Value {
+        json!({
+            "ok": true,
+            "buildHash": "abc1234",
+            "protocolVersion": protocol,
+            "capabilities": { "verbs": verbs, "cheats": cheats }
+        })
+    }
+
+    struct ReplaySpy {
+        health: Value,
+        gets: RefCell<Vec<String>>,
+        posts: Cell<usize>,
+    }
+
+    impl ReplaySpy {
+        fn new(health: Value) -> Self {
+            Self {
+                health,
+                gets: RefCell::new(Vec::new()),
+                posts: Cell::new(0),
+            }
+        }
+    }
+
+    impl ReplayTransport for ReplaySpy {
+        fn get(&self, path: &str) -> CliResult<Value> {
+            self.gets.borrow_mut().push(path.to_string());
+            match path {
+                "/health" => Ok(self.health.clone()),
+                "/obs" => Ok(json!({"phase":"main_menu", "runId":"none", "rev":1})),
+                _ => Err(CliError::fatal(format!("unexpected GET {path}"))),
+            }
+        }
+
+        fn post(&self, _path: &str, _body: Value) -> CliResult<Value> {
+            self.posts.set(self.posts.get() + 1);
+            Err(CliError::fatal("unexpected POST"))
+        }
+    }
+
+    fn replay_recipe(verbs: Vec<Value>) -> Value {
+        json!({
+            "complete": true,
+            "runId": "source-run",
+            "seed": "REPLAYTEST",
+            "verbs": verbs,
+        })
+    }
+
+    fn followed_verb(action: &str, args: Value) -> Value {
+        json!({
+            "runId": "source-run",
+            "action": action,
+            "args": args,
+            "phaseBefore": "main_menu",
+            "phaseAfter": "event",
+            "outcome": "settled",
+            "fingerprint": "0000000000000001",
+        })
     }
 
     #[test]
@@ -406,10 +932,14 @@ mod tests {
                 since,
                 wait,
                 compact,
+                decision,
+                known_cards,
             } => {
                 assert_eq!(since, Some(42));
                 assert_eq!(wait, Some(250));
                 assert!(!compact);
+                assert!(!decision);
+                assert!(known_cards.is_empty());
             }
             _ => panic!("expected obs command"),
         }
@@ -492,6 +1022,9 @@ mod tests {
         let client = Client {
             base: format!("http://{address}"),
             verbose: false,
+            if_rev: None,
+            if_run: None,
+            follow: None,
         };
 
         let start = Instant::now();
@@ -500,6 +1033,33 @@ mod tests {
         assert!(result.is_err());
         assert!(start.elapsed() < Duration::from_millis(200));
         server.join().unwrap();
+    }
+
+    #[test]
+    fn parses_decision_and_repeatable_known_card_keys() {
+        let cli = Cli::try_parse_from([
+            "spirescry",
+            "obs",
+            "--decision",
+            "--known-card",
+            "BASH+1@FOO!BAR",
+            "--known-card",
+            "STRIKE_IRONCLAD+0",
+        ])
+        .unwrap();
+
+        match cli.cmd {
+            Cmd::Obs {
+                decision,
+                known_cards,
+                ..
+            } => {
+                assert!(decision);
+                assert_eq!(known_cards, ["BASH+1@FOO!BAR", "STRIKE_IRONCLAD+0"]);
+            }
+            _ => panic!("expected obs command"),
+        }
+        assert_eq!(query_component("BASH+1@FOO!BAR"), "BASH%2B1%40FOO%21BAR");
     }
 
     #[test]
@@ -512,6 +1072,101 @@ mod tests {
 
         let cli = Cli::try_parse_from(["spirescry", "health"]).unwrap();
         assert!(!cli.verbose);
+    }
+
+    #[test]
+    fn parses_global_guard_flags_after_the_verb() {
+        let cli = Cli::try_parse_from([
+            "spirescry",
+            "end-turn",
+            "--if-rev",
+            "310",
+            "--if-run",
+            "abc123",
+        ])
+        .unwrap();
+
+        assert_eq!(cli.if_rev, Some(310));
+        assert_eq!(cli.if_run.as_deref(), Some("abc123"));
+    }
+
+    #[test]
+    fn client_step_serializes_both_guards() {
+        let client = Client {
+            base: "http://127.0.0.1:1".to_string(),
+            verbose: false,
+            if_rev: Some(42),
+            if_run: Some("run-1".to_string()),
+            follow: None,
+        };
+        let mut body = json!({ "action": "end-turn", "args": {} });
+        if let Some(rev) = client.if_rev {
+            body["ifRev"] = json!(rev);
+        }
+        if let Some(run) = &client.if_run {
+            body["ifRun"] = json!(run);
+        }
+
+        assert_eq!(body["ifRev"], 42);
+        assert_eq!(body["ifRun"], "run-1");
+    }
+
+    #[test]
+    fn parses_follow_with_default_or_explicit_timeout() {
+        let bare = Cli::try_parse_from(["spirescry", "end-turn", "--follow"]).unwrap();
+        assert_eq!(bare.follow, Some(5000));
+
+        let timed = Cli::try_parse_from([
+            "spirescry",
+            "end-turn",
+            "--follow",
+            "8000",
+            "--if-rev",
+            "42",
+        ])
+        .unwrap();
+        assert_eq!(timed.follow, Some(8000));
+        assert_eq!(timed.if_rev, Some(42));
+
+        let off = Cli::try_parse_from(["spirescry", "end-turn"]).unwrap();
+        assert_eq!(off.follow, None);
+    }
+
+    #[test]
+    fn replay_fingerprint_ignores_revision_and_run_identity_only() {
+        let a = json!({"phase":"map", "rev":1, "runId":"source", "hp":[50, 80]});
+        let b = json!({"phase":"map", "rev":900, "runId":"replay", "hp":[50, 80]});
+        let changed = json!({"phase":"map", "rev":1, "runId":"source", "hp":[49, 80]});
+
+        assert_eq!(state_fingerprint(&a), state_fingerprint(&b));
+        assert_ne!(state_fingerprint(&a), state_fingerprint(&changed));
+    }
+
+    #[test]
+    fn replay_protocol_mismatch_fails_before_obs_or_any_post() {
+        let spy = ReplaySpy::new(health(PROTOCOL_VERSION + 1, &["new-run"], &[]));
+        let recipe = replay_recipe(vec![followed_verb("new-run", json!({}))]);
+
+        let error = replay_value(&spy, &recipe).unwrap_err();
+
+        assert!(error.contains("incompatible host protocol"), "{error}");
+        assert_eq!(*spy.gets.borrow(), ["/health"]);
+        assert_eq!(spy.posts.get(), 0);
+    }
+
+    #[test]
+    fn replay_missing_late_capability_fails_before_obs_or_any_post() {
+        let spy = ReplaySpy::new(health(PROTOCOL_VERSION, &["new-run", "cheat"], &[]));
+        let recipe = replay_recipe(vec![
+            followed_verb("new-run", json!({})),
+            followed_verb("cheat", json!({"name":"gold", "value":100})),
+        ]);
+
+        let error = replay_value(&spy, &recipe).unwrap_err();
+
+        assert!(error.contains("does not advertise cheat 'gold'"), "{error}");
+        assert_eq!(*spy.gets.borrow(), ["/health"]);
+        assert_eq!(spy.posts.get(), 0);
     }
 
     #[test]
@@ -617,6 +1272,27 @@ mod tests {
     }
 
     #[test]
+    fn parses_skip_alternative_index_as_optional() {
+        let indexed = Cli::try_parse_from(["spirescry", "skip", "2"]).unwrap();
+        match indexed.cmd {
+            Cmd::Skip { idx } => {
+                assert_eq!(idx, Some(2));
+                assert_eq!(skip_args(idx), json!({ "idx": 2 }));
+            }
+            _ => panic!("expected skip command"),
+        }
+
+        let bare = Cli::try_parse_from(["spirescry", "skip"]).unwrap();
+        match bare.cmd {
+            Cmd::Skip { idx } => {
+                assert_eq!(idx, None);
+                assert_eq!(skip_args(idx), json!({}));
+            }
+            _ => panic!("expected skip command"),
+        }
+    }
+
+    #[test]
     fn cheat_goto_maps_position_args() {
         let args = cheat_args("goto", &strings(&["3", "5"])).unwrap();
 
@@ -661,6 +1337,19 @@ mod tests {
     }
 
     #[test]
+    fn cheat_sweep_helpers_map_args() {
+        let combat = cheat_args("combat", &strings(&["KAISER_CRAB"])).unwrap();
+        let potion = cheat_args("potion", &strings(&["FLEX_POTION"])).unwrap();
+        let stars = cheat_args("stars", &strings(&["99"])).unwrap();
+        let energy = cheat_args("energy", &strings(&["99"])).unwrap();
+
+        assert_eq!(combat, json!({ "name": "combat", "id": "KAISER_CRAB" }));
+        assert_eq!(potion, json!({ "name": "potion", "id": "FLEX_POTION" }));
+        assert_eq!(stars, json!({ "name": "stars", "value": 99 }));
+        assert_eq!(energy, json!({ "name": "energy", "value": 99 }));
+    }
+
+    #[test]
     fn cheat_rejects_invalid_numbers() {
         let err = cheat_args("goto", &strings(&["x", "5"])).unwrap_err();
 
@@ -679,5 +1368,74 @@ mod tests {
         let args = cheat_args("heal", &[]).unwrap();
 
         assert_eq!(args, json!({ "name": "heal" }));
+    }
+
+    #[test]
+    fn compatible_health_accepts_advertised_verb_and_cheat() {
+        let value = health(PROTOCOL_VERSION, &["play", "cheat"], &["relic"]);
+
+        assert_eq!(validate_health(&value, Some("play"), None), Ok(()));
+        assert_eq!(
+            validate_health(&value, Some("cheat"), Some("relic")),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn old_health_without_protocol_fails_fast() {
+        let err = validate_health(&json!({ "ok": true }), Some("play"), None).unwrap_err();
+
+        assert!(err.contains("no numeric protocolVersion"), "{err}");
+    }
+
+    #[test]
+    fn protocol_mismatch_names_both_versions_and_build() {
+        let old_protocol = PROTOCOL_VERSION - 1;
+        let err =
+            validate_health(&health(old_protocol, &["play"], &[]), Some("play"), None).unwrap_err();
+
+        assert!(err.contains(&format!("protocol {old_protocol}")), "{err}");
+        assert!(
+            err.contains(&format!("expects {PROTOCOL_VERSION}")),
+            "{err}"
+        );
+        assert!(err.contains("abc1234"), "{err}");
+    }
+
+    #[test]
+    fn missing_advertised_capability_fails_before_the_step() {
+        let value = health(PROTOCOL_VERSION, &["cheat"], &["gold"]);
+
+        let verb_err = validate_health(&value, Some("play"), None).unwrap_err();
+        assert!(verb_err.contains("does not advertise 'play'"), "{verb_err}");
+
+        let cheat_err = validate_health(&value, Some("cheat"), Some("relic")).unwrap_err();
+        assert!(cheat_err.contains("cheat 'relic'"), "{cheat_err}");
+    }
+
+    #[test]
+    fn bridge_not_ready_is_a_typed_transient_error() {
+        let error = parse_bridge_value(json!({
+            "ok": false,
+            "err": "not_ready",
+            "msg": "map intro animation"
+        }))
+        .unwrap_err();
+
+        assert!(matches!(error, CliError::Transient(_)), "{error}");
+        assert_eq!(error.exit_status(), 75);
+    }
+
+    #[test]
+    fn bad_state_bridge_rejections_are_typed_fatal_errors() {
+        let error = parse_bridge_value(json!({
+            "ok": false,
+            "err": "bad_state",
+            "msg": "pick more cards before confirming"
+        }))
+        .unwrap_err();
+
+        assert!(matches!(error, CliError::Fatal(_)), "{error}");
+        assert_eq!(error.exit_status(), 1);
     }
 }

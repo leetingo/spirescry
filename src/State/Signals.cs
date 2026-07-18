@@ -18,11 +18,18 @@ public static class Signals
     private static readonly object Gate = new();
     private static readonly List<(long rev, string type)> Log = new();
     private static readonly List<TaskCompletionSource<bool>> Waiters = new();
+    private static readonly List<TaskCompletionSource<bool>> TickWaiters = new();
+    private static readonly HashSet<Task> PendingAsync = new();
     private static long _revision;
+    private static long _tickCount;
     private static string _lastPhase = "";
+    private static object? _runStateRef;
+    private static string _runId = "none";
     private static GameAction? _watchedAction;
     private static DateTime _watchedSinceUtc;
     private static bool _wedgeAnnounced;
+    private static DateTime? _deadBoardSinceUtc;
+    private static bool _deadBoardAnnounced;
 
     // Milliseconds the executor has been stuck on the SAME action. The
     // serial executor never recovers from a parked action on its own —
@@ -35,6 +42,55 @@ public static class Signals
     private static NOverlayStack? _stack;
 
     public static long Revision { get { lock (Gate) return _revision; } }
+
+    public static long TickCount { get { lock (Gate) return _tickCount; } }
+
+    public static string RunId { get { lock (Gate) return _runId; } }
+
+    public static int PendingAsyncCount { get { lock (Gate) return PendingAsync.Count; } }
+
+    // Dispatcher fire-and-forget tasks are part of action settlement too.
+    // Tracking them closes the gap where GUI work had left the pump job but
+    // had not yet enqueued an engine action or changed phase.
+    public static void TrackAsync(Task task, string label)
+    {
+        lock (Gate) PendingAsync.Add(task);
+        _ = task.ContinueWith(completed =>
+        {
+            lock (Gate) PendingAsync.Remove(task);
+            Bump(AsyncCompletionEvent(completed, label));
+        }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
+    }
+
+    private static string AsyncCompletionEvent(Task task, string label)
+    {
+        if (task.Exception is not { } aggregate) return $"async:{label}";
+        var cause = aggregate.Flatten().InnerExceptions.FirstOrDefault() ?? aggregate;
+        var message = string.Join(' ', cause.Message.Split(
+            (char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+        if (message.Length > 160) message = message[..160];
+        return $"async_fault:{label}:{cause.GetType().Name}:{message}";
+    }
+
+    // Call from a main-thread pump job immediately before reading state or
+    // dispatching a verb. Tick also calls it, but Tick is only a notification
+    // path: optimistic guards must compare against the actual RunState in the
+    // same serialized job as dispatch, never against a prior frame's cache.
+    public static string RefreshRunIdentity()
+    {
+        var runState = RunManager.Instance?.DebugOnlyGetState();
+        string? changedTo = null;
+        lock (Gate)
+        {
+            if (ReferenceEquals(runState, _runStateRef)) return _runId;
+            _runStateRef = runState;
+            _runId = runState is null ? "none" : Guid.NewGuid().ToString("N")[..8];
+            changedTo = _runId;
+        }
+        Bump($"run:{changedTo}");
+        return changedTo;
+    }
 
     public static void Bump(string type)
     {
@@ -62,11 +118,15 @@ public static class Signals
     {
         EnsureSubscribed();
         WatchExecutor();
+        RefreshRunIdentity();
         var phase = PhaseDetector.Current().AsString();
-        if (phase == _lastPhase) return;
-        var from = _lastPhase;
-        _lastPhase = phase;
-        Bump($"phase:{from}->{phase}");
+        if (phase != _lastPhase)
+        {
+            var from = _lastPhase;
+            _lastPhase = phase;
+            Bump($"phase:{from}->{phase}");
+        }
+        AdvanceTick();
     }
 
     // True when the revision moved past `since`; false on timeout.
@@ -84,6 +144,40 @@ public static class Signals
         finally { lock (Gate) Waiters.Remove(tcs); }
     }
 
+    // GUI callbacks do not all expose a Task or an engine event. Follow
+    // therefore also observes distinct process frames before declaring a
+    // quiet GUI action settled. Headless Tick calls remain useful to tests,
+    // but headless follow resolves synchronously and does not wait on them.
+    public static async Task<bool> WaitForTick(long after, int timeoutMs)
+    {
+        TaskCompletionSource<bool> tcs;
+        lock (Gate)
+        {
+            if (_tickCount > after) return true;
+            tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            TickWaiters.Add(tcs);
+        }
+        try { return await tcs.Task.WaitAsync(TimeSpan.FromMilliseconds(timeoutMs)); }
+        catch (TimeoutException) { return false; }
+        finally { lock (Gate) TickWaiters.Remove(tcs); }
+    }
+
+    private static void AdvanceTick()
+    {
+        List<TaskCompletionSource<bool>>? wake = null;
+        lock (Gate)
+        {
+            _tickCount++;
+            if (TickWaiters.Count > 0)
+            {
+                wake = new List<TaskCompletionSource<bool>>(TickWaiters);
+                TickWaiters.Clear();
+            }
+        }
+        if (wake is null) return;
+        foreach (var waiter in wake) waiter.TrySetResult(true);
+    }
+
     public static object[] EventsSince(long since)
     {
         lock (Gate)
@@ -95,6 +189,7 @@ public static class Signals
     private static void WatchExecutor()
     {
         var running = RunManager.Instance?.ActionExecutor?.CurrentlyRunningAction;
+        WatchDeadBoard(running);
         if (running is null || !ReferenceEquals(running, _watchedAction))
         {
             _watchedAction = running;
@@ -119,6 +214,55 @@ public static class Signals
             _wedgeAnnounced = true;
             Bump($"wedge:{running.GetType().Name}");
         }
+    }
+
+    // The stuck-executor clock above can't see the other fatal shape: an
+    // exception mid death-resolution aborts the chain, leaving nothing
+    // running, nothing queued, every enemy dead — and the combat never
+    // ending. Executor-idle resets the wedge clock, so a second clock
+    // times the dead board itself and announces once past the same
+    // threshold.
+    private static void WatchDeadBoard(GameAction? running)
+    {
+        var combat = CombatManager.Instance;
+        // IsEnding legitimately has an all-dead board while victory
+        // actions, revives, and phase transitions are still settling.
+        var queuesEmpty = RunManager.Instance is { } rm
+            && EngineQueues.All(rm).All(q => q.depth == 0);
+        var deadBoard = ResolutionGuards.IsDeadBoardCandidate(
+            running is not null,
+            HeadlessPicker.IsActive,
+            combat is { IsInProgress: true },
+            combat is { IsEnding: true },
+            queuesEmpty,
+            combat is not null && AllEnemiesDead(combat));
+        if (!deadBoard)
+        {
+            _deadBoardSinceUtc = null;
+            _deadBoardAnnounced = false;
+            return;
+        }
+        _deadBoardSinceUtc ??= DateTime.UtcNow;
+        if (!_deadBoardAnnounced
+            && (DateTime.UtcNow - _deadBoardSinceUtc.Value).TotalMilliseconds > 8000)
+        {
+            _deadBoardAnnounced = true;
+            Bump("wedge:DeadBoard");
+        }
+    }
+
+    private static bool AllEnemiesDead(CombatManager combat)
+    {
+        var enemies = combat.DebugOnlyGetState()?.Enemies;
+        if (enemies is null) return false;
+        var any = false;
+        foreach (var e in enemies)
+        {
+            if (e is null) continue;
+            any = true;
+            if (e.IsAlive) return false;
+        }
+        return any;
     }
 
     // New runs / scene loads construct fresh engine singletons; cheap
