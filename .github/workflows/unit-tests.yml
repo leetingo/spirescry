@@ -28,7 +28,10 @@ jobs:
           components: rustfmt, clippy
 
       - name: Run C# unit tests
-        run: dotnet run --project tests/UnitTests/UnitTests.csproj
+        run: dotnet run --project tests/UnitTests/UnitTests.csproj -p:TreatWarningsAsErrors=true
+
+      - name: Build Godot stubs with warnings as errors
+        run: dotnet build headless/GodotStubs/GodotStubs.csproj --configuration Release --nologo --verbosity minimal -p:TreatWarningsAsErrors=true
 
       - name: Check CLI formatting
         run: cargo fmt --manifest-path cli/Cargo.toml --all -- --check

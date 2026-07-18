@@ -96,8 +96,8 @@ headless_setup() {
     ok "8 dlls"
 
     step "IL-patch sts2.dll → $libdir/sts2.headless.dll"
-    dotnet run --project headless/Patcher -c Release -- \
-        "$data_dir/sts2.dll" "$libdir/sts2.headless.dll" | tail -2
+    dotnet run --project headless/Patcher -c Release --verbosity minimal -- \
+        "$data_dir/sts2.dll" "$libdir/sts2.headless.dll"
 
     # LocManager normally reads the tables via res:// from the .pck, which
     # doesn't resolve without the engine — extract them to disk.
@@ -116,7 +116,7 @@ headless_setup() {
     fi
 
     step "build host"
-    dotnet build -c Release headless/Host/Host.csproj | tail -3
+    dotnet build -c Release headless/Host/Host.csproj --nologo --verbosity minimal
     [ -x headless/Host/bin/Release/spirescry_host ] || die "host build produced no binary"
     ok "headless/Host/bin/Release/spirescry_host"
 }
@@ -156,14 +156,14 @@ launch_host() {
 build_mod() {
     [ -f lib/sts2.dll ] || die "lib/sts2.dll missing — run: ./build.sh libs"
     step "build mod (Release)"
-    dotnet build -c Release src/Spirescry.csproj | tail -3
+    dotnet build -c Release src/Spirescry.csproj --nologo --verbosity minimal
     [ -f src/bin/Release/spirescry.dll ] || die "mod build did not produce spirescry.dll"
     ok "src/bin/Release/spirescry.dll"
 }
 
 build_cli() {
     step "build cli (cargo --release)"
-    (cd cli && cargo build --release) 2>&1 | tail -3
+    (cd cli && cargo build --release --quiet)
     [ -x cli/target/release/spirescry ] || die "cli build did not produce spirescry"
     ok "cli/target/release/spirescry"
 }
