@@ -7,8 +7,25 @@ repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 scratch="$(mktemp -d "${TMPDIR:-/tmp}/spirescry-stop-test.XXXXXX")"
 fakebin="$scratch/bin"
 mkdir -p "$fakebin"
-trap 'jobs -pr | xargs kill -9 2>/dev/null || true; rm -rf "$scratch"' EXIT
 real_ps="$(command -v ps)"
+host_dll="$repo/headless/Host/bin/Release/spirescry_host.dll"
+created_host_dll=0
+
+cleanup() {
+    jobs -pr | xargs kill -9 2>/dev/null || true
+    rm -rf "$scratch"
+    [ "$created_host_dll" = 0 ] || rm -f "$host_dll"
+}
+trap cleanup EXIT
+
+# CI runs this shell suite without the proprietary game assemblies needed to
+# build Host. The launcher only needs the path to exist before our fake dotnet
+# takes over, so provide a disposable ignored build artifact when necessary.
+if [ ! -f "$host_dll" ]; then
+    mkdir -p "$(dirname "$host_dll")"
+    : > "$host_dll"
+    created_host_dll=1
+fi
 
 timeout_host_pidfile="$scratch/timeout-host.pid"
 timeout_port="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')"
