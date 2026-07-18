@@ -24,9 +24,17 @@ jobs:
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
 
       - name: Run C# unit tests
         run: dotnet run --project tests/UnitTests/UnitTests.csproj
 
+      - name: Check CLI formatting
+        run: cargo fmt --manifest-path cli/Cargo.toml --all -- --check
+
       - name: Run CLI unit tests
-        run: cargo test --manifest-path cli/Cargo.toml
+        run: cargo test --manifest-path cli/Cargo.toml --locked --all-targets --all-features
+
+      - name: Lint CLI
+        run: cargo clippy --manifest-path cli/Cargo.toml --locked --all-targets --all-features -- -D warnings
