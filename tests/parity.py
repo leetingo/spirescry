@@ -129,7 +129,7 @@ def kill_current_combat():
         atk = next((c for c in d["hand"]
                     if c["target"] == "anyenemy" and c["cost"] <= energy), None)
         if atk:
-            run("play", atk["model"], "--target", str(alive[0]["id"]), ok=True)
+            run("play", atk["selector"], "--target", str(alive[0]["id"]), ok=True)
             time.sleep(1)
         else:
             run("end-turn", ok=True)

@@ -49,15 +49,47 @@ def wait_for_line(proc, log, expected, timeout=5):
     )
 
 
-def signal_shutdown():
-    proc, log = launch("wait")
+def clean_shutdown():
+    proc, log = launch("clean")
     try:
-        wait_for_line(proc, log, "exit-trail test ready")
-        proc.send_signal(signal.SIGTERM)
         proc.wait(timeout=5)
         text = log_text(log)
         assert proc.returncode == 0, (proc.returncode, text)
-        assert "shutdown: signal SIGTERM" in text, text
+        assert "shutdown: clean self-test" in text, text
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+        log.close()
+
+
+def process_exit_shutdown():
+    proc, log = launch("process-exit")
+    try:
+        proc.wait(timeout=5)
+        text = log_text(log)
+        assert proc.returncode == 0, (proc.returncode, text)
+        assert "shutdown: process exit" in text, text
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+        log.close()
+
+
+def signal_shutdown(sig):
+    proc, log = launch("wait")
+    try:
+        wait_for_line(proc, log, "exit-trail test ready")
+        proc.send_signal(sig)
+        proc.wait(timeout=5)
+        text = log_text(log)
+        assert proc.returncode == 0, (proc.returncode, text)
+        expected = {
+            signal.SIGINT: ("shutdown: signal SIGINT", "shutdown: console ControlC"),
+            signal.SIGQUIT: ("shutdown: signal SIGQUIT", "shutdown: console ControlBreak"),
+        }.get(sig, (f"shutdown: signal {signal.Signals(sig).name}",))
+        assert any(line in text for line in expected), text
     finally:
         if proc.poll() is None:
             proc.kill()
@@ -86,15 +118,26 @@ def main():
     if not os.path.isfile(HOST_DLL):
         sys.exit(f"host not built ({HOST_DLL}) — run: ./build.sh headless-setup")
 
-    checks = (signal_shutdown, unhandled_exception)
+    checks = [
+        ("clean_shutdown", clean_shutdown),
+        ("process_exit_shutdown", process_exit_shutdown),
+    ]
+    checks.extend(
+        (
+            f"signal_shutdown_{signal.Signals(sig).name}",
+            lambda sig=sig: signal_shutdown(sig),
+        )
+        for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP, signal.SIGQUIT)
+    )
+    checks.append(("unhandled_exception", unhandled_exception))
     failures = 0
-    for check in checks:
+    for name, check in checks:
         try:
             check()
-            print(f"ok - {check.__name__}")
+            print(f"ok - {name}")
         except Exception as ex:
             failures += 1
-            print(f"not ok - {check.__name__}: {ex}", file=sys.stderr)
+            print(f"not ok - {name}: {ex}", file=sys.stderr)
     return 1 if failures else 0
 
 

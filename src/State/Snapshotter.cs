@@ -6,7 +6,6 @@ using MegaCrit.Sts2.Core.Entities.Creatures;
 using MegaCrit.Sts2.Core.Entities.Players;
 using MegaCrit.Sts2.Core.Localization;
 using MegaCrit.Sts2.Core.Models;
-using MegaCrit.Sts2.Core.Models.Events;
 using MegaCrit.Sts2.Core.MonsterMoves.Intents;
 using MegaCrit.Sts2.Core.Nodes;
 using MegaCrit.Sts2.Core.Nodes.Cards;
@@ -236,10 +235,7 @@ public static class Snapshotter
                 })
                 .ToArray();
         return cards
-            .GroupBy(c => c.Id.Entry
-                + (c.IsUpgraded ? "+" : "")
-                + (c.Enchantment is { } e ? "@" + e.Id.Entry : "")
-                + (c.Affliction is { } a ? "!" + a.Id.Entry : ""))
+            .GroupBy(CardSpecifier.From)
             .OrderBy(g => g.Key)
             .ToDictionary(g => g.Key, g => g.Count());
     }
@@ -299,7 +295,7 @@ public static class Snapshotter
     {
         var models = (pile?.Cards ?? Enumerable.Empty<CardModel>())
             .Where(c => c != null)
-            .Select(c => c.Id.Entry);
+            .Select(CardSpecifier.From);
         // Compact: counts-by-model — pile order is either hidden (draw is
         // shown sorted anyway) or rarely decision-relevant.
         if (_compact)
@@ -659,7 +655,11 @@ public static class Snapshotter
                 .OrderBy(id => id, StringComparer.Ordinal)
                 .ToArray();
         }
-        catch { return []; }
+        catch (Exception ex)
+        {
+            SafeLog.Error($"map markers at {point.coord.col},{point.coord.row}", ex);
+            return [];
+        }
     }
 
     // BFS over the act map from its start points. The final act's second
@@ -725,7 +725,6 @@ public static class Snapshotter
             title = SafeText(ev.Title),
             description = SafeText(ev.Description),
             finished = ev.IsFinished,
-            fakeMerchant = ev is FakeMerchant fake ? FakeMerchantView(fake) : null,
             options = (ev.CurrentOptions ?? []).Select((o, i) => new
             {
                 idx = i,
@@ -735,33 +734,6 @@ public static class Snapshotter
                 chosen = o.WasChosen,
                 proceed = o.IsProceed,
             }).ToArray(),
-        };
-    }
-
-    // FAKE_MERCHANT is an event-backed shop, so it has no normal shop
-    // snapshot. Surface the inventory (and the Foul Potion gate) while the
-    // event is active so an agent can make the same decision as the GUI.
-    private static object FakeMerchantView(FakeMerchant fake)
-    {
-        var owner = fake.Owner;
-        var inventory = fake.Inventory;
-        return new
-        {
-            available = inventory is not null,
-            canFight = owner?.PotionSlots.Any(p => p?.Id.Entry == "FOUL_POTION") == true,
-            relics = (inventory?.RelicEntries ?? [])
-                .Select((entry, i) => new
-                {
-                    idx = i,
-                    model = entry.Model?.Id.Entry,
-                    title = entry.Model is { } relic ? SafeText(relic.Title) : null,
-                    description = entry.Model is { } described
-                        ? SafeText(described.DynamicDescription)
-                        : null,
-                    cost = entry.Cost,
-                    stocked = entry.IsStocked,
-                    affordable = entry.EnoughGold,
-                }).ToArray(),
         };
     }
 
@@ -874,6 +846,7 @@ public static class Snapshotter
                     return (object)new
                     {
                         model = c.Id.Entry,
+                        selector = CardSpecifier.From(c),
                         cost = c.EnergyCost.GetAmountToSpend(),
                         starCost = StarCost(c),
                         target = c.TargetType.ToString().ToLowerInvariant(),

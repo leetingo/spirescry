@@ -295,7 +295,7 @@ def c1():
     e0 = d["you"]["energy"][0]
 
     defend = next(c for c in d["hand"] if c["model"].startswith("DEFEND"))
-    run("play", defend["model"])
+    run("play", defend["selector"])
     time.sleep(1)
     d = obs()
     assert d["you"]["block"] > 0, "Defend raised no block"
@@ -303,7 +303,7 @@ def c1():
         f"energy {e0} - {defend['cost']} != {d['you']['energy'][0]}"
 
     atk = next(c for c in d["hand"] if c["target"] == "anyenemy")
-    reject(["play", atk["model"], "--target", "99"], "bad_target")
+    reject(["play", atk["selector"], "--target", "99"], "bad_target")
 
     # Drain energy with the cheapest legal plays; the first over-cost
     # attempt must come back as not_enough_energy, not something vaguer.
@@ -317,14 +317,14 @@ def c1():
         playable = [c for c in hand if c["cost"] <= energy]
         if over:
             c = over[0]
-            args = ["play", c["model"]]
+            args = ["play", c["selector"]]
             if c["target"] == "anyenemy":
                 args += ["--target", str(alive_enemy(d)["id"])]
             reject(args, "not_enough_energy")
             break
         assert playable, "hand emptied before any card went over cost"
         c = min(playable, key=lambda c: c["cost"])
-        args = ["play", c["model"]]
+        args = ["play", c["selector"]]
         if c["target"] == "anyenemy":
             args += ["--target", str(alive_enemy(d)["id"])]
         run(*args, ok=True)
@@ -351,12 +351,11 @@ def a1():
     run("cheat", "goto", str(treasure["col"]), str(treasure["row"]))
     bridge.wait_phase("treasure")
 
-    for _ in range(10):
-        d = obs()
-        if d.get("relics"):
-            break
-        time.sleep(0.2)
-    assert d.get("relics"), "treasure chest never offered a relic"
+    d = bridge.wait_until(
+        lambda snapshot: bool(snapshot.get("relics")),
+        timeout=5,
+        description="treasure relic offer",
+    )
 
     run("pick-relic", str(d["relics"][0]["idx"]))
     d = obs()
@@ -411,6 +410,15 @@ def a3():
     base_before = copies(d, False)
     upgraded_before = copies(d, True)
     assert base_before > 0 and upgraded_before >= 2, d["hand"]
+    assert any(c["selector"] == "STRIKE_IRONCLAD" for c in d["hand"]), d["hand"]
+    assert any(c["selector"] == "STRIKE_IRONCLAD+" for c in d["hand"]), d["hand"]
+
+    status, result = http("POST", "/step", {
+        "action": "play",
+        "args": {"model": "STRIKE_IRONCLAD+", "target": "not-an-id"},
+    })
+    assert status == 400 and result.get("err") == "bad_request", result
+    assert copies(obs(), True) == upgraded_before, "malformed target played a card"
 
     status, result = http("POST", "/step", {
         "action": "play",
@@ -547,14 +555,16 @@ def i3():
         return next(p for p in obs()["you"]["powers"] if p["id"] == model)
 
     def next_turn():
+        before_turn = obs()["turn"]
         run("cheat", "heal", ok=True)
         run("end-turn")
-        for _ in range(20):
-            d = obs()
-            if d.get("phase") == "combat" and d.get("side") == "player":
-                return
-            time.sleep(0.3)
-        raise AssertionError("player turn never returned")
+        bridge.wait_until(
+            lambda snapshot: snapshot.get("phase") == "combat"
+            and snapshot.get("side") == "player"
+            and snapshot.get("turn", before_turn) > before_turn,
+            timeout=8,
+            description="next player turn",
+        )
 
     # Exact QA regressions: the static prose says 3/25, while upgraded
     # cards apply larger live values. The snapshot must render those values.
@@ -612,11 +622,11 @@ def i4():
         before_left = full["divinationsLeft"]
         before_hidden = sum(c["hidden"] for c in full["cells"])
         run("map-move", str(coord[0]), str(coord[1]))
-        for _ in range(20):
-            full = obs()
-            if full.get("divinationsLeft", before_left) < before_left:
-                break
-            time.sleep(0.1)
+        full = bridge.wait_until(
+            lambda snapshot: snapshot.get("divinationsLeft", before_left) < before_left,
+            timeout=5,
+            description="crystal divination",
+        )
         assert full["divinationsLeft"] == before_left - 1, full
         assert sum(c["hidden"] for c in full["cells"]) < before_hidden, full
         compact = run("obs", "--compact")
@@ -651,11 +661,11 @@ def i5():
     parity.kill_current_combat()
     bridge.wait_phase("rewards")
     run("proceed")
-    for _ in range(60):
-        d = obs()
-        if d.get("phase") == "map" and d.get("act") == 1:
-            break
-        time.sleep(0.5)
+    d = bridge.wait_until(
+        lambda snapshot: snapshot.get("phase") == "map" and snapshot.get("act") == 1,
+        timeout=30,
+        description="act 2 map",
+    )
     assert d.get("act") == 1, d
 
     marked = d.get("marked")

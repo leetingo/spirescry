@@ -13,6 +13,11 @@ var lifetime = HostLifetime.Install();
 // game assembly so tests can force exit paths in isolation.
 switch (Environment.GetEnvironmentVariable("STS2_HOST_EXIT_TRAIL_TEST"))
 {
+    case "clean":
+        lifetime.LogShutdown("clean self-test");
+        return 0;
+    case "process-exit":
+        return 0;
     case "wait":
         HostLog.Info("exit-trail test ready");
         lifetime.WaitAndLogShutdown();

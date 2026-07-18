@@ -112,7 +112,7 @@ enum Cmd {
     Cheat { name: String, values: Vec<String> },
     /// Play an exact hand-card selector (MODEL, MODEL+, MODEL@ENCHANTMENT, MODEL!AFFLICTION)
     Play {
-        /// Selector from obs.hand; identical selectors resolve in hand order
+        /// Exact obs.hand selector; identical selectors resolve in hand order
         model: String,
         /// Enemy combat id (omit to auto-target a lone enemy)
         #[arg(long)]
@@ -261,9 +261,11 @@ fn cheat_args(name: &str, values: &[String]) -> Result<Value, String> {
             args["row"] = json!(num(row)?);
         }
         ("gold", [value]) | ("hp", [value]) => args["value"] = json!(num(value)?),
-        ("event", [id]) | ("card", [id]) | ("card-upgraded", [id]) | ("relic", [id]) => {
-            args["id"] = json!(id)
-        }
+        ("event", [id])
+        | ("card", [id])
+        | ("card-upgraded", [id])
+        | ("potion", [id])
+        | ("relic", [id]) => args["id"] = json!(id),
         _ => {}
     }
     Ok(args)
@@ -643,14 +645,16 @@ mod tests {
     }
 
     #[test]
-    fn cheat_card_upgraded_and_relic_map_id() {
+    fn cheat_card_upgraded_potion_and_relic_map_id() {
         let upgraded = cheat_args("card-upgraded", &strings(&["WHIRLWIND"])).unwrap();
+        let potion = cheat_args("potion", &strings(&["FOUL_POTION"])).unwrap();
         let relic = cheat_args("relic", &strings(&["KUNAI"])).unwrap();
 
         assert_eq!(
             upgraded,
             json!({ "name": "card-upgraded", "id": "WHIRLWIND" })
         );
+        assert_eq!(potion, json!({ "name": "potion", "id": "FOUL_POTION" }));
         assert_eq!(relic, json!({ "name": "relic", "id": "KUNAI" }));
     }
 

@@ -65,14 +65,17 @@ def dig_crystal():
     before_hidden = before.get("hiddenCells", sum(c.get("hidden", False)
                                                    for c in before.get("cells", [])))
     run("map-move", str(hidden["col"]), str(hidden["row"]), ok=True)
-    for _ in range(20):
-        after = obs()
-        if after.get("divinationsLeft", before_left) < before_left:
-            after_hidden = after.get("hiddenCells", sum(c.get("hidden", False)
-                                                        for c in after.get("cells", [])))
-            return after_hidden < before_hidden
-        time.sleep(0.1)
-    return False
+    after = bridge.wait_until(
+        lambda snapshot: snapshot.get("divinationsLeft", before_left) < before_left,
+        timeout=5,
+        raise_on_timeout=False,
+        description="crystal divination",
+    )
+    if after is None:
+        return False
+    after_hidden = after.get("hiddenCells", sum(c.get("hidden", False)
+                                                for c in after.get("cells", [])))
+    return after_hidden < before_hidden
 
 # event list from the cheat's known-list error (needs map phase)
 fresh_run()

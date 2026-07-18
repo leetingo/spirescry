@@ -11,7 +11,9 @@ using MegaCrit.Sts2.Core.GameActions;
 using MegaCrit.Sts2.Core.Map;
 using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Entities.Merchant;
+using MegaCrit.Sts2.Core.Entities.Potions;
 using MegaCrit.Sts2.Core.Multiplayer.Game;
+using MegaCrit.Sts2.Core.Models.Potions;
 using MegaCrit.Sts2.Core.Nodes;
 using MegaCrit.Sts2.Core.Nodes.Cards;
 using MegaCrit.Sts2.Core.Nodes.Cards.Holders;
@@ -1369,9 +1371,18 @@ public static class Dispatcher
 
         if (phase == Phase.Shop)
         {
-            if (potion.Id.Entry != "FOUL_POTION")
+            // Mirror the potion popup's model-layer gates. The headless
+            // fallback covers only the custom UI-node check: Phase.Shop has
+            // already established the semantic MerchantRoom and host mode
+            // intentionally has no NMerchantButton to satisfy that check.
+            var usable = potion is FoulPotion
+                && potion.Usage == PotionUsage.AnyTime
+                && player.Creature is { IsDead: false }
+                && player.CanUseOrRemovePotions
+                && (potion.PassesCustomUsabilityCheck || RunMode.IsHeadless);
+            if (!usable)
                 return DispatchResult.Reject("not_playable",
-                    $"{potion.Id.Entry} has no merchant interaction; only FOUL_POTION can be used in the shop");
+                    $"{potion.Id.Entry} has no available merchant interaction in this shop");
             potion.EnqueueManualUse(null!);
             return DispatchResult.Success();
         }
@@ -1419,10 +1430,11 @@ public static class Dispatcher
 
         var pcs = player.PlayerCombatState!;
         var card = pcs.Hand.Cards.FirstOrDefault(c =>
-            c != null && string.Equals(CardSpecifier(c), model, StringComparison.OrdinalIgnoreCase));
+            c != null && string.Equals(State.CardSpecifier.From(c), model, StringComparison.OrdinalIgnoreCase));
         if (card is null)
         {
-            var hand = string.Join(",", pcs.Hand.Cards.Where(c => c != null).Select(CardSpecifier));
+            var hand = string.Join(",", pcs.Hand.Cards.Where(c => c != null)
+                .Select(State.CardSpecifier.From));
             return DispatchResult.Reject("bad_index", $"no '{model}' in hand [{hand}]");
         }
 
@@ -1454,15 +1466,6 @@ public static class Dispatcher
         return DispatchResult.Success();
     }
 
-    // The same stable suffixes compact pile snapshots use: an unsuffixed ID
-    // means an unupgraded, unenchanted, unafflicted copy; +/@/! select the
-    // corresponding variant. Identical copies resolve by hand order.
-    private static string CardSpecifier(CardModel card) =>
-        card.Id.Entry
-        + (card.IsUpgraded ? "+" : "")
-        + (card.Enchantment is { } enchantment ? $"@{enchantment.Id.Entry}" : "")
-        + (card.Affliction is { } affliction ? $"!{affliction.Id.Entry}" : "");
-
     private static DispatchResult EndTurn(CombatState state, Player player)
     {
         Enqueue(RunManager.Instance!, new EndPlayerTurnAction(player, state.RoundNumber));
@@ -1472,6 +1475,11 @@ public static class Dispatcher
     private static (Creature? target, DispatchResult? err) ResolveTarget(
         TargetType type, JsonElement args, CombatState state, Player player)
     {
+        if (args.TryGetProperty("target", out var targetArg)
+            && (targetArg.ValueKind != JsonValueKind.Number || !targetArg.TryGetUInt32(out _)))
+            return (null, DispatchResult.Reject("bad_request",
+                "args.target must be an unsigned 32-bit combat id"));
+
         switch (type)
         {
             case TargetType.AnyEnemy:

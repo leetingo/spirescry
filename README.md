@@ -67,7 +67,8 @@ Errors ride on 4xx/5xx as `{"ok": false, "err": "<code>", "msg": "..."}`
 with codes that say what to change (`bad_phase`, `not_enough_energy`,
 `bad_target`, `not_ready`, …).
 
-`play` uses the same exact card specifiers as compact pile counts:
+Combat hand entries expose `selector`; `play` accepts that exact value, using
+the same card specifiers as compact deck and pile counts:
 `MODEL` selects an unmodified base copy, `MODEL+` an upgraded copy, and
 `@ENCHANTMENT` / `!AFFLICTION` select those variants; otherwise-identical
 copies resolve by their stable order in the hand.

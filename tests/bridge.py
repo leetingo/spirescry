@@ -45,16 +45,30 @@ def obs(since=None, wait_ms=2000):
 def wait_phase(*want, timeout=20, raise_on_timeout=True, on_obs=None):
     """Return the first snapshot whose phase is in `want`, riding the
     revision long-poll between reads; None on timeout when not raising."""
+    return wait_until(
+        lambda d: d.get("phase") in want,
+        timeout=timeout,
+        raise_on_timeout=raise_on_timeout,
+        description=f"phase in {want}",
+        on_obs=on_obs,
+    )
+
+
+def wait_until(predicate, timeout=20, raise_on_timeout=True,
+               description="condition", on_obs=None):
+    """Wait until `predicate(snapshot)` is true using revision long-polls."""
     deadline = time.monotonic() + timeout
     since = None
     while True:
         d = obs(since)
         if on_obs:
             on_obs(d)
-        if d.get("phase") in want:
+        if predicate(d):
             return d
         if time.monotonic() >= deadline:
             if raise_on_timeout:
-                raise AssertionError(f"phase stuck at {d.get('phase')}, wanted {want}")
+                raise AssertionError(
+                    f"timed out waiting for {description}; last phase={d.get('phase')}"
+                )
             return None
         since = d.get("rev")
