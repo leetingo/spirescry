@@ -148,39 +148,34 @@ rotate_log() {
 # A PID alone is not an identity: after a process exits, the kernel can reuse
 # it for an unrelated program. Capture both start time and command, and treat a
 # zombie as already stopped. All signals below are gated by this snapshot.
-process_snapshot() {
-    local snapshot snapshot_status
-    snapshot=""
-    if snapshot="$(ps -p "$1" -o lstart= -o command= 2>&1)"; then
-        snapshot="$(printf '%s\n' "$snapshot" | sed -E 's/^[[:space:]]+//')"
-        [ -n "$snapshot" ] || return 2
-        printf '%s\n' "$snapshot"
+read_process_fields() {
+    local pid value value_status
+    pid="$1"
+    shift
+    value=""
+    if value="$(ps -p "$pid" "$@" 2>&1)"; then
+        value="$(printf '%s\n' "$value" | sed -E 's/^[[:space:]]+//')"
+        [ -n "$value" ] || return 2
+        printf '%s\n' "$value"
         return 0
     else
-        snapshot_status=$?
+        value_status=$?
     fi
     # BSD/GNU ps use 1 for a well-formed query that selected no process.
     # Invocation/permission failures use another status and stay unknown.
-    [ "$snapshot_status" = 1 ] && return 1
+    [ "$value_status" = 1 ] && return 1
     return 2
+}
+
+process_snapshot() {
+    read_process_fields "$1" -o lstart= -o command=
 }
 
 # The command may legitimately change in-place when a launcher shell execs
 # dotnet. Process start time does not, so keep it as the launch identity that
 # survives that transition and detects a recycled PID running the same command.
 process_start_identity() {
-    local identity identity_status
-    identity=""
-    if identity="$(ps -p "$1" -o lstart= 2>&1)"; then
-        identity="$(printf '%s\n' "$identity" | sed -E 's/^[[:space:]]+//')"
-        [ -n "$identity" ] || return 2
-        printf '%s\n' "$identity"
-        return 0
-    else
-        identity_status=$?
-    fi
-    [ "$identity_status" = 1 ] && return 1
-    return 2
+    read_process_fields "$1" -o lstart=
 }
 
 process_state() {
@@ -307,18 +302,22 @@ launch_host() {
     # wait_bridge calls die on deadline. Run it in a subshell so launch_host
     # can still reclaim the exact child it started before returning failure.
     if ! (wait_bridge 30 "$log"); then
-        timeout_start_status=0
-        timeout_start_identity="$(process_start_identity "$host_pid")" || timeout_start_status=$?
+        timeout_start_before_status=0
+        timeout_start_before="$(process_start_identity "$host_pid")" || timeout_start_before_status=$?
         timeout_snapshot_status=0
         timeout_snapshot="$(process_snapshot "$host_pid")" || timeout_snapshot_status=$?
+        timeout_start_after_status=0
+        timeout_start_after="$(process_start_identity "$host_pid")" || timeout_start_after_status=$?
         timeout_state="$(process_state "$host_pid")"
         if [ "$timeout_state" = unknown ] \
             || { [ "$timeout_state" = live ] \
-                && { [ "$timeout_start_status" != 0 ] \
-                    || [ "$timeout_snapshot_status" != 0 ]; }; }; then
+                && { [ "$timeout_start_before_status" != 0 ] \
+                    || [ "$timeout_snapshot_status" != 0 ] \
+                    || [ "$timeout_start_after_status" != 0 ]; }; }; then
             die "bridge timed out and host PID $host_pid cannot be inspected safely"
         elif [ "$timeout_state" = live ]; then
-            [ "$timeout_start_identity" = "$host_start_identity" ] || \
+            [ "$timeout_start_before" = "$host_start_identity" ] \
+                && [ "$timeout_start_after" = "$host_start_identity" ] || \
                 die "bridge timed out and host PID $host_pid start identity changed — refusing to signal it"
             is_this_host_snapshot "$timeout_snapshot" || \
                 die "bridge timed out and PID $host_pid no longer belongs to this host"
@@ -331,13 +330,17 @@ launch_host() {
     # exec dotnet a moment later without changing PID/start time. Persist
     # the stable, post-boot command so stop does not mistake that exec for
     # PID reuse.
-    booted_start_status=0
-    booted_start_identity="$(process_start_identity "$host_pid")" || booted_start_status=$?
+    booted_start_before_status=0
+    booted_start_before="$(process_start_identity "$host_pid")" || booted_start_before_status=$?
     host_snapshot_status=0
     host_snapshot="$(process_snapshot "$host_pid")" || host_snapshot_status=$?
+    booted_start_after_status=0
+    booted_start_after="$(process_start_identity "$host_pid")" || booted_start_after_status=$?
     [ "$(process_state "$host_pid")" = live ] \
-        && [ "$booted_start_status" = 0 ] \
-        && [ "$booted_start_identity" = "$host_start_identity" ] \
+        && [ "$booted_start_before_status" = 0 ] \
+        && [ "$booted_start_after_status" = 0 ] \
+        && [ "$booted_start_before" = "$host_start_identity" ] \
+        && [ "$booted_start_after" = "$host_start_identity" ] \
         && [ "$host_snapshot_status" = 0 ] \
         && is_this_host_snapshot "$host_snapshot" || \
         die "booted host PID $host_pid could not be identified"

@@ -108,9 +108,9 @@ fi
 [ "$timeout_failure" = 0 ] || exit 1
 
 # A matching command is not enough identity: the kernel may recycle the PID
-# for a new invocation of that same command. Let the two launch-time reads
-# agree, then make the timeout observation differ while the real process and
-# command remain unchanged.
+# for a new invocation of that same command. Let both launch-time reads and
+# the timeout's pre-snapshot read agree, then make the post-snapshot identity
+# differ while the real process and command remain unchanged.
 rm -f "$timeout_host_pidfile" "$scratch/start-count" "$fakebin/ps"
 printf '%s\n' \
     '#!/bin/sh' \
@@ -121,7 +121,7 @@ printf '%s\n' \
     '        [ ! -f "$SPIRESCRY_TEST_START_COUNT" ] || read -r count < "$SPIRESCRY_TEST_START_COUNT"' \
     '        count=$((count + 1))' \
     '        printf "%s\\n" "$count" > "$SPIRESCRY_TEST_START_COUNT"' \
-    '        if [ "$count" -gt 2 ]; then' \
+    '        if [ "$count" -gt 3 ]; then' \
     '            printf "Mon Jan  1 00:00:00 2099\\n"' \
     '            exit 0' \
     '        fi' \
