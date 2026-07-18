@@ -14,7 +14,6 @@ use serde_json::{json, Value};
 
 const DEFAULT_HTTP_TIMEOUT_MS: u64 = 70_000;
 const HTTP_TIMEOUT_GRACE_MS: u64 = 10_000;
-const DEFAULT_OBS_WAIT_MS: i32 = 5_000;
 const PROTOCOL_VERSION: u64 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -346,9 +345,13 @@ fn obs_request(
 
     let mut path = String::from("/obs");
     let timeout_ms = if let Some(since) = since {
-        let wait = wait.unwrap_or(DEFAULT_OBS_WAIT_MS);
-        path = format!("{path}?since={since}&wait={wait}");
-        u64::try_from(wait).map_err(|error| error.to_string())? + HTTP_TIMEOUT_GRACE_MS
+        path = format!("{path}?since={since}");
+        if let Some(wait) = wait {
+            path = format!("{path}&wait={wait}");
+            u64::try_from(wait).map_err(|error| error.to_string())? + HTTP_TIMEOUT_GRACE_MS
+        } else {
+            DEFAULT_HTTP_TIMEOUT_MS
+        }
     } else {
         DEFAULT_HTTP_TIMEOUT_MS
     };
@@ -990,8 +993,8 @@ mod tests {
         assert_eq!(timeout, std::time::Duration::from_secs(70));
 
         let (path, timeout) = obs_request(Some(42), None, false).unwrap();
-        assert_eq!(path, "/obs?since=42&wait=5000");
-        assert_eq!(timeout, std::time::Duration::from_secs(15));
+        assert_eq!(path, "/obs?since=42");
+        assert_eq!(timeout, std::time::Duration::from_secs(70));
 
         let (path, timeout) = obs_request(None, None, true).unwrap();
         assert_eq!(path, "/obs?compact=1");
