@@ -5,6 +5,7 @@
     <TargetFramework>net9.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
+    <DefineConstants>$(DefineConstants);CARD_GRAMMAR_ONLY</DefineConstants>
   </PropertyGroup>
 
   <ItemGroup>
@@ -12,6 +13,7 @@
     <Compile Include="../../src/RejectionCodes.cs" Link="RejectionCodes.cs" />
     <Compile Include="../../src/State/ResolutionGuards.cs" Link="ResolutionGuards.cs" />
     <Compile Include="../../src/State/RichText.cs" Link="RichText.cs" />
+    <Compile Include="../../src/State/CardSpecifier.cs" Link="CardSpecifier.cs" />
     <Compile Include="../../src/State/DecisionProjection.cs" Link="DecisionProjection.cs" />
     <Compile Include="../../src/State/ErrorEvents.cs" Link="ErrorEvents.cs" />
     <Compile Include="../../headless/Host/FirstChanceFilter.cs" Link="FirstChanceFilter.cs" />

@@ -421,12 +421,12 @@ public static class Snapshotter
                 idx = i,
                 model = card?.Id.Entry,
                 title = card?.Title,
-                textKey = card is null ? null : CardTextKey(card),
-                description = showText ? CardDescription(card!) : null,
+                textKey = card is null ? null : CardSpecifier.TextKey(card),
+                description = showText ? CardSpecifier.Description(card!) : null,
                 cost = e.Cost,
                 price = e.Cost,
                 playCost = card?.EnergyCost.Canonical,
-                starCost = card is null ? null : StarCost(card),
+                starCost = card is null ? null : CardSpecifier.StarCost(card),
                 stocked = e.IsStocked,
                 affordable = e.EnoughGold,
                 purchasable = e.IsStocked && e.EnoughGold,
@@ -640,27 +640,10 @@ public static class Snapshotter
         };
     }
 
-    // GetDescriptionForPile bakes upgraded/runtime stats into the text;
-    // the raw Description LocString throws without its variables filled.
-    private static string CardDescription(CardModel card)
-    {
-        try { return RichText.NormalizeIcons(card.GetDescriptionForPile(PileType.None, null)); }
-        catch { return SafeText(card.Description); }
-    }
-
-    // A caller-cache key for exactly the prose-bearing card variant. Card
-    // model alone is insufficient: upgrades, enchantments, and afflictions
-    // all change the rendered rules text while leaving Id.Entry unchanged.
-    private static string CardTextKey(CardModel card) => DecisionProjection.CardTextKey(
-        card.Id.Entry,
-        card.CurrentUpgradeLevel,
-        card.Enchantment?.Id.Entry,
-        card.Affliction?.Id.Entry);
-
     private static bool ShouldShowCardText(CardModel card, bool compactElides = false)
     {
         if (!_decision) return !compactElides || !_compact;
-        var key = CardTextKey(card);
+        var key = CardSpecifier.TextKey(card);
         return !_knownCardTexts.Contains(key) && _emittedCardTexts.Add(key);
     }
 
@@ -682,68 +665,37 @@ public static class Snapshotter
             model = c.Id.Entry,
             title = c.Title,
             cost = c.EnergyCost.Canonical,
-            starCost = StarCost(c),
+            starCost = CardSpecifier.StarCost(c),
             type = c.Type.ToString().ToLowerInvariant(),
             rarity = c.Rarity.ToString().ToLowerInvariant(),
-            textKey = CardTextKey(c),
-            description = showText ? CardDescription(c) : null,
+            textKey = CardSpecifier.TextKey(c),
+            description = showText ? CardSpecifier.Description(c) : null,
         };
     }
 
     private static object SelectCardView(CardModel c, int i, bool selected)
     {
         var showText = ShouldShowCardText(c);
-        var preview = UpgradePreview(c);
+        var preview = CardSpecifier.UpgradePreview(c);
         return new
         {
             idx = i,
             model = c.Id.Entry,
             title = c.Title,
             cost = c.EnergyCost.Canonical,
-            starCost = StarCost(c),
+            starCost = CardSpecifier.StarCost(c),
             upgraded = c.IsUpgraded,
             enchant = c.Enchantment?.Id.Entry,
             affliction = c.Affliction?.Id.Entry,
             selected,
-            textKey = CardTextKey(c),
-            description = showText ? CardDescription(c) : null,
+            textKey = CardSpecifier.TextKey(c),
+            description = showText ? CardSpecifier.Description(c) : null,
             // Preserve upgradedPreview's string/null wire type; numeric
             // upgrade economics do not need to be hidden with cached prose.
-            upgradedPreview = showText ? preview?.description : null,
-            upgradedPlayCost = preview?.playCost,
-            upgradedStarCost = preview?.starCost,
+            upgradedPreview = showText ? preview?.Description : null,
+            upgradedPlayCost = preview?.PlayCost,
+            upgradedStarCost = preview?.StarCost,
         };
-    }
-
-    // -1 = the card has no star cost (the second combat currency);
-    // surface null so energy-only cards stay clean. X-star cards report
-    // the current star count, mirroring X-energy's cost display.
-    private static int? StarCost(CardModel c)
-    {
-        try
-        {
-            var s = c.GetStarCostWithModifiers();
-            return s >= 0 ? s : null;
-        }
-        catch { return null; }
-    }
-
-    // What the card text becomes if upgraded — the rest-site smith's
-    // preview pane. null when the card can't upgrade further. Upgrades
-    // mutate a card's dynamic vars in place, so the upgraded numbers only
-    // exist on an upgraded instance: build a throwaway twin from the
-    // canonical model and replay the upgrades one level past the card.
-    private static (string description, int playCost, int? starCost)? UpgradePreview(CardModel c)
-    {
-        if (!c.IsUpgradable) return null;
-        try
-        {
-            var twin = ModelDb.GetById<CardModel>(c.Id).ToMutable();
-            for (var lvl = 0; lvl <= c.CurrentUpgradeLevel; lvl++)
-                twin.UpgradeInternal();
-            return (CardDescription(twin), twin.EnergyCost.Canonical, StarCost(twin));
-        }
-        catch { return null; }
     }
 
     private static object HandCardView(CardModel? card, int i)
@@ -755,13 +707,13 @@ public static class Snapshotter
             idx = i,
             model = card?.Id.Entry,
             cost = card?.EnergyCost.GetAmountToSpend(),
-            starCost = card is null ? null : StarCost(card),
+            starCost = card is null ? null : CardSpecifier.StarCost(card),
             upgraded = card?.IsUpgraded ?? false,
             enchant = card?.Enchantment?.Id.Entry,
             affliction = card?.Affliction?.Id.Entry,
-            textKey = card is null ? null : CardTextKey(card),
-            description = showText ? CardText(card!, PileType.Hand) : null,
-            vars = card is null ? null : CardVars(card),
+            textKey = card is null ? null : CardSpecifier.TextKey(card),
+            description = showText ? CardSpecifier.Text(card!, PileType.Hand) : null,
+            vars = card is null ? null : CardSpecifier.DynamicVars(card),
         };
     }
 
@@ -957,7 +909,7 @@ public static class Snapshotter
                 kind = "card",
                 model = card.Card.Id.Entry,
                 title = RichText.NormalizeIcons(card.Card.Title ?? ""),
-                description = CardDescription(card.Card),
+                description = CardSpecifier.Description(card.Card),
                 upgraded = card.Card.IsUpgraded,
             };
         if (hint is HoverTip text)
@@ -975,42 +927,6 @@ public static class Snapshotter
             title = "",
             description = "",
         };
-    }
-
-    // The UI's own composed card text: dynamic vars refreshed first
-    // (strength/weak applied through the engine's preview hooks — the GUI
-    // card node does the same each frame), then the same description path
-    // the card renders with, enchant/affliction lines included.
-    // The same per-frame refresh the GUI card node does — bakes strength/
-    // weak/etc. into PreviewValue, which both the text and vars read.
-    private static void RefreshCardPreview(CardModel c)
-    {
-        try { c.UpdateDynamicVarPreview(CardPreviewMode.Normal, null, c.DynamicVars); }
-        catch { }
-    }
-
-    private static string CardText(CardModel c, PileType pile)
-    {
-        try
-        {
-            RefreshCardPreview(c);
-            return RichText.NormalizeIcons(c.GetDescriptionForPile(pile));
-        }
-        catch { return ""; }
-    }
-
-    // The numbers behind the text — lets an agent do arithmetic without
-    // parsing bbcode. PreviewValue is what the card face shows.
-    private static Dictionary<string, decimal>? CardVars(CardModel c)
-    {
-        try
-        {
-            var vars = new Dictionary<string, decimal>();
-            foreach (var v in c.DynamicVars.Values)
-                vars[v.Name] = v.PreviewValue;
-            return vars.Count == 0 ? null : vars;
-        }
-        catch { return null; }
     }
 
     // Missing locale keys throw from GetFormattedText (Neow-style events
@@ -1092,23 +1008,23 @@ public static class Snapshotter
                 {
                     // Compact keeps the numbers (vars) and drops the prose —
                     // the refresh still runs so vars carry modified values.
-                    if (_compact) RefreshCardPreview(c);
+                    if (_compact) CardSpecifier.RefreshPreview(c);
                     var showText = ShouldShowCardText(c, compactElides: true);
                     return (object)new
                     {
                         model = c.Id.Entry,
                         selector = CardSpecifier.From(c),
                         cost = c.EnergyCost.GetAmountToSpend(),
-                        starCost = StarCost(c),
+                        starCost = CardSpecifier.StarCost(c),
                         target = c.TargetType.ToString().ToLowerInvariant(),
                         upgraded = c.IsUpgraded,
                         enchant = c.Enchantment?.Id.Entry,
                         affliction = c.Affliction?.Id.Entry,
                         unplayable = c.Keywords.Contains(CardKeyword.Unplayable),
                         playable = CanPlayCard(c),
-                        textKey = CardTextKey(c),
-                        description = showText ? CardText(c, PileType.Hand) : null,
-                        vars = CardVars(c),
+                        textKey = CardSpecifier.TextKey(c),
+                        description = showText ? CardSpecifier.Text(c, PileType.Hand) : null,
+                        vars = CardSpecifier.DynamicVars(c),
                     };
                 })
                 .ToArray(),

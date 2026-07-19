@@ -210,12 +210,38 @@ internal static class Tests
             allEnemiesDead: true));
     }
 
-    public static void DecisionCardTextKeySeparatesEveryTextChangingModifier()
+    public static void CardIdentityGrammarProducesBareSelectorAndTextKeyTogether()
     {
-        Equal("BASH+0", DecisionProjection.CardTextKey("BASH", 0, null, null));
-        Equal("BASH+1", DecisionProjection.CardTextKey("BASH", 1, null, null));
-        Equal("BASH+1@SELF_HELP!CURSED",
-            DecisionProjection.CardTextKey("BASH", 1, "SELF_HELP", "CURSED"));
+        var identity = CardSpecifier.Encode("BASH", false, 0, null, null);
+
+        Equal("BASH", identity.Selector);
+        Equal("BASH+0", identity.TextKey);
+    }
+
+    public static void CardIdentityGrammarSharesModifierOrderAcrossBothFormats()
+    {
+        var identity = CardSpecifier.Encode(
+            "BASH", true, 2, "SELF_HELP", "CURSED");
+
+        Equal("BASH+@SELF_HELP!CURSED", identity.Selector);
+        Equal("BASH+2@SELF_HELP!CURSED", identity.TextKey);
+    }
+
+    public static void CardIdentityGrammarPreservesModifiersOnBareCopies()
+    {
+        var identity = CardSpecifier.Encode(
+            "BASH", false, 0, "SELF_HELP", "CURSED");
+
+        Equal("BASH@SELF_HELP!CURSED", identity.Selector);
+        Equal("BASH+0@SELF_HELP!CURSED", identity.TextKey);
+    }
+
+    public static void CardIdentityGrammarPreservesDistinctEngineUpgradeSignals()
+    {
+        var identity = CardSpecifier.Encode("BASH", true, 0, null, null);
+
+        Equal("BASH+", identity.Selector);
+        Equal("BASH+0", identity.TextKey);
     }
 
     public static void DecisionLegalVerbsComeFromVisibleTargetsAndGates()

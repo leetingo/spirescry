@@ -7,14 +7,6 @@ namespace Spirescry.State;
 // rather than from a second phase-to-verb table that can drift from reality.
 internal static class DecisionProjection
 {
-    internal static string CardTextKey(
-        string model, int upgradeLevel, string? enchantment, string? affliction) =>
-        string.Concat(
-            model,
-            "+", upgradeLevel,
-            enchantment is null ? "" : "@" + enchantment,
-            affliction is null ? "" : "!" + affliction);
-
     public static string[] LegalVerbs(JsonObject snapshot, bool runActive)
     {
         var phase = snapshot["phase"]?.GetValue<string>() ?? "unknown";
