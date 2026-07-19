@@ -416,8 +416,7 @@ public static class Dispatcher
         try { rm.ActionQueueSet?.Reset(); } catch { }
         Reflect.SetPropertyOrBackingField(rm, "State", null);
         Reflect.SetPropertyOrBackingField(rm, "IsAbandoned", false);
-        HeadlessState.ResetAll();
-        _normalRewardsGrantedFor = null;
+        DecisionSurface.Current.ResetRunChoices();
         return DispatchResult.Success();
     }
 
@@ -876,23 +875,8 @@ public static class Dispatcher
     {
         if (idx is not (0 or 1))
             return DispatchResult.Reject(RejectionCodes.BadIndex, "tool idx: 0 = small divination, 1 = big");
-
-        if (RunMode.IsHeadless)
-        {
-            if (HeadlessCrystal.Entity is not { } entity)
-                return DispatchResult.Reject(RejectionCodes.BadState,
-                    "no crystal sphere in progress");
-            entity.SetTool(idx == 0
-                ? CrystalMinigame.CrystalSphereToolType.Small
-                : CrystalMinigame.CrystalSphereToolType.Big);
-            return DispatchResult.Success();
-        }
-
-        if (Screens.Crystal() is not { } screen)
-            return DispatchResult.Reject(RejectionCodes.NotReady, "crystal sphere screen not mounted");
-        Reflect.Invoke(screen, idx == 0 ? "SetSmallDivination" : "SetBigDivination",
-            new object?[] { null });
-        return DispatchResult.Success();
+        return FromDecisionSurface(
+            DecisionSurface.Current.ChooseCrystalTool(idx));
     }
 
     private static DispatchResult EventOption(int idx)
@@ -908,43 +892,20 @@ public static class Dispatcher
         if (opts[idx].IsLocked)
             return DispatchResult.Reject(RejectionCodes.NotPlayable, $"option {idx} is locked");
 
-        // Headless: an option that opens a deck picker (transform,
-        // upgrade, …) awaits a card selection with no screen to serve it —
-        // Around pre-arms the deferred picker for that.
-        HeadlessPicker.Around(() =>
-            RunManager.Instance!.EventSynchronizer.ChooseLocalOption(idx));
-        return DispatchResult.Success();
+        return FromDecisionSurface(
+            DecisionSurface.Current.ChooseEventOption(idx));
     }
 
     private static DispatchResult RestOption(int idx)
     {
-        var room = NRestSiteRoom.Instance;
         var opts = Screens.RestOptions();
         if (opts is null)
             return DispatchResult.Reject(RejectionCodes.NotReady, "rest site not mounted");
         if (BadIdx(idx, opts.Count, "option") is { } err) return err;
         if (!opts[idx].IsEnabled)
             return DispatchResult.Reject(RejectionCodes.NotPlayable, $"option {idx} is disabled");
-
-        if (room is not null)
-        {
-            // ForceClick fires the Godot Released signal so the engine's
-            // wired handler chain runs — invoking the handler directly does
-            // nothing.
-            if (room.GetButtonForOption(opts[idx]) is not { } button)
-                return DispatchResult.Reject(
-                    RejectionCodes.NotReady, "rest option button not wired yet — retry");
-            button.ForceClick();
-            return DispatchResult.Success();
-        }
-
-        // Headless: drive the synchronizer directly. SMITH opens a deck
-        // picker — the pre-armed deferred picker serves it; the option's
-        // Task stays pending until pick-card resolves the selection, so
-        // fire it rather than block.
-        HeadlessPicker.Around(() =>
-            Fire(RunManager.Instance!.RestSiteSynchronizer.ChooseLocalOption(idx), "rest-option"));
-        return DispatchResult.Success();
+        return FromDecisionSurface(
+            DecisionSurface.Current.ChooseRestOption(idx));
     }
 
     private static DispatchResult Proceed()
@@ -952,135 +913,28 @@ public static class Dispatcher
         switch (PhaseDetector.Current())
         {
             case Phase.Event:
-                // The host installs an inert NEventRoom dummy; mode comes
-                // from RunMode, not from this instance's null-ness.
-                if (!RunMode.IsHeadless && NEventRoom.Instance is { })
-                {
-                    Fire(NEventRoom.Proceed(), "proceed");
-                    return DispatchResult.Success();
-                }
-                // Headless: no visual room to page the dialogue — exit the
-                // room model directly (some events, e.g. Neow, end on a
-                // dialogue page and never flip IsFinished). The finale event
-                // is the exception: its exit is the win.
-                if (RequireRunContext(out var eventRun, "run state not available") is { } eventErr)
-                    return eventErr;
-                if (eventRun.State.CurrentRoom is { IsVictoryRoom: true })
-                    return EnterNextActHeadless();
-                return ExitRoomToMap("event proceed");
+                return FromDecisionSurface(
+                    DecisionSurface.Current.ProceedEvent());
 
             case Phase.Rewards:
-                if (RunMode.IsHeadless)
-                {
-                    // Skip whatever's unclaimed and leave the combat room —
-                    // the GUI proceed button does both in one click.
-                    HeadlessRewards.SkipAllAndClear();
-                    // A beaten boss doesn't return to this act's map — the
-                    // run moves on (the GUI's transition screen makes this
-                    // same engine call).
-                    if (RequireRunContext(out var rewardsRun, "run state not available") is { } rewardsErr)
-                        return rewardsErr;
-                    var rs2 = rewardsRun.State;
-                    if (rs2.CurrentMapPoint?.PointType == MapPointType.Boss)
-                    {
-                        if (rs2.CurrentRoom is { } bossRoom) Fire(bossRoom.Exit(rs2), "boss exit");
-                        // First boss of a two-boss act exits back to the map
-                        // — the agent walks to the second (obs.next carries
-                        // it); only the act's last boss moves the run on.
-                        if (Snapshotter.SecondBossPending(rs2))
-                            return ExitRoomToMap("boss exit", exitRoom: false);
-                        return EnterNextActHeadless();
-                    }
-                    return ExitRoomToMap("rewards proceed");
-                }
-                if (Screens.Top<NRewardsScreen>() is not { } screen)
-                    return DispatchResult.Reject(RejectionCodes.NotReady, "rewards screen not mounted");
-                // A debug override left set short-circuits the handler.
-                RunManager.Instance!.debugAfterCombatRewardsOverride = null;
-                Reflect.Invoke(screen, "OnProceedButtonPressed", new object?[] { null });
-                return DispatchResult.Success();
+                return FromDecisionSurface(
+                    DecisionSurface.Current.ProceedRewards());
 
             case Phase.RestSite:
-                if (NRestSiteRoom.Instance is { } restRoom)
-                {
-                    if (restRoom.ProceedButton is not { Visible: true } restBtn)
-                        return DispatchResult.Reject(RejectionCodes.BadState,
-                            "proceed button not visible — choose an option first");
-                    restBtn.ForceClick();
-                    return DispatchResult.Success();
-                }
-                return ExitRoomToMap("rest-site proceed");
+                return FromDecisionSurface(
+                    DecisionSurface.Current.ProceedRestSite());
 
             case Phase.Treasure:
-                if (NRun.Instance?.TreasureRoom is { } chestRoom)
-                {
-                    if (chestRoom.ProceedButton is not { Visible: true } chestBtn)
-                        return DispatchResult.Reject(RejectionCodes.BadState,
-                            "proceed button not visible — resolve the chest first (pick-relic / skip)");
-                    chestBtn.ForceClick();
-                    return DispatchResult.Success();
-                }
-                // Headless: decline a still-pending offer, then leave.
-                var sync = RunManager.Instance?.TreasureRoomRelicSynchronizer;
-                if (sync?.CurrentRelics is { Count: > 0 }) sync.SkipRelicLocally();
-                return ExitRoomToMap("treasure proceed");
+                return FromDecisionSurface(
+                    DecisionSurface.Current.ProceedTreasure());
 
             case Phase.CrystalSphere:
-                if (RunMode.IsHeadless)
-                {
-                    // Cancels the completion source — the engine's own
-                    // early-exit path; the awaiting event resumes.
-                    HeadlessCrystal.Entity?.ForceMinigameEnd();
-                    HeadlessCrystal.Clear();
-                    return DispatchResult.Success();
-                }
-                if (Screens.Crystal() is not { } sphere)
-                    return DispatchResult.Reject(RejectionCodes.NotReady, "crystal sphere screen not mounted");
-                Reflect.Invoke(sphere, "OnProceedButtonPressed", new object?[] { null });
-                return DispatchResult.Success();
+                return FromDecisionSurface(
+                    DecisionSurface.Current.ProceedCrystal());
 
             case var p:
                 return DispatchResult.Reject(RejectionCodes.BadPhase,
                     $"proceed is valid in event/rewards/rest_site/treasure/crystal_sphere, current is {p.AsString()}");
-        }
-    }
-
-    // The engine's own act advance: EnterAct(n+1) mid-run, the finale
-    // event at the end of the last act, and WinRun when the finale room
-    // itself is done.
-    private static DispatchResult EnterNextActHeadless()
-    {
-        try
-        {
-            RunManager.Instance!.EnterNextAct().GetAwaiter().GetResult();
-            return DispatchResult.Success();
-        }
-        catch (Exception ex)
-        {
-            return DispatchResult.Reject(RejectionCodes.Internal,
-                $"act transition failed: {ex.GetType().Name}: {ex.Message}");
-        }
-    }
-
-    // Headless room exit: run the room model's own Exit (synchronizer
-    // cleanup), then force a fresh MapRoom so PhaseDetector reads map.
-    private static DispatchResult ExitRoomToMap(string label, bool exitRoom = true)
-    {
-        if (RequireRunContext(out var run, "run state not available") is { } runErr)
-            return runErr;
-        var rm = run.Manager;
-        var rs = run.State;
-        try
-        {
-            if (exitRoom && rs.CurrentRoom is { } room) Fire(room.Exit(rs), label);
-            if (rs.CurrentRoom is not MapRoom)
-                rm.EnterRoom(new MapRoom()).GetAwaiter().GetResult();
-            return DispatchResult.Success();
-        }
-        catch (Exception ex)
-        {
-            return DispatchResult.Reject(RejectionCodes.Internal,
-                $"headless {label} failed: {ex.GetType().Name}: {ex.Message}");
         }
     }
 
@@ -1131,140 +985,32 @@ public static class Dispatcher
         if (entry is MerchantPotionEntry && run.Player.HasOpenPotionSlots != true)
             return DispatchResult.Reject(RejectionCodes.BadState, "no open potion slots");
 
-        // Card removal opens a deck-select sub-screen and the Task stays
-        // pending until it's driven — poll /obs. Headless pre-arms the
-        // deferred picker to stand in for that screen.
-        HeadlessPicker.Around(() => Fire(entry.OnTryPurchaseWrapper(inv, false), "buy"));
-        return DispatchResult.Success();
+        return FromDecisionSurface(
+            DecisionSurface.Current.Purchase(inv, entry));
     }
 
     private static DispatchResult Leave()
     {
         if (RequirePhase(Phase.Shop) is { } err) return err;
-        if (NMapScreen.Instance is { } map)
-        {
-            map.Open(false);
-            return DispatchResult.Success();
-        }
-        // Headless: no map screen — the shop model needs no exit hook,
-        // just force the map room.
-        return ExitRoomToMap("shop leave", exitRoom: false);
+        return FromDecisionSurface(
+            DecisionSurface.Current.LeaveShop());
     }
 
     // ---- treasure / relic reward ------------------------------------------
-
-    // DoNormalRewards grants gold as well as creating the relic offer, so
-    // guard it by room identity. Observation is deliberately read-only;
-    // the first headless pick-relic/skip opens the chest and asks the agent
-    // to rescry before making the actual selection. The opened-room
-    // reference lives on HeadlessTreasure so the snapshot can report
-    // chestOpened after the offer resolves.
-    private static TreasureRoom? _normalRewardsGrantedFor;
-
-    private static DispatchResult? OpenHeadlessTreasureIfNeeded(
-        TreasureRoomRelicSynchronizer sync)
-    {
-        if (!RunMode.IsHeadless) return null;
-        if (LocalRunContext.Current?.State.CurrentRoom is not TreasureRoom room)
-            return DispatchResult.Reject(
-                RejectionCodes.NotReady, "treasure room not available");
-        if (ReferenceEquals(HeadlessTreasure.OpenedRoom, room))
-            return sync.CurrentRelics is { Count: > 0 }
-                ? null
-                : DispatchResult.Reject(
-                    RejectionCodes.BadState, "no relic offer available");
-
-        try
-        {
-            if (sync.CurrentRelics is not { Count: > 0 })
-                HeadlessTreasure.Open(sync.BeginRelicPicking);
-            if (!ReferenceEquals(_normalRewardsGrantedFor, room))
-            {
-                room.DoNormalRewards().GetAwaiter().GetResult();
-                _normalRewardsGrantedFor = room;
-            }
-            room.DoExtraRewardsIfNeeded().GetAwaiter().GetResult();
-            HeadlessTreasure.OpenedRoom = room;
-            return DispatchResult.Success("chest opened — rescry, then pick-relic / skip");
-        }
-        catch (Exception ex)
-        {
-            SafeLog.Error("headless treasure open", ex);
-            return DispatchResult.Reject(
-                RejectionCodes.Internal,
-                $"chest open failed: {ex.GetType().Name}: {ex.Message}", 500);
-        }
-    }
 
     private static DispatchResult PickRelic(JsonElement args)
     {
         if (!TryGetInt(args, "idx", out var idx))
             return DispatchResult.Reject(RejectionCodes.BadRequest, "missing args.idx");
-        switch (PhaseDetector.Current())
+        return PhaseDetector.Current() switch
         {
-            case Phase.Treasure:
-                {
-                    var room = NRun.Instance?.TreasureRoom;
-                    var sync = RunManager.Instance?.TreasureRoomRelicSynchronizer;
-                    if (sync is null || (room is null && !RunMode.IsHeadless))
-                        return DispatchResult.Reject(RejectionCodes.NotReady, "treasure room not mounted");
-                    if (OpenHeadlessTreasureIfNeeded(sync) is { } headlessOpen)
-                        return headlessOpen;
-                    // The chest must be opened before picking or the room
-                    // never wires its exit. Headless opens through the room
-                    // model above because it has no chest button.
-                    if (room is not null && !Screens.ChestOpened(room))
-                    {
-                        var chest = Reflect.Field<NButton>(room, "_chestButton");
-                        if (chest is null)
-                            return DispatchResult.Reject(RejectionCodes.BadState,
-                                "chest button not found");
-                        chest.ForceClick();
-                    }
-                    var relics = sync.CurrentRelics;
-                    if (relics is null || relics.Count == 0)
-                        return DispatchResult.Reject(RejectionCodes.NotReady,
-                            "chest opening — poll /obs, then pick-relic again");
-                    if (BadIdx(idx, relics.Count, "relic") is { } err) return err;
-                    // The award itself lives in the GUI's collection node
-                    // (RelicsAwarded → RelicCmd.Obtain); headless has no
-                    // node, so grant here. One-shot: the event fires inside
-                    // the PickRelicAction this pick enqueues.
-                    if (RunMode.IsHeadless)
-                    {
-                        Action<List<RelicPickingResult>>? award = null;
-                        award = results =>
-                        {
-                            sync.RelicsAwarded -= award;
-                            foreach (var r in results)
-                            {
-                                if (r.type == RelicPickingResultType.Skipped
-                                    || r.player is null || r.relic is null) continue;
-                                Fire(RelicCmd.Obtain(r.relic.ToMutable(), r.player),
-                                    "treasure-relic");
-                            }
-                        };
-                        sync.RelicsAwarded += award;
-                    }
-                    sync.PickRelicLocally(idx);
-                    return DispatchResult.Success();
-                }
-
-            case Phase.RelicReward:
-                {
-                    var screen = Screens.Top<NChooseARelicSelection>();
-                    var holders = screen is null ? null : Screens.RelicHolders(screen);
-                    if (screen is null || holders is null || holders.Count == 0)
-                        return DispatchResult.Reject(RejectionCodes.NotReady, "relic row not wired yet — retry");
-                    if (BadIdx(idx, holders.Count, "relic") is { } err) return err;
-                    Reflect.Invoke(screen, "SelectHolder", holders[idx]);
-                    return DispatchResult.Success();
-                }
-
-            case var p:
-                return DispatchResult.Reject(RejectionCodes.BadPhase,
-                    $"pick-relic is valid in treasure/relic_reward, current is {p.AsString()}");
-        }
+            Phase.Treasure => FromDecisionSurface(
+                DecisionSurface.Current.PickTreasureRelic(idx)),
+            Phase.RelicReward => FromDecisionSurface(
+                DecisionSurface.Current.PickRelicReward(idx)),
+            var phase => DispatchResult.Reject(RejectionCodes.BadPhase,
+                $"pick-relic is valid in treasure/relic_reward, current is {phase.AsString()}"),
+        };
     }
 
     // ---- combat rewards --------------------------------------------------
@@ -1275,23 +1021,8 @@ public static class Dispatcher
         if (!TryGetInt(args, "idx", out var idx))
             return DispatchResult.Reject(RejectionCodes.BadRequest, "missing args.idx");
 
-        if (RunMode.IsHeadless)
-            return HeadlessRewards.PickReward(idx) is { } msg
-                ? DispatchResult.Reject(RejectionCodes.BadIndex, msg)
-                : DispatchResult.Success();
-
-        var screen = Screens.Top<NRewardsScreen>();
-        var buttons = screen is null ? null : Screens.RewardButtons(screen);
-        if (buttons is null)
-            return DispatchResult.Reject(RejectionCodes.NotReady, "rewards screen not mounted");
-        if (BadIdx(idx, buttons.Count, "reward") is { } idxErr) return idxErr;
-        if (Screens.ClaimableReward(buttons[idx]) is not { } btn)
-            return DispatchResult.Reject(RejectionCodes.BadIndex, $"reward idx {idx} is not claimable (already taken?)");
-
-        // The button's own async claim path; for card tiles the Task stays
-        // pending until the pushed sub-screen is driven — poll /obs.
-        if (Reflect.Invoke(btn, "GetReward") is Task t) Fire(t, "pick-reward");
-        return DispatchResult.Success();
+        return FromDecisionSurface(
+            DecisionSurface.Current.PickReward(idx));
     }
 
     private static DispatchResult PickCard(JsonElement args)
@@ -1316,32 +1047,26 @@ public static class Dispatcher
 
     private static DispatchResult FromDecisionSurface(DecisionSurfaceResult result)
     {
-        if (result.Ok) return DispatchResult.Success();
+        if (result.Ok) return DispatchResult.Success(result.Message);
         var error = result.Error switch
         {
+            DecisionSurfaceError.BadRequest => RejectionCodes.BadRequest,
             DecisionSurfaceError.BadIndex => RejectionCodes.BadIndex,
             DecisionSurfaceError.BadState => RejectionCodes.BadState,
+            DecisionSurfaceError.Internal => RejectionCodes.Internal,
             DecisionSurfaceError.NotReady => RejectionCodes.NotReady,
             _ => RejectionCodes.Internal,
         };
-        return DispatchResult.Reject(error, result.Message ?? "decision surface rejected action");
+        return DispatchResult.Reject(
+            error,
+            result.Message ?? "decision surface rejected action",
+            result.Status);
     }
 
     private static DispatchResult PickRewardCard(int idx)
     {
-        if (RunMode.IsHeadless)
-            return HeadlessRewards.PickCard(idx) is { } msg
-                ? DispatchResult.Reject(RejectionCodes.BadIndex, msg)
-                : DispatchResult.Success();
-
-        var screen = Screens.Top<NCardRewardSelectionScreen>();
-        var holders = screen is null ? null : Screens.CardHolders(screen);
-        if (screen is null || holders is null || holders.Count == 0)
-            return DispatchResult.Reject(RejectionCodes.NotReady, "card row not wired yet — retry");
-        if (BadIdx(idx, holders.Count, "card") is { } err) return err;
-
-        Reflect.Invoke(screen, "SelectCard", holders[idx]);
-        return DispatchResult.Success();
+        return FromDecisionSurface(
+            DecisionSurface.Current.PickRewardCard(idx));
     }
 
     // ---- card selection (grid pickers + mid-combat hand select) -----------
@@ -1350,49 +1075,16 @@ public static class Dispatcher
     // own OnCardClicked runs, so max-select behavior matches the UI.
     private static DispatchResult PickGridCard(int idx)
     {
-        if (RunMode.IsHeadless)
-            return HeadlessPicker.Pick(idx) is { } msg
-                ? DispatchResult.Reject(RejectionCodes.BadIndex, msg)
-                : DispatchResult.Success();
-
-        // Choose-a-card overlays resolve on the pick itself.
-        if (Screens.Top<NChooseACardSelectionScreen>() is { } choose)
-        {
-            var chooseHolders = Screens.CardHolders(choose);
-            if (chooseHolders is null || chooseHolders.Count == 0)
-                return DispatchResult.Reject(RejectionCodes.NotReady, "card row not wired yet — retry");
-            if (BadIdx(idx, chooseHolders.Count, "card") is { } chooseErr) return chooseErr;
-            Reflect.Invoke(choose, "SelectHolder", chooseHolders[idx]);
-            return DispatchResult.Success();
-        }
-
-        var screen = Screens.Top<NCardGridSelectionScreen>();
-        var cards = screen is null ? null : Screens.GridCards(screen);
-        if (screen is null || cards is null || cards.Count == 0)
-            return DispatchResult.Reject(RejectionCodes.NotReady, "card grid not wired yet — retry");
-        if (BadIdx(idx, cards.Count, "card") is { } err) return err;
-
-        Reflect.Invoke(screen, "OnCardClicked", cards[idx]);
-        return DispatchResult.Success();
+        return FromDecisionSurface(
+            DecisionSurface.Current.PickCard(idx));
     }
 
     // Picking routes through OnHolderPressed — the hand's own mode switch,
     // which also auto-swaps the oldest pick when the max is exceeded.
     private static DispatchResult PickHandCard(int idx)
     {
-        if (RunMode.IsHeadless)
-            return HeadlessPicker.Pick(idx) is { } msg
-                ? DispatchResult.Reject(RejectionCodes.BadIndex, msg)
-                : DispatchResult.Success();
-
-        var hand = NPlayerHand.Instance;
-        var holders = hand?.ActiveHolders;
-        if (hand is null || holders is null || holders.Count == 0)
-            return DispatchResult.Reject(RejectionCodes.NotReady, "no selectable cards in hand — retry");
-        if (BadIdx(idx, holders.Count, "card") is { } err) return err;
-
-        Reflect.Invoke(hand, "OnHolderPressed", holders[idx]);
-        return DispatchResult.Success();
+        return FromDecisionSurface(
+            DecisionSurface.Current.PickHandCard(idx));
     }
 
     private static DispatchResult Confirm()
@@ -1402,66 +1094,13 @@ public static class Dispatcher
             case Phase.BundleSelect:
                 return FromDecisionSurface(DecisionSurface.Current.ConfirmBundle());
 
-            case Phase.CardSelect or Phase.HandSelect when RunMode.IsHeadless:
-                return HeadlessPicker.Confirm() is { } msg
-                    ? DispatchResult.Reject(RejectionCodes.BadState, msg)
-                    : DispatchResult.Success();
-
             case Phase.CardSelect:
-                {
-                    var screen = Screens.Top<NCardGridSelectionScreen>();
-                    if (screen is null)
-                        return DispatchResult.Reject(
-                            RejectionCodes.NotReady, "selection screen not mounted");
-                    var prefs = Screens.Prefs(screen);
-                    var count = Screens.SelectedCards(screen).Count();
-                    switch (screen)
-                    {
-                        // These complete through their confirm button; mirror its gate.
-                        case NSimpleCardSelectScreen or NCombatPileCardSelectScreen:
-                            var btn = Reflect.Field<NClickableControl>(screen, "_confirmButton");
-                            if (btn is not { IsEnabled: true })
-                                return DispatchResult.Reject(RejectionCodes.BadState,
-                                    $"confirm not available — {count} selected, need {prefs.MinSelect}..{prefs.MaxSelect}");
-                            btn.ForceClick();
-                            return DispatchResult.Success();
-
-                        // Transform completes ungated — pre-check or an empty
-                        // pick would resolve the selection.
-                        case NDeckTransformSelectScreen:
-                            if (count < prefs.MinSelect)
-                                return DispatchResult.Reject(RejectionCodes.BadState,
-                                    $"{count} selected, need {prefs.MinSelect} (pick-card first)");
-                            Reflect.Invoke(screen, "CompleteSelection", new object?[] { null });
-                            return DispatchResult.Success();
-
-                        // Deck select confirms at MinSelect; upgrade/enchant only
-                        // at MaxSelect (their CheckIfSelectionComplete no-ops
-                        // below it) — pre-check so a short pick errors instead.
-                        default:
-                            var need = screen is NDeckCardSelectScreen ? prefs.MinSelect : prefs.MaxSelect;
-                            if (count < need)
-                                return DispatchResult.Reject(RejectionCodes.BadState,
-                                    $"{count} selected, need {need} (pick-card first)");
-                            Reflect.Invoke(screen, "CheckIfSelectionComplete");
-                            return DispatchResult.Success();
-                    }
-                }
+                return FromDecisionSurface(
+                    DecisionSurface.Current.ConfirmCardSelection());
 
             case Phase.HandSelect:
-                {
-                    var hand = NPlayerHand.Instance!;
-                    var btn = Reflect.Field<NClickableControl>(hand, "_selectModeConfirmButton");
-                    if (btn is not { IsEnabled: true })
-                    {
-                        var prefs = Screens.Prefs(hand);
-                        var count = Screens.SelectedCards(hand).Count();
-                        return DispatchResult.Reject(RejectionCodes.BadState,
-                            $"confirm not available — {count} selected, need {prefs.MinSelect}..{prefs.MaxSelect}");
-                    }
-                    btn.ForceClick();
-                    return DispatchResult.Success();
-                }
+                return FromDecisionSurface(
+                    DecisionSurface.Current.ConfirmHandSelection());
 
             case var p:
                 return DispatchResult.Reject(RejectionCodes.BadPhase,
@@ -1469,116 +1108,44 @@ public static class Dispatcher
         }
     }
 
-    // Skip's alternative choice defaults to the lone alternative;
-    // otherwise args.idx must name one — same rule in both boots.
-    private static DispatchResult? ResolveAltIdx(JsonElement args, int count, out int idx)
+    private static DispatchResult? OptionalAlternativeIndex(
+        JsonElement args, out int? idx)
     {
+        idx = null;
         if (args.ValueKind == JsonValueKind.Object && args.TryGetProperty("idx", out _))
         {
-            if (!TryGetInt(args, "idx", out idx))
+            if (!TryGetInt(args, "idx", out var requested))
                 return DispatchResult.Reject(RejectionCodes.BadRequest,
                     "args.idx must be a 32-bit integer");
+            idx = requested;
         }
-        else
-        {
-            idx = count == 1 ? 0 : -1;
-        }
-        return idx < 0 || idx >= count
-            ? DispatchResult.Reject(RejectionCodes.BadRequest,
-                $"multiple alternatives — pass args.idx in [0,{count - 1}] (see obs.alternatives)")
-            : null;
+        return null;
     }
 
     private static DispatchResult Skip(JsonElement args)
     {
         switch (PhaseDetector.Current())
         {
-            case Phase.CardReward when RunMode.IsHeadless:
-                if (!HeadlessRewards.InCardPick)
-                    return DispatchResult.Reject(RejectionCodes.BadState,
-                        "no card reward pending");
-                // Skip is one of the reward's own "alternative" choices —
-                // mirrors the GUI branch below (its _extraOptions gate),
-                // not a separate decline path.
-                var headlessAlts = HeadlessRewards.Alternatives();
-                if (headlessAlts.Count == 0)
-                    return DispatchResult.Reject(RejectionCodes.BadRequest, "this card reward cannot be skipped");
-                if (ResolveAltIdx(args, headlessAlts.Count, out var headlessAltIdx) is { } headlessErr)
-                    return headlessErr;
-                return HeadlessRewards.PickCard(headlessAltIdx, alternative: true) is { } altMsg
-                    ? DispatchResult.Reject(RejectionCodes.BadIndex, altMsg)
-                    : DispatchResult.Success();
-
-            case Phase.CardSelect when RunMode.IsHeadless:
-                // Empty selection = the engine's own cancel path.
-                HeadlessPicker.CancelIfActive();
-                return DispatchResult.Success();
-
             case Phase.BundleSelect:
                 return FromDecisionSurface(DecisionSurface.Current.SkipBundle());
 
             case Phase.CardReward:
-                if (Screens.Top<NCardRewardSelectionScreen>() is not { } cardScreen)
-                    return DispatchResult.Reject(RejectionCodes.NotReady, "card reward screen not mounted");
-                // Skip is one of the screen's "alternative" choices; picking
-                // alternative j resolves the screen's completion source just
-                // like a card click does.
-                var extras = Screens.ExtraOptions(cardScreen);
-                if (extras.Count == 0)
-                    return DispatchResult.Reject(RejectionCodes.BadRequest, "this card reward cannot be skipped");
-                if (ResolveAltIdx(args, extras.Count, out var altIdx) is { } altErr)
-                    return altErr;
-                Reflect.Invoke(cardScreen, "OnAlternateRewardSelected", altIdx);
-                return DispatchResult.Success();
+                if (OptionalAlternativeIndex(args, out var alternativeIdx) is { } idxErr)
+                    return idxErr;
+                return FromDecisionSurface(
+                    DecisionSurface.Current.SkipCardReward(alternativeIdx));
 
             case Phase.RelicReward:
-                if (Screens.Top<NChooseARelicSelection>() is not { } relicScreen)
-                    return DispatchResult.Reject(RejectionCodes.NotReady, "relic reward screen not mounted");
-                Reflect.Invoke(relicScreen, "OnSkipButtonReleased", new object?[] { null });
-                return DispatchResult.Success();
+                return FromDecisionSurface(
+                    DecisionSurface.Current.SkipRelicReward());
 
             case Phase.Treasure:
-                var sync = RunManager.Instance?.TreasureRoomRelicSynchronizer;
-                if (sync is null)
-                    return DispatchResult.Reject(
-                        RejectionCodes.NotReady, "treasure room not mounted");
-                if (RunMode.IsHeadless)
-                {
-                    if (LocalRunContext.Current?.State.CurrentRoom is not TreasureRoom room)
-                        return DispatchResult.Reject(
-                            RejectionCodes.NotReady, "treasure room not available");
-                    if (!ReferenceEquals(HeadlessTreasure.OpenedRoom, room)
-                        && OpenHeadlessTreasureIfNeeded(sync) is { } headlessOpen)
-                        return headlessOpen;
-                }
-                if (sync.CurrentRelics is { Count: > 0 })
-                {
-                    sync.SkipRelicLocally();
-                    return DispatchResult.Success();
-                }
-                // Once a relic has been picked (or a previous skip has
-                // resolved), the offer is permanently empty. Treat another
-                // skip as the room's proceed action instead of returning a
-                // bad_state that can never clear by retrying.
-                return Proceed();
+                return FromDecisionSurface(
+                    DecisionSurface.Current.SkipTreasure());
 
             case Phase.CardSelect:
-                if (Screens.Top<NChooseACardSelectionScreen>() is { } chooseSel)
-                {
-                    if (!Screens.ChooseSkipEnabled(chooseSel))
-                        return DispatchResult.Reject(RejectionCodes.BadRequest, "this selection cannot be skipped");
-                    Reflect.Invoke(chooseSel, "OnSkipButtonReleased", new object?[] { null });
-                    return DispatchResult.Success();
-                }
-                if (Screens.Top<NCardGridSelectionScreen>() is not { } sel)
-                    return DispatchResult.Reject(RejectionCodes.NotReady, "selection screen not mounted");
-                // Only the deck pickers have a close button, gated by
-                // prefs.Cancelable (shop removal is; rest-site upgrade isn't).
-                if (sel is NSimpleCardSelectScreen or NCombatPileCardSelectScreen
-                    || !Screens.Prefs(sel).Cancelable)
-                    return DispatchResult.Reject(RejectionCodes.BadRequest, "this selection cannot be skipped");
-                Reflect.Invoke(sel, "CloseSelection", new object?[] { null });
-                return DispatchResult.Success();
+                return FromDecisionSurface(
+                    DecisionSurface.Current.SkipCardSelection());
 
             case var p:
                 return DispatchResult.Reject(RejectionCodes.BadPhase,
