@@ -1,6 +1,7 @@
 using System.Reflection;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Text.Json.Serialization;
 using Spirescry;
 using Spirescry.Host;
 using Spirescry.State;
@@ -142,6 +143,58 @@ internal static class Tests
         // typed semanticState projection. A v2 CLI must reject a v3 host
         // before it can silently hash the same observation differently.
         Equal(3, ProtocolVocabulary.ProtocolVersion);
+    }
+
+    public static void ProtocolArtifactPublishesConsumerProjectionSchema()
+    {
+        var artifact = JsonNode.Parse(ProtocolVocabulary.CreateArtifactJson())!.AsObject();
+        var projection = artifact["consumerProjection"]!.AsObject();
+
+        JsonObject Field(string group, string symbol) => projection[group]!.AsArray()
+            .Select(node => node!.AsObject())
+            .Single(field => field["symbol"]!.GetValue<string>() == symbol);
+
+        Equal("phase", Field("top", "phase")["wire"]!.GetValue<string>());
+        Equal("phase", Field("top", "phase")["output"]!.GetValue<string>());
+        Equal("requiredString", Field("top", "phase")["kind"]!.GetValue<string>());
+        Equal("potions", Field("top", "hasTopLevelPotions")["wire"]!.GetValue<string>());
+        Equal("hasTopLevelPotions",
+            Field("top", "hasTopLevelPotions")["output"]!.GetValue<string>());
+        Equal("presenceBoolean",
+            Field("top", "hasTopLevelPotions")["kind"]!.GetValue<string>());
+        Equal("idx", Field("item", "index")["wire"]!.GetValue<string>());
+        Equal("index", Field("item", "index")["output"]!.GetValue<string>());
+        Equal("model", Field("enemy", "model")["wire"]!.GetValue<string>());
+        Equal("energy", Field("combatant", "energy")["wire"]!.GetValue<string>());
+        Equal("gold", Field("player", "gold")["wire"]!.GetValue<string>());
+    }
+
+    public static void ConsumerProjectionOutputPropertiesUseThePublishedSchema()
+    {
+        var groups = new (Type Type, IReadOnlyList<ConsumerProjectionField> Fields)[]
+        {
+            (typeof(SnapshotConsumerProjection), SnapshotConsumerSchema.Top.Fields),
+            (typeof(SnapshotItemConsumerProjection), SnapshotConsumerSchema.Item.Fields),
+            (typeof(SnapshotCombatantConsumerProjection), SnapshotConsumerSchema.Combatant.Fields),
+            (typeof(SnapshotEnemyConsumerProjection), SnapshotConsumerSchema.Enemy.Fields),
+            (typeof(SnapshotPlayerConsumerProjection), SnapshotConsumerSchema.Player.Fields),
+        };
+
+        foreach (var (type, fields) in groups)
+        {
+            var properties = type.GetProperties(
+                BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly);
+            Equal(fields.Count, properties.Length);
+            foreach (var field in fields)
+            {
+                var propertyName = char.ToUpperInvariant(field.Symbol[0]) + field.Symbol[1..];
+                var property = type.GetProperty(propertyName)
+                    ?? throw new Exception($"{type.Name} is missing {propertyName}");
+                var attribute = property.GetCustomAttribute<JsonPropertyNameAttribute>()
+                    ?? throw new Exception($"{type.Name}.{propertyName} has no JsonPropertyName");
+                Equal(field.Output, attribute.Name);
+            }
+        }
     }
 
     public static void ProtocolVocabularyMapsEveryPhaseAndUnknownValues()

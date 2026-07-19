@@ -42,6 +42,37 @@ public sealed record CheatArgumentShape(
     string Name,
     IReadOnlyList<ProtocolArgument> Arguments);
 
+public enum ConsumerProjectionFieldKind
+{
+    RequiredString,
+    OptionalString,
+    OptionalNumber,
+    RequiredIntArray,
+    OptionalIntArray,
+    OptionalStringArray,
+    OptionalBoolean,
+    PresenceBoolean,
+    ItemArray,
+    OptionalItem,
+    OptionalCombatant,
+    EnemyArray,
+    OptionalPlayer,
+    RequiredStringArray,
+}
+
+public sealed record ConsumerProjectionField(
+    string Symbol,
+    string Wire,
+    string Output,
+    ConsumerProjectionFieldKind Kind);
+
+public sealed record ConsumerProjectionSchema(
+    IReadOnlyList<ConsumerProjectionField> Top,
+    IReadOnlyList<ConsumerProjectionField> Item,
+    IReadOnlyList<ConsumerProjectionField> Combatant,
+    IReadOnlyList<ConsumerProjectionField> Enemy,
+    IReadOnlyList<ConsumerProjectionField> Player);
+
 // The protocol's shared wire vocabulary. Compatibility facades keep the
 // existing mod API stable; protocol.json is a deterministic projection of
 // this module for consumers to adopt in the contract step.
@@ -58,7 +89,8 @@ public static class ProtocolVocabulary
         IReadOnlyList<string> Phases,
         IReadOnlyList<string> SettlementOutcomes,
         FaultEventTokens FaultEventTokens,
-        IReadOnlyList<CheatArgumentShape> CheatArgumentShapes);
+        IReadOnlyList<CheatArgumentShape> CheatArgumentShapes,
+        ConsumerProjectionSchema ConsumerProjection);
 
     private static readonly JsonSerializerOptions ArtifactJsonOptions = new()
     {
@@ -82,7 +114,8 @@ public static class ProtocolVocabulary
                 FaultEvents.EngineError,
                 FaultEvents.AsyncFault,
                 FaultEvents.EngineNote),
-            Cheats.All), ArtifactJsonOptions) + "\n";
+            Cheats.All,
+            SnapshotConsumerSchema.Artifact), ArtifactJsonOptions) + "\n";
 
     public static class Rejections
     {

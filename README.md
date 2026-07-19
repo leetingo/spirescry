@@ -186,9 +186,13 @@ typed decision/settlement projection: phase and gates, action-target identity
 and selectors, map position, HP/gold/resources, selection state, and stable
 semantic tokens for deck/relic inventory, combat piles/powers/intents, event
 pages, and reward/shop economics. Snapshot producers set those fields through
-`SnapshotContract`; C# and Rust share exact fingerprint fixtures so a consumer
-drift fails tests. Localized prose and other descriptive snapshot extensions
-are intentionally outside that compatibility contract.
+`SnapshotContract`. Its typed consumer-projection schema publishes both wire
+and canonical output names in `protocol.json`; the Rust CLI generates its field
+constants and projection groups from that artifact, so removing a consumed
+field fails its build and renaming a wire key updates the consumer without a
+second hand-written token. C# and Rust also share exact fingerprint fixtures.
+Localized prose and other descriptive snapshot extensions are intentionally
+outside that compatibility contract.
 This is a debugging aid, not authoritative replay recording: the output is
 explicitly a new reconstruction with its own `runId`, and its final state
 must never be attributed to the source run.

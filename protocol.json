@@ -178,5 +178,419 @@
       "name": "engine-error-delayed",
       "arguments": []
     }
-  ]
+  ],
+  "consumerProjection": {
+    "top": [
+      {
+        "symbol": "phase",
+        "wire": "phase",
+        "output": "phase",
+        "kind": "requiredString"
+      },
+      {
+        "symbol": "id",
+        "wire": "id",
+        "output": "id",
+        "kind": "optionalString"
+      },
+      {
+        "symbol": "act",
+        "wire": "act",
+        "output": "act",
+        "kind": "optionalNumber"
+      },
+      {
+        "symbol": "current",
+        "wire": "current",
+        "output": "current",
+        "kind": "optionalIntArray"
+      },
+      {
+        "symbol": "turn",
+        "wire": "turn",
+        "output": "turn",
+        "kind": "optionalNumber"
+      },
+      {
+        "symbol": "outcome",
+        "wire": "outcome",
+        "output": "outcome",
+        "kind": "optionalString"
+      },
+      {
+        "symbol": "hp",
+        "wire": "hp",
+        "output": "hp",
+        "kind": "optionalIntArray"
+      },
+      {
+        "symbol": "gold",
+        "wire": "gold",
+        "output": "gold",
+        "kind": "optionalNumber"
+      },
+      {
+        "symbol": "semanticState",
+        "wire": "semanticState",
+        "output": "semanticState",
+        "kind": "optionalStringArray"
+      },
+      {
+        "symbol": "selected",
+        "wire": "selected",
+        "output": "selected",
+        "kind": "optionalStringArray"
+      },
+      {
+        "symbol": "side",
+        "wire": "side",
+        "output": "side",
+        "kind": "optionalString"
+      },
+      {
+        "symbol": "actionsDisabled",
+        "wire": "actionsDisabled",
+        "output": "actionsDisabled",
+        "kind": "optionalBoolean"
+      },
+      {
+        "symbol": "available",
+        "wire": "available",
+        "output": "available",
+        "kind": "optionalBoolean"
+      },
+      {
+        "symbol": "proceedAvailable",
+        "wire": "proceedAvailable",
+        "output": "proceedAvailable",
+        "kind": "optionalBoolean"
+      },
+      {
+        "symbol": "chestOpened",
+        "wire": "chestOpened",
+        "output": "chestOpened",
+        "kind": "optionalBoolean"
+      },
+      {
+        "symbol": "confirmable",
+        "wire": "confirmable",
+        "output": "confirmable",
+        "kind": "optionalBoolean"
+      },
+      {
+        "symbol": "cancelable",
+        "wire": "cancelable",
+        "output": "cancelable",
+        "kind": "optionalBoolean"
+      },
+      {
+        "symbol": "hasTopLevelPotions",
+        "wire": "potions",
+        "output": "hasTopLevelPotions",
+        "kind": "presenceBoolean"
+      },
+      {
+        "symbol": "next",
+        "wire": "next",
+        "output": "next",
+        "kind": "itemArray"
+      },
+      {
+        "symbol": "hand",
+        "wire": "hand",
+        "output": "hand",
+        "kind": "itemArray"
+      },
+      {
+        "symbol": "potions",
+        "wire": "potions",
+        "output": "potions",
+        "kind": "itemArray"
+      },
+      {
+        "symbol": "options",
+        "wire": "options",
+        "output": "options",
+        "kind": "itemArray"
+      },
+      {
+        "symbol": "cards",
+        "wire": "cards",
+        "output": "cards",
+        "kind": "itemArray"
+      },
+      {
+        "symbol": "colorless",
+        "wire": "colorless",
+        "output": "colorless",
+        "kind": "itemArray"
+      },
+      {
+        "symbol": "relics",
+        "wire": "relics",
+        "output": "relics",
+        "kind": "itemArray"
+      },
+      {
+        "symbol": "rewards",
+        "wire": "rewards",
+        "output": "rewards",
+        "kind": "itemArray"
+      },
+      {
+        "symbol": "alternatives",
+        "wire": "alternatives",
+        "output": "alternatives",
+        "kind": "itemArray"
+      },
+      {
+        "symbol": "bundles",
+        "wire": "bundles",
+        "output": "bundles",
+        "kind": "itemArray"
+      },
+      {
+        "symbol": "cells",
+        "wire": "cells",
+        "output": "cells",
+        "kind": "itemArray"
+      },
+      {
+        "symbol": "you",
+        "wire": "you",
+        "output": "you",
+        "kind": "optionalCombatant"
+      },
+      {
+        "symbol": "enemies",
+        "wire": "enemies",
+        "output": "enemies",
+        "kind": "enemyArray"
+      },
+      {
+        "symbol": "player",
+        "wire": "player",
+        "output": "player",
+        "kind": "optionalPlayer"
+      },
+      {
+        "symbol": "cardRemoval",
+        "wire": "cardRemoval",
+        "output": "cardRemoval",
+        "kind": "optionalItem"
+      },
+      {
+        "symbol": "legal",
+        "wire": "legal",
+        "output": "legal",
+        "kind": "requiredStringArray"
+      }
+    ],
+    "item": [
+      {
+        "symbol": "index",
+        "wire": "idx",
+        "output": "index",
+        "kind": "optionalNumber"
+      },
+      {
+        "symbol": "id",
+        "wire": "id",
+        "output": "id",
+        "kind": "optionalString"
+      },
+      {
+        "symbol": "model",
+        "wire": "model",
+        "output": "model",
+        "kind": "optionalString"
+      },
+      {
+        "symbol": "selector",
+        "wire": "selector",
+        "output": "selector",
+        "kind": "optionalString"
+      },
+      {
+        "symbol": "slot",
+        "wire": "slot",
+        "output": "slot",
+        "kind": "optionalNumber"
+      },
+      {
+        "symbol": "target",
+        "wire": "target",
+        "output": "target",
+        "kind": "optionalString"
+      },
+      {
+        "symbol": "col",
+        "wire": "col",
+        "output": "col",
+        "kind": "optionalNumber"
+      },
+      {
+        "symbol": "row",
+        "wire": "row",
+        "output": "row",
+        "kind": "optionalNumber"
+      },
+      {
+        "symbol": "type",
+        "wire": "type",
+        "output": "type",
+        "kind": "optionalString"
+      },
+      {
+        "symbol": "semanticState",
+        "wire": "semanticState",
+        "output": "semanticState",
+        "kind": "optionalStringArray"
+      },
+      {
+        "symbol": "selected",
+        "wire": "selected",
+        "output": "selected",
+        "kind": "optionalBoolean"
+      },
+      {
+        "symbol": "playable",
+        "wire": "playable",
+        "output": "playable",
+        "kind": "optionalBoolean"
+      },
+      {
+        "symbol": "locked",
+        "wire": "locked",
+        "output": "locked",
+        "kind": "optionalBoolean"
+      },
+      {
+        "symbol": "chosen",
+        "wire": "chosen",
+        "output": "chosen",
+        "kind": "optionalBoolean"
+      },
+      {
+        "symbol": "enabled",
+        "wire": "enabled",
+        "output": "enabled",
+        "kind": "optionalBoolean"
+      },
+      {
+        "symbol": "purchasable",
+        "wire": "purchasable",
+        "output": "purchasable",
+        "kind": "optionalBoolean"
+      },
+      {
+        "symbol": "hidden",
+        "wire": "hidden",
+        "output": "hidden",
+        "kind": "optionalBoolean"
+      },
+      {
+        "symbol": "cards",
+        "wire": "cards",
+        "output": "cards",
+        "kind": "itemArray"
+      }
+    ],
+    "combatant": [
+      {
+        "symbol": "hp",
+        "wire": "hp",
+        "output": "hp",
+        "kind": "requiredIntArray"
+      },
+      {
+        "symbol": "block",
+        "wire": "block",
+        "output": "block",
+        "kind": "optionalNumber"
+      },
+      {
+        "symbol": "energy",
+        "wire": "energy",
+        "output": "energy",
+        "kind": "requiredIntArray"
+      },
+      {
+        "symbol": "stars",
+        "wire": "stars",
+        "output": "stars",
+        "kind": "optionalNumber"
+      },
+      {
+        "symbol": "semanticState",
+        "wire": "semanticState",
+        "output": "semanticState",
+        "kind": "optionalStringArray"
+      }
+    ],
+    "enemy": [
+      {
+        "symbol": "id",
+        "wire": "id",
+        "output": "id",
+        "kind": "optionalNumber"
+      },
+      {
+        "symbol": "model",
+        "wire": "model",
+        "output": "model",
+        "kind": "optionalString"
+      },
+      {
+        "symbol": "hp",
+        "wire": "hp",
+        "output": "hp",
+        "kind": "requiredIntArray"
+      },
+      {
+        "symbol": "block",
+        "wire": "block",
+        "output": "block",
+        "kind": "optionalNumber"
+      },
+      {
+        "symbol": "alive",
+        "wire": "alive",
+        "output": "alive",
+        "kind": "optionalBoolean"
+      },
+      {
+        "symbol": "semanticState",
+        "wire": "semanticState",
+        "output": "semanticState",
+        "kind": "optionalStringArray"
+      }
+    ],
+    "player": [
+      {
+        "symbol": "hp",
+        "wire": "hp",
+        "output": "hp",
+        "kind": "optionalIntArray"
+      },
+      {
+        "symbol": "gold",
+        "wire": "gold",
+        "output": "gold",
+        "kind": "optionalNumber"
+      },
+      {
+        "symbol": "semanticState",
+        "wire": "semanticState",
+        "output": "semanticState",
+        "kind": "optionalStringArray"
+      },
+      {
+        "symbol": "potions",
+        "wire": "potions",
+        "output": "potions",
+        "kind": "itemArray"
+      }
+    ]
+  }
 }

@@ -650,90 +650,111 @@ fn state_fingerprint(value: &Value) -> String {
     format!("{hash:016x}")
 }
 
-// Keep this shape aligned with SnapshotContract.ConsumerProjection. It is a
-// deliberate semantic replay/settlement contract, not a hash of arbitrary
-// presentation extensions in /obs.
+// These names are the cross-language compile contract. If a C# schema field is
+// removed without updating this consumer, generation omits its symbol and the
+// Rust build fails instead of silently narrowing replay/settlement semantics.
+macro_rules! require_projection_fields {
+    ($($field:ident),* $(,)?) => {
+        $(const _: ProjectionField = $field;)*
+    };
+}
+
+require_projection_fields!(
+    PROJECTION_TOP_PHASE,
+    PROJECTION_TOP_ID,
+    PROJECTION_TOP_ACT,
+    PROJECTION_TOP_CURRENT,
+    PROJECTION_TOP_TURN,
+    PROJECTION_TOP_OUTCOME,
+    PROJECTION_TOP_HP,
+    PROJECTION_TOP_GOLD,
+    PROJECTION_TOP_SEMANTIC_STATE,
+    PROJECTION_TOP_SELECTED,
+    PROJECTION_TOP_SIDE,
+    PROJECTION_TOP_ACTIONS_DISABLED,
+    PROJECTION_TOP_AVAILABLE,
+    PROJECTION_TOP_PROCEED_AVAILABLE,
+    PROJECTION_TOP_CHEST_OPENED,
+    PROJECTION_TOP_CONFIRMABLE,
+    PROJECTION_TOP_CANCELABLE,
+    PROJECTION_TOP_HAS_TOP_LEVEL_POTIONS,
+    PROJECTION_TOP_NEXT,
+    PROJECTION_TOP_HAND,
+    PROJECTION_TOP_POTIONS,
+    PROJECTION_TOP_OPTIONS,
+    PROJECTION_TOP_CARDS,
+    PROJECTION_TOP_COLORLESS,
+    PROJECTION_TOP_RELICS,
+    PROJECTION_TOP_REWARDS,
+    PROJECTION_TOP_ALTERNATIVES,
+    PROJECTION_TOP_BUNDLES,
+    PROJECTION_TOP_CELLS,
+    PROJECTION_TOP_YOU,
+    PROJECTION_TOP_ENEMIES,
+    PROJECTION_TOP_PLAYER,
+    PROJECTION_TOP_CARD_REMOVAL,
+    PROJECTION_TOP_LEGAL,
+    PROJECTION_ITEM_INDEX,
+    PROJECTION_ITEM_ID,
+    PROJECTION_ITEM_MODEL,
+    PROJECTION_ITEM_SELECTOR,
+    PROJECTION_ITEM_SLOT,
+    PROJECTION_ITEM_TARGET,
+    PROJECTION_ITEM_COL,
+    PROJECTION_ITEM_ROW,
+    PROJECTION_ITEM_TYPE,
+    PROJECTION_ITEM_SEMANTIC_STATE,
+    PROJECTION_ITEM_SELECTED,
+    PROJECTION_ITEM_PLAYABLE,
+    PROJECTION_ITEM_LOCKED,
+    PROJECTION_ITEM_CHOSEN,
+    PROJECTION_ITEM_ENABLED,
+    PROJECTION_ITEM_PURCHASABLE,
+    PROJECTION_ITEM_HIDDEN,
+    PROJECTION_ITEM_CARDS,
+    PROJECTION_COMBATANT_HP,
+    PROJECTION_COMBATANT_BLOCK,
+    PROJECTION_COMBATANT_ENERGY,
+    PROJECTION_COMBATANT_STARS,
+    PROJECTION_COMBATANT_SEMANTIC_STATE,
+    PROJECTION_ENEMY_ID,
+    PROJECTION_ENEMY_MODEL,
+    PROJECTION_ENEMY_HP,
+    PROJECTION_ENEMY_BLOCK,
+    PROJECTION_ENEMY_ALIVE,
+    PROJECTION_ENEMY_SEMANTIC_STATE,
+    PROJECTION_PLAYER_HP,
+    PROJECTION_PLAYER_GOLD,
+    PROJECTION_PLAYER_SEMANTIC_STATE,
+    PROJECTION_PLAYER_POTIONS,
+);
+
+// protocol.json owns this deliberate semantic replay/settlement contract. The
+// generated groups keep wire and output names aligned with C# without copying
+// JSON vocabulary into this consumer.
 fn consumer_projection(value: &Value) -> Value {
     let mut result = Map::new();
-    result.insert(
-        "phase".into(),
-        value
-            .get("phase")
-            .and_then(Value::as_str)
-            .map_or(Value::Null, |phase| Value::String(phase.into())),
+    copy_required_strings(value, &mut result, PROJECTION_TOP_REQUIRED_STRING_FIELDS);
+    copy_optional_strings(value, &mut result, PROJECTION_TOP_OPTIONAL_STRING_FIELDS);
+    copy_optional_numbers(value, &mut result, PROJECTION_TOP_OPTIONAL_NUMBER_FIELDS);
+    copy_optional_int_arrays(value, &mut result, PROJECTION_TOP_OPTIONAL_INT_ARRAY_FIELDS);
+    copy_optional_string_arrays(
+        value,
+        &mut result,
+        PROJECTION_TOP_OPTIONAL_STRING_ARRAY_FIELDS,
     );
-    copy_string(value, &mut result, "id", "id");
-    copy_number(value, &mut result, "act");
-    copy_int_array(value, &mut result, "current");
-    copy_number(value, &mut result, "turn");
-    copy_string(value, &mut result, "outcome", "outcome");
-    copy_int_array(value, &mut result, "hp");
-    copy_number(value, &mut result, "gold");
-    copy_string_array(value, &mut result, "semanticState");
-    copy_string_array(value, &mut result, "selected");
-    copy_string(value, &mut result, "side", "side");
-    for field in [
-        "actionsDisabled",
-        "available",
-        "proceedAvailable",
-        "chestOpened",
-        "confirmable",
-        "cancelable",
-    ] {
-        copy_bool(value, &mut result, field, field);
-    }
-    result.insert(
-        "hasTopLevelPotions".into(),
-        Value::Bool(value.get("potions").is_some_and(Value::is_array)),
+    copy_optional_booleans(value, &mut result, PROJECTION_TOP_OPTIONAL_BOOLEAN_FIELDS);
+    copy_presence_booleans(value, &mut result, PROJECTION_TOP_PRESENCE_BOOLEAN_FIELDS);
+    copy_item_arrays(value, &mut result, PROJECTION_TOP_ITEM_ARRAY_FIELDS);
+    copy_optional_items(value, &mut result, PROJECTION_TOP_OPTIONAL_ITEM_FIELDS);
+    copy_optional_combatants(value, &mut result, PROJECTION_TOP_OPTIONAL_COMBATANT_FIELDS);
+    copy_enemy_arrays(value, &mut result, PROJECTION_TOP_ENEMY_ARRAY_FIELDS);
+    copy_optional_players(value, &mut result, PROJECTION_TOP_OPTIONAL_PLAYER_FIELDS);
+    copy_required_string_arrays(
+        value,
+        &mut result,
+        PROJECTION_TOP_REQUIRED_STRING_ARRAY_FIELDS,
     );
-    for field in [
-        "next",
-        "hand",
-        "potions",
-        "options",
-        "cards",
-        "colorless",
-        "relics",
-        "rewards",
-        "alternatives",
-        "bundles",
-        "cells",
-    ] {
-        result.insert(field.into(), item_array(value.get(field)));
-    }
-    if let Some(you) = value.get("you").filter(|you| you.is_object()) {
-        let mut projected = Map::new();
-        projected.insert("hp".into(), int_array(you.get("hp")));
-        copy_number(you, &mut projected, "block");
-        projected.insert("energy".into(), int_array(you.get("energy")));
-        copy_number(you, &mut projected, "stars");
-        copy_string_array(you, &mut projected, "semanticState");
-        result.insert("you".into(), Value::Object(projected));
-    }
-    result.insert("enemies".into(), enemy_array(value.get("enemies")));
-    if let Some(player) = value.get("player").filter(|player| player.is_object()) {
-        let mut projected = Map::new();
-        copy_int_array(player, &mut projected, "hp");
-        copy_number(player, &mut projected, "gold");
-        copy_string_array(player, &mut projected, "semanticState");
-        projected.insert("potions".into(), item_array(player.get("potions")));
-        result.insert("player".into(), Value::Object(projected));
-    }
-    if let Some(removal) = value
-        .get("cardRemoval")
-        .filter(|removal| removal.is_object())
-    {
-        result.insert("cardRemoval".into(), item_projection(removal));
-    }
-    let legal = value
-        .get("legal")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
-        .map(|verb| Value::String(verb.into()))
-        .collect();
-    result.insert("legal".into(), Value::Array(legal));
     Value::Object(result)
 }
 
@@ -751,30 +772,15 @@ fn item_array(value: Option<&Value>) -> Value {
 
 fn item_projection(value: &Value) -> Value {
     let mut result = Map::new();
-    if let Some(index) = value.get("idx").and_then(Value::as_i64) {
-        result.insert("index".into(), Value::Number(index.into()));
-    }
-    copy_string(value, &mut result, "id", "id");
-    copy_string(value, &mut result, "model", "model");
-    copy_string(value, &mut result, "selector", "selector");
-    copy_number(value, &mut result, "slot");
-    copy_string(value, &mut result, "target", "target");
-    copy_number(value, &mut result, "col");
-    copy_number(value, &mut result, "row");
-    copy_string(value, &mut result, "type", "type");
-    copy_string_array(value, &mut result, "semanticState");
-    for field in [
-        "selected",
-        "playable",
-        "locked",
-        "chosen",
-        "enabled",
-        "purchasable",
-        "hidden",
-    ] {
-        copy_bool(value, &mut result, field, field);
-    }
-    result.insert("cards".into(), item_array(value.get("cards")));
+    copy_optional_strings(value, &mut result, PROJECTION_ITEM_OPTIONAL_STRING_FIELDS);
+    copy_optional_numbers(value, &mut result, PROJECTION_ITEM_OPTIONAL_NUMBER_FIELDS);
+    copy_optional_string_arrays(
+        value,
+        &mut result,
+        PROJECTION_ITEM_OPTIONAL_STRING_ARRAY_FIELDS,
+    );
+    copy_optional_booleans(value, &mut result, PROJECTION_ITEM_OPTIONAL_BOOLEAN_FIELDS);
+    copy_item_arrays(value, &mut result, PROJECTION_ITEM_ITEM_ARRAY_FIELDS);
     Value::Object(result)
 }
 
@@ -785,18 +791,64 @@ fn enemy_array(value: Option<&Value>) -> Value {
             .into_iter()
             .flatten()
             .filter(|enemy| enemy.is_object())
-            .map(|enemy| {
-                let mut result = Map::new();
-                copy_number(enemy, &mut result, "id");
-                copy_string(enemy, &mut result, "model", "model");
-                result.insert("hp".into(), int_array(enemy.get("hp")));
-                copy_number(enemy, &mut result, "block");
-                copy_bool(enemy, &mut result, "alive", "alive");
-                copy_string_array(enemy, &mut result, "semanticState");
-                Value::Object(result)
-            })
+            .map(enemy_projection)
             .collect(),
     )
+}
+
+fn combatant_projection(value: &Value) -> Value {
+    let mut result = Map::new();
+    copy_required_int_arrays(
+        value,
+        &mut result,
+        PROJECTION_COMBATANT_REQUIRED_INT_ARRAY_FIELDS,
+    );
+    copy_optional_numbers(
+        value,
+        &mut result,
+        PROJECTION_COMBATANT_OPTIONAL_NUMBER_FIELDS,
+    );
+    copy_optional_string_arrays(
+        value,
+        &mut result,
+        PROJECTION_COMBATANT_OPTIONAL_STRING_ARRAY_FIELDS,
+    );
+    Value::Object(result)
+}
+
+fn enemy_projection(value: &Value) -> Value {
+    let mut result = Map::new();
+    copy_required_int_arrays(
+        value,
+        &mut result,
+        PROJECTION_ENEMY_REQUIRED_INT_ARRAY_FIELDS,
+    );
+    copy_optional_strings(value, &mut result, PROJECTION_ENEMY_OPTIONAL_STRING_FIELDS);
+    copy_optional_numbers(value, &mut result, PROJECTION_ENEMY_OPTIONAL_NUMBER_FIELDS);
+    copy_optional_string_arrays(
+        value,
+        &mut result,
+        PROJECTION_ENEMY_OPTIONAL_STRING_ARRAY_FIELDS,
+    );
+    copy_optional_booleans(value, &mut result, PROJECTION_ENEMY_OPTIONAL_BOOLEAN_FIELDS);
+    Value::Object(result)
+}
+
+fn player_projection(value: &Value) -> Value {
+    let mut result = Map::new();
+    copy_optional_numbers(value, &mut result, PROJECTION_PLAYER_OPTIONAL_NUMBER_FIELDS);
+    copy_optional_int_arrays(
+        value,
+        &mut result,
+        PROJECTION_PLAYER_OPTIONAL_INT_ARRAY_FIELDS,
+    );
+    copy_optional_string_arrays(
+        value,
+        &mut result,
+        PROJECTION_PLAYER_OPTIONAL_STRING_ARRAY_FIELDS,
+    );
+    copy_item_arrays(value, &mut result, PROJECTION_PLAYER_ITEM_ARRAY_FIELDS);
+    Value::Object(result)
 }
 
 fn int_array(value: Option<&Value>) -> Value {
@@ -811,42 +863,170 @@ fn int_array(value: Option<&Value>) -> Value {
     )
 }
 
-fn copy_int_array(source: &Value, target: &mut Map<String, Value>, key: &str) {
-    if source.get(key).is_some_and(Value::is_array) {
-        target.insert(key.into(), int_array(source.get(key)));
+fn string_array(value: Option<&Value>) -> Value {
+    Value::Array(
+        value
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(|item| Value::String(item.into()))
+            .collect(),
+    )
+}
+
+fn copy_required_strings(
+    source: &Value,
+    target: &mut Map<String, Value>,
+    fields: &[ProjectionField],
+) {
+    for field in fields {
+        let value = source
+            .get(field.wire)
+            .and_then(Value::as_str)
+            .map_or(Value::Null, |value| Value::String(value.into()));
+        target.insert(field.output.into(), value);
     }
 }
 
-fn copy_string_array(source: &Value, target: &mut Map<String, Value>, key: &str) {
-    if let Some(values) = source.get(key).and_then(Value::as_array) {
+fn copy_optional_strings(
+    source: &Value,
+    target: &mut Map<String, Value>,
+    fields: &[ProjectionField],
+) {
+    for field in fields {
+        if let Some(value) = source.get(field.wire).and_then(Value::as_str) {
+            target.insert(field.output.into(), Value::String(value.into()));
+        }
+    }
+}
+
+fn copy_optional_numbers(
+    source: &Value,
+    target: &mut Map<String, Value>,
+    fields: &[ProjectionField],
+) {
+    for field in fields {
+        if let Some(value) = source.get(field.wire).filter(|value| value.is_number()) {
+            target.insert(field.output.into(), value.clone());
+        }
+    }
+}
+
+fn copy_required_int_arrays(
+    source: &Value,
+    target: &mut Map<String, Value>,
+    fields: &[ProjectionField],
+) {
+    for field in fields {
+        target.insert(field.output.into(), int_array(source.get(field.wire)));
+    }
+}
+
+fn copy_optional_int_arrays(
+    source: &Value,
+    target: &mut Map<String, Value>,
+    fields: &[ProjectionField],
+) {
+    for field in fields {
+        if source.get(field.wire).is_some_and(Value::is_array) {
+            target.insert(field.output.into(), int_array(source.get(field.wire)));
+        }
+    }
+}
+
+fn copy_optional_string_arrays(
+    source: &Value,
+    target: &mut Map<String, Value>,
+    fields: &[ProjectionField],
+) {
+    for field in fields {
+        if source.get(field.wire).is_some_and(Value::is_array) {
+            target.insert(field.output.into(), string_array(source.get(field.wire)));
+        }
+    }
+}
+
+fn copy_optional_booleans(
+    source: &Value,
+    target: &mut Map<String, Value>,
+    fields: &[ProjectionField],
+) {
+    for field in fields {
+        if let Some(value) = source.get(field.wire).and_then(Value::as_bool) {
+            target.insert(field.output.into(), Value::Bool(value));
+        }
+    }
+}
+
+fn copy_presence_booleans(
+    source: &Value,
+    target: &mut Map<String, Value>,
+    fields: &[ProjectionField],
+) {
+    for field in fields {
         target.insert(
-            key.into(),
-            Value::Array(
-                values
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .map(|value| Value::String(value.into()))
-                    .collect(),
-            ),
+            field.output.into(),
+            Value::Bool(source.get(field.wire).is_some_and(Value::is_array)),
         );
     }
 }
 
-fn copy_number(source: &Value, target: &mut Map<String, Value>, key: &str) {
-    if let Some(value) = source.get(key).filter(|value| value.is_number()) {
-        target.insert(key.into(), value.clone());
+fn copy_item_arrays(source: &Value, target: &mut Map<String, Value>, fields: &[ProjectionField]) {
+    for field in fields {
+        target.insert(field.output.into(), item_array(source.get(field.wire)));
     }
 }
 
-fn copy_string(source: &Value, target: &mut Map<String, Value>, source_key: &str, key: &str) {
-    if let Some(value) = source.get(source_key).and_then(Value::as_str) {
-        target.insert(key.into(), Value::String(value.into()));
+fn copy_optional_items(
+    source: &Value,
+    target: &mut Map<String, Value>,
+    fields: &[ProjectionField],
+) {
+    for field in fields {
+        if let Some(value) = source.get(field.wire).filter(|value| value.is_object()) {
+            target.insert(field.output.into(), item_projection(value));
+        }
     }
 }
 
-fn copy_bool(source: &Value, target: &mut Map<String, Value>, source_key: &str, key: &str) {
-    if let Some(value) = source.get(source_key).and_then(Value::as_bool) {
-        target.insert(key.into(), Value::Bool(value));
+fn copy_optional_combatants(
+    source: &Value,
+    target: &mut Map<String, Value>,
+    fields: &[ProjectionField],
+) {
+    for field in fields {
+        if let Some(value) = source.get(field.wire).filter(|value| value.is_object()) {
+            target.insert(field.output.into(), combatant_projection(value));
+        }
+    }
+}
+
+fn copy_enemy_arrays(source: &Value, target: &mut Map<String, Value>, fields: &[ProjectionField]) {
+    for field in fields {
+        target.insert(field.output.into(), enemy_array(source.get(field.wire)));
+    }
+}
+
+fn copy_optional_players(
+    source: &Value,
+    target: &mut Map<String, Value>,
+    fields: &[ProjectionField],
+) {
+    for field in fields {
+        if let Some(value) = source.get(field.wire).filter(|value| value.is_object()) {
+            target.insert(field.output.into(), player_projection(value));
+        }
+    }
+}
+
+fn copy_required_string_arrays(
+    source: &Value,
+    target: &mut Map<String, Value>,
+    fields: &[ProjectionField],
+) {
+    for field in fields {
+        target.insert(field.output.into(), string_array(source.get(field.wire)));
     }
 }
 
@@ -1448,6 +1628,22 @@ mod tests {
         changed = original.clone();
         changed["enemies"][0]["id"] = json!(8);
         assert_ne!(state_fingerprint(&original), state_fingerprint(&changed));
+    }
+
+    #[test]
+    fn replay_projection_uses_generated_item_model_wire_key() {
+        let mut snapshot = json!({ "phase": "combat", "hand": [{}] });
+        snapshot["hand"][0]
+            .as_object_mut()
+            .unwrap()
+            .insert(PROJECTION_ITEM_MODEL.wire.into(), json!("STRIKE_R"));
+
+        let projected = consumer_projection(&snapshot);
+
+        assert_eq!(
+            projected["hand"][0].get(PROJECTION_ITEM_MODEL.output),
+            Some(&json!("STRIKE_R"))
+        );
     }
 
     #[test]
