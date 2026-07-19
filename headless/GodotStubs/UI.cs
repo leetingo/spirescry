@@ -319,6 +319,10 @@ public class AudioStreamPlayer : Node
     }
     public AudioStream? Stream { get; set; }
     public float VolumeDb { get; set; }
+    public float VolumeLinear { get; set; }
+    public float PitchScale { get; set; } = 1f;
+    public StringName Bus { get; set; } = "";
+    public bool IsPlaying() => false;
     public void Play(float fromPosition = 0) { }
     public void Stop() { }
 }

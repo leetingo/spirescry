@@ -40,6 +40,12 @@ internal static class HeadlessBoot
 
     public static void Start()
     {
+        // Before anything engine-shaped exists: the NGame immunization
+        // below installs a non-null dummy, which would flip the mod's
+        // NGame-null mode probe to "GUI" — the explicit flag is the mode
+        // authority in host boots.
+        RunMode.ForcedHeadless = true;
+
         // STS2_HOST_DEBUG=1: print first-chance exception stacks — the
         // engine's own logger swallows them down to one message line.
         // Known GodotSharp stub misses (type/method loads the stub doesn't
@@ -413,7 +419,8 @@ internal static class HeadlessBoot
 
     private static int PatchMethodsAndSwallow(
         IEnumerable<Type> types, BindingFlags flags,
-        Func<MethodInfo, bool> matches, bool completeFaultedTasks = false)
+        Func<MethodInfo, bool> matches, bool completeFaultedTasks = false,
+        List<string>? failures = null)
     {
         var patched = 0;
         foreach (var t in types)
@@ -425,8 +432,13 @@ internal static class HeadlessBoot
                 var finalizer = completeFaultedTasks
                     && typeof(Task).IsAssignableFrom(m.ReturnType)
                     ? SwallowTask : Swallow;
+                // A failed patch usually means the method's body references
+                // a Godot API the stubs don't cover, so Harmony can't JIT
+                // it — the method then runs raw and its fault escapes the
+                // swallow. Callers that immunize singletons pass `failures`
+                // to make that visible instead of chasing it downstream.
                 try { _harmony!.Patch(m, finalizer: finalizer); patched++; }
-                catch { }
+                catch { failures?.Add($"{t.Name}.{m.Name}"); }
             }
         }
         return patched;
@@ -584,15 +596,133 @@ internal static class HeadlessBoot
         HostLog.Info($"swallowed {patched} monster flavor hooks");
     }
 
-    // Some monster death hooks call NAudioManager.Instance.PlayOneShot
-    // without a null guard (Kaiser-crab bosses). Give the singleton an
-    // uninitialized body and swallow every method's exceptions — audio is
-    // pure output, no game state.
+    // Model-layer code calls display/audio singletons without null guards:
+    // NAudioManager.Instance.PlayOneShot in monster death hooks
+    // (Kaiser-crab bosses), NDebugAudioManager.Instance.Play and
+    // NGame.Instance.ScreenShakeTrauma/ScreenRumble mid-event-effect
+    // (Dense Vegetation's rest, the Amalgamator's combines). Headless has
+    // none of these nodes, so the null deref aborts the effect halfway —
+    // the Amalgamator removed two Defends and never granted the Ultimate
+    // Defend. Give each singleton an uninitialized body and swallow every
+    // method: they are presentation output, and every one of these calls
+    // was already a guaranteed NRE headless, so a no-op is strictly more
+    // faithful to the GUI's behavior.
     private static void ImmunizeAudioSingletons()
     {
-        const string name = "MegaCrit.Sts2.Core.Nodes.Audio.NAudioManager";
+        var audio = ImmunizeSingleton("MegaCrit.Sts2.Core.Nodes.Audio.NAudioManager");
+        var debugAudio = ImmunizeSingleton("MegaCrit.Sts2.Core.Audio.Debug.NDebugAudioManager");
+        // NGame is the root visual node, so its dummy must be fully
+        // inert: property accessors too (non-auto getters deref null
+        // fields), and Task-returning members must complete rather than
+        // return null — engine code awaits them. Mode detection is
+        // insulated by RunMode.ForcedHeadless, stamped before this runs.
+        var game = ImmunizeSingleton("MegaCrit.Sts2.Core.Nodes.NGame",
+            includeSpecialNames: true, completeFaultedTasks: true);
+        if (game is null) return;
+
+        // Sub-manager chains resolve through the dummy: _Ready would have
+        // GetNode'd these auto-properties, and NDebugAudioManager.Instance
+        // is computed as NGame.Instance?.DebugAudio — leave them null and
+        // Dense Vegetation's rest still NREs one dereference later.
+        if (debugAudio is not null)
+            Reflect.SetPropertyOrBackingField(game, "DebugAudio", debugAudio);
+        if (audio is not null)
+            Reflect.SetPropertyOrBackingField(game, "AudioManager", audio);
+
+        ImmunizeEventRoomUi();
+    }
+
+    // Trial reaches event-room UI without null guards or IsMe-independent
+    // logic separation: NEventRoom.Instance.Layout.RemoveNodesOnPortrait,
+    // .SetPortrait(Cache.GetTexture2D(...)), and (via DoubleDown)
+    // NModalContainer.Instance.Add(NAbandonRunConfirmPopup.Create(null)).
+    // Every other event reaches these singletons through null-safe `?.`
+    // chains (decompile survey), so inert dummies change Trial's fate
+    // only: the effect completes instead of aborting halfway.
+    private static object? _eventLayoutDummy;
+
+    private static void ImmunizeEventRoomUi()
+    {
+        _eventLayoutDummy = ImmunizeSingleton(
+            "MegaCrit.Sts2.Core.Nodes.Events.NEventLayout",
+            includeSpecialNames: true, completeFaultedTasks: true);
+        var room = ImmunizeSingleton(
+            "MegaCrit.Sts2.Core.Nodes.Rooms.NEventRoom",
+            includeSpecialNames: true, completeFaultedTasks: true);
+        // NModalContainer must NOT get a dummy: a non-null Instance opens
+        // engine FTUE gates — CardPileCmd's first-shuffle popup checks
+        // `NModalContainer.Instance != null`, then awaits a modal that can
+        // never resolve headless, parking every draw that shuffles. The
+        // one unguarded model-layer use (Trial's DoubleDown) is swallowed
+        // below instead.
+
+        // The whole chain is computed — NEventRoom.Instance =>
+        // NRun.Instance?.EventRoom => NGame.Instance?.CurrentRunNode —
+        // so installing a dummy in a backing field can never surface it.
+        // Reroute the two getters Trial dereferences: Instance to the
+        // inert room, Layout (_eventContainer.CurrentScene) to the inert
+        // layout. Every other caller reads these through null-safe `?.`
+        // chains whose sub-properties stay null, so behavior elsewhere is
+        // unchanged.
+        _eventRoomDummy = room;
+        if (room is not null)
+        {
+            var getInstance = typeof(MegaCrit.Sts2.Core.Nodes.Rooms.NEventRoom)
+                .GetProperty("Instance", BindingFlags.Public | BindingFlags.Static)
+                ?.GetGetMethod();
+            if (getInstance is not null)
+                _harmony!.Patch(getInstance, prefix: Local(nameof(EventRoomInstancePrefix)));
+        }
+        if (room is not null && _eventLayoutDummy is not null)
+        {
+            var getLayout = typeof(MegaCrit.Sts2.Core.Nodes.Rooms.NEventRoom)
+                .GetProperty("Layout")?.GetGetMethod();
+            if (getLayout is not null)
+                _harmony!.Patch(getLayout, prefix: Local(nameof(EventLayoutPrefix)));
+        }
+
+        // Two Trial helpers are pure presentation and fault headless:
+        // AddVfxAnchoredToPortrait NREs on Cache.GetScene(path)
+        // .Instantiate (portrait garnish), and DoubleDown's only body is
+        // NModalContainer.Instance.Add(confirm popup) — a modal that
+        // cannot exist here (see the NModalContainer note above), so the
+        // double-down option becomes an inert click instead of a crash.
+        var trial = typeof(AbstractModelSubtypes).Assembly.GetType(
+            "MegaCrit.Sts2.Core.Models.Events.Trial");
+        if (trial is not null)
+            PatchMethodsAndSwallow(
+                [trial],
+                BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.DeclaredOnly,
+                m => m.Name is "AddVfxAnchoredToPortrait" or "DoubleDown",
+                completeFaultedTasks: true);
+    }
+
+    private static object? _eventRoomDummy;
+
+    private static bool EventRoomInstancePrefix(
+        ref MegaCrit.Sts2.Core.Nodes.Rooms.NEventRoom? __result)
+    {
+        __result = (MegaCrit.Sts2.Core.Nodes.Rooms.NEventRoom?)_eventRoomDummy;
+        return false;
+    }
+
+    private static bool EventLayoutPrefix(
+        ref MegaCrit.Sts2.Core.Nodes.Events.NEventLayout? __result)
+    {
+        __result = (MegaCrit.Sts2.Core.Nodes.Events.NEventLayout?)_eventLayoutDummy;
+        return false;
+    }
+
+
+    private static object? ImmunizeSingleton(
+        string name, bool includeSpecialNames = false, bool completeFaultedTasks = false)
+    {
         var t = typeof(AbstractModelSubtypes).Assembly.GetType(name);
-        if (t is null) return;
+        if (t is null)
+        {
+            HostLog.Info($"immunize: {name} not found");
+            return null;
+        }
         try
         {
             var inst = System.Runtime.CompilerServices.RuntimeHelpers.GetUninitializedObject(t);
@@ -600,14 +730,20 @@ internal static class HeadlessBoot
                 t.GetField("_instance",
                     BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static)
                     ?.SetValue(null, inst);
+            var failures = new List<string>();
             var patched = PatchMethodsAndSwallow(
                 [t], BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly,
-                m => !m.IsSpecialName);
-            HostLog.Info($"immunized {t.Name}: {patched} methods");
+                m => includeSpecialNames || !m.IsSpecialName,
+                completeFaultedTasks, failures);
+            HostLog.Info($"immunized {t.Name}: {patched} methods" + (failures.Count == 0
+                ? ""
+                : $" — {failures.Count} UNPATCHABLE (faults escape): {string.Join(", ", failures)}"));
+            return inst;
         }
         catch (Exception ex)
         {
             HostLog.Error($"immunize {name}", ex);
+            return null;
         }
     }
 

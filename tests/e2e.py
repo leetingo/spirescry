@@ -515,11 +515,36 @@ def p12():
 
     # A followed verb whose async work faults must say so in `errors` —
     # "settled" alone is engine quiescence, not proof of a clean effect.
-    followed = run("cheat", "async-fault", "--follow", "5000")
+    followed = run("cheat", "async-fault", "--follow", "5000", allow_errors=True)
     assert any(
         error.startswith("async_fault:forced-async-fault:")
         for error in followed["errors"]
     ), followed["errors"]
+
+
+@case("P13 engine log errors surface in follow errors and the runlog")
+def p13():
+    # The engine logs-and-swallows faults inside its own task chains; the
+    # engine-error cheat writes through that same Error logger, so this
+    # regression covers the log-line channel end to end (async-fault in
+    # P12 covers the tracked-task stream).
+    launch(seed="CIENGERR")
+    faulted = run("cheat", "engine-error", "--follow", "5000", allow_errors=True)
+    assert faulted["settled"] is True, faulted
+    assert any(
+        error.startswith("engine_error:") and "forced engine log error" in error
+        for error in faulted["errors"]
+    ), faulted["errors"]
+
+    # The fault survives into the diagnostic recipe: forensics must not
+    # depend on the host log alone.
+    log = run("runlog")
+    entry = next(
+        v for v in reversed(log["verbs"])
+        if v["action"] == "cheat" and v.get("args", {}).get("name") == "engine-error"
+    )
+    assert any("forced engine log error" in e for e in entry.get("errors", [])), entry
+    to_menu()
 
 
 # ---------- R: run lifecycle ----------
@@ -1521,6 +1546,42 @@ def e1():
     if not ARGS.quick:
         args.append("--all-options")
     run_test_script("eventsweep.py", *args)
+
+
+@case("E2 amalgamator combine grants the ultimate defend it promises")
+def e2():
+    # Regression for the half-executed event effect: NGame.Instance is
+    # null headless and CombineDefends screen-shakes between removing the
+    # two Defends and granting the Ultimate Defend — unimmunized, the NRE
+    # aborted there and the player paid two cards for nothing (the
+    # follow guard also asserts the fault no longer fires at all).
+    to_map(seed="CIAMALG")
+    run("cheat", "event", "AMALGAMATOR")
+    d = bridge.wait_phase("event")
+    combine = next(
+        o for o in d["options"]
+        if "defend" in ((o.get("title") or "") + (o.get("description") or "")).lower()
+        and not o.get("locked"))
+    models0 = [c["model"] for c in obs()["player"]["deck"]]
+
+    picking = run("option", str(combine["idx"]), "--follow", "5000")
+    assert picking["obs"]["phase"] == "card_select", picking["obs"]["phase"]
+    run("pick-card", "0", "--follow", "5000")
+    run("pick-card", "1", "--follow", "5000")  # max picks auto-resolve
+
+    # The combine pauses on an engine-side Task.Delay between removing
+    # the Defends and granting the reward — wait for the grant, don't
+    # race it.
+    granted = bridge.wait_until(
+        lambda snapshot: any(
+            c.get("model") == "ULTIMATE_DEFEND"
+            for c in (snapshot.get("player") or {}).get("deck") or []),
+        timeout=10,
+        description="ultimate defend granted")
+    models = [c["model"] for c in granted["player"]["deck"]]
+    assert models.count("DEFEND_IRONCLAD") == models0.count("DEFEND_IRONCLAD") - 2, \
+        (models0, models)
+    to_menu()
 
 
 # ---------- M: exhaustive content sweeps ----------

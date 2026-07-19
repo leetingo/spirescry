@@ -256,6 +256,30 @@ internal static class Tests
         False(ErrorEvents.IsError("async:option"));
         False(ErrorEvents.IsError("phase:map->combat"));
         False(ErrorEvents.IsError("wedge:DeadBoard"));
+        False(ErrorEvents.IsError("engine_note:System.InvalidOperationException: benign"));
+    }
+
+    public static void ErrorEventsDowngradeTheVictoryStalePopToANote()
+    {
+        // The exact line the engine logs on the healthy victory path
+        // (exception ToString: type, message, then stack) — a note, not
+        // an error, or every clean victory could read as polluted.
+        var victoryLine =
+            "System.InvalidOperationException: Tried to pop action "
+            + "EndPlayerTurnAction, but we didn't find it in any queue!\n"
+            + "   at MegaCrit.Sts2.Core.GameActions.ActionQueue.Pop()";
+        var evt = ErrorEvents.FromLogLine(victoryLine);
+        True(evt.StartsWith("engine_note:", StringComparison.Ordinal));
+        False(ErrorEvents.IsError(evt));
+
+        // A different action or exception type merely mentioning queues
+        // stays a real error.
+        True(ErrorEvents.IsError(ErrorEvents.FromLogLine(
+            "System.InvalidOperationException: Tried to pop action "
+            + "PlayCardAction, but we didn't find it in any queue!")));
+        True(ErrorEvents.IsError(ErrorEvents.FromLogLine(
+            "System.NullReferenceException: Tried to pop action "
+            + "EndPlayerTurnAction, but we didn't find it in any queue!")));
     }
 
     public static void DecisionClosedChestAdvertisesTheOpeningPickRelic()

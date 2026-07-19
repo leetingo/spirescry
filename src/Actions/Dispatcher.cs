@@ -73,7 +73,7 @@ public static class Dispatcher
     {
         "goto", "gold", "heal", "hp", "wound-enemies", "event", "combat",
         "card", "card-upgraded", "relic", "potion", "stars", "energy",
-        "async-fault",
+        "async-fault", "engine-error",
     };
 
     public static DispatchResult Dispatch(string action, JsonElement args) => action switch
@@ -120,6 +120,7 @@ public static class Dispatcher
             "stars" => SetCombatResource("Stars", args),
             "energy" => SetCombatResource("Energy", args),
             "async-fault" => CheatAsyncFault(),
+            "engine-error" => CheatEngineError(),
             var n => DispatchResult.Reject(RejectionCodes.BadRequest,
                 $"unknown cheat '{n}' (supported: {string.Join(", ", Cheats)})"),
         };
@@ -128,6 +129,16 @@ public static class Dispatcher
     private static DispatchResult CheatAsyncFault()
     {
         Fire(ForcedAsyncFault(), "forced-async-fault");
+        return DispatchResult.Success();
+    }
+
+    // Drives the engine's own Error logger synchronously — the regression
+    // hook for the engine_error follow channel (async-fault covers the
+    // tracked-task stream; this covers log-and-swallow faults).
+    private static DispatchResult CheatEngineError()
+    {
+        MegaCrit.Sts2.Core.Logging.Log.Error(
+            "SpirescryForcedException: forced engine log error (cheat engine-error)");
         return DispatchResult.Success();
     }
 
@@ -386,7 +397,9 @@ public static class Dispatcher
         var rm = RunManager.Instance;
         if (rm is null || rm.DebugOnlyGetState() is null)
             return DispatchResult.Reject(RejectionCodes.BadPhase, "no run to abandon");
-        var game = NGame.Instance;
+        // The host installs an inert NGame dummy (display no-ops), so
+        // mode comes from RunMode, not from this instance's null-ness.
+        var game = RunMode.IsHeadless ? null : NGame.Instance;
         if (!rm.IsAbandoned && !rm.IsGameOver)
         {
             if (game is null) HeadlessAbandonTeardown(rm);
@@ -741,7 +754,7 @@ public static class Dispatcher
             return DispatchResult.Reject(RejectionCodes.BadRequest,
                 "args.ascension must be a non-negative 32-bit integer");
 
-        var game = NGame.Instance;
+        var game = RunMode.IsHeadless ? null : NGame.Instance;
         if (game is null) return NewRunHeadless(character, seed, ascension);
 
         // The same gate a human click passes: the menu enables its
@@ -955,7 +968,9 @@ public static class Dispatcher
         switch (PhaseDetector.Current())
         {
             case Phase.Event:
-                if (NEventRoom.Instance is { })
+                // The host installs an inert NEventRoom dummy; mode comes
+                // from RunMode, not from this instance's null-ness.
+                if (!RunMode.IsHeadless && NEventRoom.Instance is { })
                 {
                     Fire(NEventRoom.Proceed(), "proceed");
                     return DispatchResult.Success();

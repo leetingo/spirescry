@@ -9,9 +9,25 @@ public static class ErrorEvents
 {
     public const string EnginePrefix = "engine_error:";
     public const string AsyncPrefix = "async_fault:";
+    // Known-benign engine error lines: kept in the event stream for
+    // forensics, excluded from the errors array — they must not read as
+    // pollution.
+    public const string NotePrefix = "engine_note:";
 
     public static string FromLogLine(string text) =>
-        $"{EnginePrefix}{Condense(text)}";
+        $"{(IsKnownBenignLogLine(text) ? NotePrefix : EnginePrefix)}{Condense(text)}";
+
+    // The one error line the engine emits on a healthy path: the victory
+    // stale-pop (EndPlayerTurnAction popped after combat teardown already
+    // drained it — same shape ResolutionGuards classifies VictorySettled).
+    // The log line carries no combat context, so the match is scoped to
+    // the exact exception type + message instead; a mid-combat stale pop
+    // still fails the verb through the dispatcher's inline classification.
+    private static bool IsKnownBenignLogLine(string text) =>
+        text.Contains("InvalidOperationException", StringComparison.Ordinal)
+        && text.Contains(
+            "Tried to pop action EndPlayerTurnAction", StringComparison.Ordinal)
+        && text.Contains("didn't find it in any queue", StringComparison.Ordinal);
 
     public static string FromAsyncFault(
         string label, string exceptionType, string message) =>

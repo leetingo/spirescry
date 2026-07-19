@@ -109,20 +109,26 @@ spirescry health               # booted when it prints {"ok": true, …}
 
 A healthy bridge is not yet a trustworthy one: `health` proves protocol
 compatibility, not that the running host was built from this checkout. A
-stale host (old patches, or built before the Steam game updated) passes
-every liveness probe and silently skews the rules. After boot's `health`,
+stale host (old patches, post-build source edits, or a build predating a
+Steam game update) passes every liveness probe and silently skews the
+rules. The build stamp is content-based — a git ref plus a hash of every
+source file **and** `lib/sts2.dll` (`./build.sh stamp` prints what this
+checkout would produce) — so both edits-after-build and a changed game
+dll surface as a mismatch, dirty checkout or not. After boot's `health`,
 run this once with the pre-flight's command word as `$1`:
 
 ```sh
 spirescry_host_check() {
-    local cmd expected reported
+    local cmd repo_root expected reported
     cmd="${1:-spirescry}"
-    expected="$(git rev-parse --short HEAD 2>/dev/null)" || {
+    repo_root="$(git rev-parse --show-toplevel 2>/dev/null)" || {
         echo "host check: not inside the spirescry repository; stop" >&2
         return 1
     }
-    if [ -n "$(git status --porcelain --untracked-files=all 2>/dev/null)" ]; then
-        expected="$expected-dirty"
+    expected="$("$repo_root/build.sh" stamp 2>/dev/null)"
+    if [ -z "$expected" ]; then
+        echo "host check: './build.sh stamp' printed nothing; stop" >&2
+        return 1
     fi
     reported="$("$cmd" health 2>/dev/null \
         | sed -n 's/.*"buildHash": *"\([^"]*\)".*/\1/p')"
@@ -134,9 +140,6 @@ spirescry_host_check() {
         echo "host check: host build '$reported' != checkout '$expected' — stale host; stop" >&2
         return 1
     fi
-    case "$reported" in
-        *-dirty) echo "host check: $reported is a dirty build — the hash matches but edits since the build are invisible; note this in the run report" >&2 ;;
-    esac
     printf 'SPIRESCRY_EXPECT_BUILD=%s\n' "$reported"
 }
 ```
@@ -146,9 +149,15 @@ rerun the check — do not play against an unidentified host. On success it
 prints one `SPIRESCRY_EXPECT_BUILD=<stamp>` line: prepend that assignment
 to **every** later verb, the same way the pre-flight's command word is
 reused across fresh shells (`SPIRESCRY_EXPECT_BUILD=<stamp> spirescry …`).
-The CLI then hard-fails any verb answered by a host built from a different
-revision — including a host restarted behind your back mid-session. Rerun
-the check whenever you rebuild or restart the host.
+The CLI then hard-fails any verb answered by a host built from different
+content — including a host restarted behind your back mid-session. Rerun
+the check whenever you rebuild or restart the host, and after any source
+edit mid-session (editing the checkout invalidates the old stamp on both
+sides: rebuild + restart, or finish the run first). One boundary remains:
+if Steam updates the game while `lib/` was never refreshed afterward,
+both sides still agree on the old dll — `./build.sh headless-setup`
+refreshes `lib/` from the install, which is why rebuilds must go through
+it.
 
 Host quirks: runs never save (each boot starts clean), and card pickers
 auto-confirm at max picks — `confirm` accepts a partial pick.
@@ -182,6 +191,9 @@ auto-confirm at max picks — `confirm` accepts a partial pick.
    whose effect **half-executed** still reads `settled` — non-empty
    `errors` (the CLI also warns on stderr) is an impossible observation:
    save `runlog` first, then follow that protocol before the next verb.
+   An `engine_note:…` entry in `events` is a classified-benign engine
+   line (e.g. the victory-cleanup stale pop) — informational, never
+   pollution.
 5. Repeat 2–4 until `game_over`; report outcome, where it ended
    (`actNumber` / `actFloor` / `encounter.title`), and the seed, then
    `abandon` to return to the menu.

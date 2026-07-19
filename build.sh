@@ -15,6 +15,8 @@
 #                (--foreground: exec in this process; for sandboxed
 #                executors that reap background children)
 #   verify       conformance: tests/parity.py on both boots + key-set diff
+#   stamp        print the buildHash this checkout would stamp (git ref +
+#                content hash of the source trees and lib/sts2.dll)
 #   stop         stop a running game or host
 #
 # Env (overridable):
@@ -40,18 +42,37 @@ fi
 HOST_DLL="$REPO/headless/Host/bin/Release/spirescry_host.dll"
 
 # Stamped into both builds; /health reports it as buildHash so a running
-# host can be matched to a source revision.
+# host can be matched to its exact inputs. A git ref alone cannot do
+# that: it misses source edits made after the build (dirty or not) and a
+# Steam-updated sts2.dll, so the stamp also hashes the build inputs —
+# every tracked + untracked (non-ignored) file under the source trees
+# plus the game dll the mod/host compile against. `./build.sh stamp`
+# prints the value the current checkout would produce; comparing it to a
+# running host's buildHash is exact content verification.
+if command -v shasum >/dev/null 2>&1; then HASH_CMD="shasum -a 256"; else HASH_CMD="sha256sum"; fi
+
+content_stamp() {
+    {
+        git ls-files -co -z --exclude-standard -- \
+            src headless cli/src cli/Cargo.toml cli/Cargo.lock mods build.sh \
+            | LC_ALL=C sort -z | xargs -0 $HASH_CMD
+        if [ -f lib/sts2.dll ]; then $HASH_CMD lib/sts2.dll; fi
+    } 2>/dev/null | $HASH_CMD | cut -c1-12
+}
+
 GIT_HASH=unknown
+CONTENT_HASH=unknown
 if command -v git >/dev/null 2>&1 &&
    git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     GIT_HASH="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
     if [ -n "$(git status --porcelain --untracked-files=all 2>/dev/null)" ]; then
         GIT_HASH="$GIT_HASH-dirty"
     fi
+    CONTENT_HASH="$(content_stamp)"
 fi
 # Prefix our explicit stamp so Mod can distinguish it from the SDK's
 # automatic full-commit metadata in ordinary `dotnet build` output.
-SOURCE_REVISION_ID="spirescry.$GIT_HASH"
+SOURCE_REVISION_ID="spirescry.$GIT_HASH.$CONTENT_HASH"
 
 step() { printf '\033[1;34m▶\033[0m %s\n' "$*"; }
 ok()   { printf '\033[1;32m✓\033[0m %s\n' "$*"; }
@@ -549,6 +570,7 @@ while [ "$#" -gt 0 ]; do
                 launch_host
             fi ;;
         verify)     verify ;;
+        stamp)      printf '%s\n' "$GIT_HASH.$CONTENT_HASH" ;;
         stop)       stop_game ;;
         -h|--help|help) usage ;;
         *) die "unknown command: $1 (run with --help)" ;;
