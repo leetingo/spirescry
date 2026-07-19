@@ -74,7 +74,8 @@ public static class Dispatcher
         "goto", "gold", "heal", "hp", "wound-enemies", "event", "combat",
         "card", "card-upgraded", "relic", "potion", "stars", "energy",
         "async-fault", "engine-error", "engine-error-delayed",
-        "event-fault-delayed", "event-fault-late",
+        "event-fault-delayed", "event-fault-late", "event-complete-late",
+        "event-orphan", "event-orphan-fault", "event-owner-rotate",
     };
 
     public static DispatchResult Dispatch(string action, JsonElement args) => action switch
@@ -123,8 +124,12 @@ public static class Dispatcher
             "async-fault" => CheatAsyncFault(),
             "engine-error" => CheatEngineError(),
             "engine-error-delayed" => CheatEngineErrorDelayed(),
-            "event-fault-delayed" => CheatEventFaultDelayed(),
-            "event-fault-late" => CheatEventFaultLate(),
+            "event-fault-delayed" => EventOptionCheats.FaultDelayed(),
+            "event-fault-late" => EventOptionCheats.FaultLate(),
+            "event-complete-late" => EventOptionCheats.CompleteLate(),
+            "event-orphan" => EventOptionCheats.ParkOrphan(),
+            "event-orphan-fault" => EventOptionCheats.FaultOrphan(),
+            "event-owner-rotate" => EventOptionCheats.RotateOwner(),
             var n => DispatchResult.Reject(RejectionCodes.BadRequest,
                 $"unknown cheat '{n}' (supported: {string.Join(", ", Cheats)})"),
         };
@@ -162,81 +167,6 @@ public static class Dispatcher
         await Task.Delay(250).ConfigureAwait(false);
         MegaCrit.Sts2.Core.Logging.Log.Error(
             "SpirescryForcedException: forced delayed engine log error (cheat engine-error-delayed)");
-    }
-
-    // The event-option shape of the delayed fault, delivered the way a
-    // multiplayer client's vote arrives: a RunSafely-wrapped task
-    // appended to the synchronizer's real pending list OUTSIDE any
-    // dispatcher tracking. Signals' per-tick sweep must discover it, the
-    // three-state busy logic must hold the follow open across the delay
-    // (not in combat, nothing parked), and the fault must land in the
-    // same response — the integration regression for the sweep path;
-    // engine-error-delayed covers the flat fire-and-forget kind.
-    private static DispatchResult CheatEventFaultDelayed()
-    {
-        // Any phase: a delivered Chosen() can run synchronously into a
-        // picker or combat before the sweep's next look, so the sweep
-        // must find tasks regardless of the visible phase — the test
-        // injects from those phases too.
-        if (RunManager.Instance?.EventSynchronizer is not { } sync)
-            return DispatchResult.Reject(
-                RejectionCodes.BadState, "no event synchronizer");
-        return EventSync.InjectTask(
-            sync, MegaCrit.Sts2.Core.Helpers.TaskHelper.RunSafely(DelayedEventOptionFault()))
-            ? DispatchResult.Success()
-            : DispatchResult.Reject(
-                RejectionCodes.Internal, "event synchronizer pending list not found");
-    }
-
-    // The full client-window shape: a local shared vote leaves no task
-    // behind (only a pending vote slot); the deciding vote arrives by
-    // network message ~600ms later, appending the RunSafely task that
-    // then faults. The originating follow must stay open across the
-    // whole gap — vote-pending first, then the swept task — and carry
-    // the fault. Everything runs through the same EventSync adapter and
-    // main-thread pump the real delivery path uses.
-    private static DispatchResult CheatEventFaultLate()
-    {
-        if (RequirePhase(Phase.Event) is { } err) return err;
-        if (RunManager.Instance?.EventSynchronizer is not { } sync)
-            return DispatchResult.Reject(
-                RejectionCodes.BadState, "no event synchronizer");
-        if (!EventSync.InjectVote(sync))
-            return DispatchResult.Reject(
-                RejectionCodes.Internal, "event synchronizer vote list not found");
-        // Deliberately untracked, like the network layer it simulates:
-        // during the 600ms gap only the pending vote may hold the
-        // window — that is the semantics under test.
-        _ = DeliverLateEventFault(sync).ContinueWith(
-            t =>
-            {
-                if (t.Exception is { } ex)
-                    SafeLog.Error("event-fault-late delivery", ex.InnerException ?? ex);
-            },
-            TaskContinuationOptions.OnlyOnFaulted);
-        return DispatchResult.Success();
-    }
-
-    private static async Task DeliverLateEventFault(
-        MegaCrit.Sts2.Core.Multiplayer.Game.EventSynchronizer sync)
-    {
-        await Task.Delay(600).ConfigureAwait(false);
-        // Deliveries mutate synchronizer state on the main thread only.
-        await Threading.MainThreadPump.Instance!.Run(() =>
-        {
-            EventSync.ClearVotes(sync);
-            EventSync.InjectTask(
-                sync, MegaCrit.Sts2.Core.Helpers.TaskHelper.RunSafely(
-                    DelayedEventOptionFault()));
-            return true;
-        });
-    }
-
-    private static async Task DelayedEventOptionFault()
-    {
-        await Task.Delay(250).ConfigureAwait(false);
-        throw new InvalidOperationException(
-            "forced delayed event-option failure (cheat event-fault-delayed)");
     }
 
     private static async Task ForcedAsyncFault()
@@ -1052,8 +982,8 @@ public static class Dispatcher
         // a shrunken count means the prefix is gone, so track everything.
         var start = pending.Count < before ? 0 : before;
         for (var i = start; i < pending.Count; i++)
-            if (pending[i] is { IsCompleted: false } task)
-                Signals.TrackAsync(task, "event-option", Signals.TrackedKind.EventOption);
+            Signals.TrackAsync(
+                pending[i], "event-option", Signals.TrackedKind.EventOption);
     }
 
     private static DispatchResult RestOption(int idx)

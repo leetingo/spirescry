@@ -1,5 +1,6 @@
 using MegaCrit.Sts2.Core.Combat;
 using MegaCrit.Sts2.Core.GameActions;
+using MegaCrit.Sts2.Core.Multiplayer.Game;
 using MegaCrit.Sts2.Core.Nodes.Screens.Overlays;
 using MegaCrit.Sts2.Core.Runs;
 
@@ -14,6 +15,7 @@ namespace Spirescry.State;
 public static class Signals
 {
     private const int LogCap = 64;
+    private const int RetiredLogCorrelationMs = 50;
     // Errors are rarer and heavier than events; a run that produces more
     // than this is already unplayable, so dropping the oldest is fine.
     private const int ErrorCap = 256;
@@ -21,16 +23,13 @@ public static class Signals
     private static readonly object Gate = new();
     private static readonly List<(long rev, string type)> Log = new();
     private static readonly List<(long rev, string type)> Errors = new();
-    // Event option tasks legitimately outlive one follow window: they
-    // await embedded combats and deferred pickers. Counted separately so
-    // the follow probe can tell "an option effect is still executing"
-    // (block the quiet path) from "the option is waiting on the agent or
-    // a whole combat" (don't).
-    private static readonly HashSet<Task> PendingEventOptions = new();
+    private static readonly EventOptionTracker EventOptions = new();
     private static readonly List<TaskCompletionSource<bool>> Waiters = new();
+    private static readonly List<TaskCompletionSource<bool>> WorkWaiters = new();
     private static readonly List<TaskCompletionSource<bool>> TickWaiters = new();
-    private static readonly HashSet<Task> PendingAsync = new();
+    private static readonly HashSet<Task> PendingOtherAsync = new();
     private static long _revision;
+    private static long _workRevision;
     private static long _tickCount;
     private static string _lastPhase = "";
     private static object? _runStateRef;
@@ -54,11 +53,25 @@ public static class Signals
 
     public static long Revision { get { lock (Gate) return _revision; } }
 
+    public static long WorkRevision { get { lock (Gate) return _workRevision; } }
+
     public static long TickCount { get { lock (Gate) return _tickCount; } }
 
     public static string RunId { get { lock (Gate) return _runId; } }
 
-    public static int PendingAsyncCount { get { lock (Gate) return PendingAsync.Count; } }
+    public static int PendingAsyncCount
+    {
+        get { lock (Gate) return PendingOtherAsync.Count + EventOptions.PendingCount; }
+    }
+
+    // The follow probe must read votes through the same authenticated
+    // owner as the task sweep. RunManager retains an old synchronizer
+    // after State is cleared, so reading it directly can resurrect a
+    // dead run's unresolved vote window.
+    public static bool SharedVotePending()
+    {
+        lock (Gate) return EventOptions.SharedVotePending();
+    }
 
     // Option tasks can enter the synchronizer's list outside any
     // dispatch: a shared choice appends one RunSafely(Chosen()) task per
@@ -71,26 +84,29 @@ public static class Signals
     // idempotent. Main thread only, like every other engine read here.
     private static void SweepPendingEventOptions()
     {
-        if (EventSync.PendingTasks(RunManager.Instance?.EventSynchronizer)
-            is not { } pending) return;
+        var rm = RunManager.Instance;
+        var runState = rm?.DebugOnlyGetState();
+        var sync = runState is null ? null : rm?.EventSynchronizer;
+        if (sync is null) return;
+        // Tick refreshed the owner immediately before this sweep. Refuse
+        // a stale synchronizer even if RunManager keeps it after State is
+        // cleared during teardown.
+        lock (Gate)
+            if (!EventOptions.MatchesOwner(runState, sync)) return;
+        if (EventSync.PendingTasks(sync) is not { } pending) return;
         foreach (var task in pending)
-            if (task is { IsCompleted: false })
-                TrackAsync(task, "event-option", TrackedKind.EventOption);
+            TrackAsync(task, "event-option", TrackedKind.EventOption);
     }
 
     // An abandoned run's option task can be parked on a combat or dialog
     // that no longer exists — it will never complete, and one zombie
     // would hold the follow probe's busy flag for every later run. Drop
-    // the tracking (both sets — the general count derives pendingOther by
-    // subtraction); the orphaned continuations remove nothing and their
-    // completion Bump is harmless.
+    // the tracker's busy membership and advance its generation. Orphaned
+    // continuations are then forbidden from publishing into a later run's
+    // revision/error window.
     public static void DropEventOptionTracking()
     {
-        lock (Gate)
-        {
-            foreach (var task in PendingEventOptions) PendingAsync.Remove(task);
-            PendingEventOptions.Clear();
-        }
+        lock (Gate) EventOptions.Drop();
     }
 
     // How a tracked task participates in the follow probe's busy logic.
@@ -108,8 +124,8 @@ public static class Signals
     {
         lock (Gate)
             return new PendingWork(
-                PendingAsync.Count - PendingEventOptions.Count,
-                PendingEventOptions.Count);
+                PendingOtherAsync.Count,
+                EventOptions.PendingCount);
     }
 
     // Dispatcher fire-and-forget tasks are part of action settlement too.
@@ -119,30 +135,38 @@ public static class Signals
         Task task, string label, TrackedKind kind = TrackedKind.FireAndForget)
     {
         var isEventOption = kind == TrackedKind.EventOption;
+        var eventGeneration = 0L;
         lock (Gate)
         {
-            // Event-option tracking is membership-gated: the per-tick
-            // synchronizer sweep re-offers the same tasks every frame,
-            // and each task must get exactly one completion continuation.
-            if (isEventOption && !PendingEventOptions.Add(task)) return;
-            PendingAsync.Add(task);
+            if (isEventOption)
+            {
+                if (!EventOptions.TryTrack(task, out eventGeneration)) return;
+            }
+            else
+                PendingOtherAsync.Add(task);
         }
         _ = task.ContinueWith(completed =>
         {
+            var type = AsyncCompletionEvent(completed, label);
+            List<TaskCompletionSource<bool>>? wake;
             lock (Gate)
             {
-                PendingAsync.Remove(task);
-                if (isEventOption) PendingEventOptions.Remove(task);
+                if (isEventOption)
+                {
+                    if (!EventOptions.Complete(task, eventGeneration)) return;
+                }
+                else
+                    PendingOtherAsync.Remove(task);
+                wake = RecordBumpLocked(type);
             }
-            Bump(AsyncCompletionEvent(completed, label));
+            Wake(wake);
         }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously,
             TaskScheduler.Default);
     }
 
     private static string AsyncCompletionEvent(Task task, string label)
     {
-        if (task.Exception is not { } aggregate) return $"async:{label}";
-        var cause = aggregate.Flatten().InnerExceptions.FirstOrDefault() ?? aggregate;
+        if (EventOptionTracker.Cause(task) is not { } cause) return $"async:{label}";
         return ErrorEvents.FromAsyncFault(label, cause.GetType().Name, cause.Message);
     }
 
@@ -163,6 +187,59 @@ public static class Signals
         bool combatInProgress;
         try { combatInProgress = CombatManager.Instance is { IsInProgress: true }; }
         catch { combatInProgress = true; }
+        // TaskHelper logs just before its returned task transitions to
+        // Faulted. When dead-owner tasks exist, give their completion
+        // continuations a short correlation window. The window itself is
+        // tracked as pending work, so a live follow cannot settle before
+        // we either suppress an exact retired fault or publish a genuine
+        // current-run engine error.
+        bool correlateRetired;
+        lock (Gate) correlateRetired = EventOptions.HasRetired;
+        if (correlateRetired)
+        {
+            HoldAsyncSilently(
+                PublishEngineLogAfterRetiredCorrelation(text, combatInProgress));
+            return;
+        }
+        Bump(ErrorEvents.FromLogLine(text, combatInProgress));
+    }
+
+    // Correlation is real pending work — follow must not settle while the
+    // log's owner is undecided — but resolving it is not itself an engine
+    // event. Wake waiters without incrementing revision or emitting a
+    // synthetic completion into the response.
+    private static void HoldAsyncSilently(Task task)
+    {
+        lock (Gate) PendingOtherAsync.Add(task);
+        _ = task.ContinueWith(_ =>
+        {
+            List<TaskCompletionSource<bool>>? wake = null;
+            lock (Gate)
+            {
+                PendingOtherAsync.Remove(task);
+                _workRevision++;
+                if (WorkWaiters.Count > 0)
+                {
+                    wake = new List<TaskCompletionSource<bool>>(WorkWaiters);
+                    WorkWaiters.Clear();
+                }
+            }
+            Wake(wake);
+        }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
+    }
+
+    private static async Task PublishEngineLogAfterRetiredCorrelation(
+        string text, bool combatInProgress)
+    {
+        await Task.Delay(RetiredLogCorrelationMs).ConfigureAwait(false);
+        lock (Gate)
+        {
+            if (EventOptions.TryConsumeRetiredFault(cause =>
+                text.Contains(cause.GetType().Name, StringComparison.Ordinal)
+                && text.Contains(cause.Message, StringComparison.Ordinal)))
+                return;
+        }
         Bump(ErrorEvents.FromLogLine(text, combatInProgress));
     }
 
@@ -186,40 +263,62 @@ public static class Signals
     // same serialized job as dispatch, never against a prior frame's cache.
     public static string RefreshRunIdentity()
     {
-        var runState = RunManager.Instance?.DebugOnlyGetState();
+        var rm = RunManager.Instance;
+        var runState = rm?.DebugOnlyGetState();
+        var eventSync = runState is null ? null : rm?.EventSynchronizer;
         string? changedTo = null;
+        var ownerChangedWithoutRun = false;
         lock (Gate)
         {
-            if (ReferenceEquals(runState, _runStateRef)) return _runId;
-            _runStateRef = runState;
-            _runId = runState is null ? "none" : Guid.NewGuid().ToString("N")[..8];
-            changedTo = _runId;
+            var runChanged = !ReferenceEquals(runState, _runStateRef);
+            var ownerChanged = EventOptions.ChangeOwner(runState, eventSync);
+            ownerChangedWithoutRun = ownerChanged && !runChanged;
+            if (runChanged)
+            {
+                _runStateRef = runState;
+                _runId = runState is null
+                    ? "none"
+                    : Guid.NewGuid().ToString("N")[..8];
+                changedTo = _runId;
+            }
         }
-        Bump($"run:{changedTo}");
-        return changedTo;
+        if (changedTo is not null) Bump($"run:{changedTo}");
+        else if (ownerChangedWithoutRun) Bump("event-option:owner-changed");
+        return RunId;
     }
 
     public static void Bump(string type)
     {
-        List<TaskCompletionSource<bool>>? wake = null;
-        lock (Gate)
+        List<TaskCompletionSource<bool>>? wake;
+        lock (Gate) wake = RecordBumpLocked(type);
+        Wake(wake);
+    }
+
+    private static List<TaskCompletionSource<bool>>? RecordBumpLocked(string type)
+    {
+        _revision++;
+        _workRevision++;
+        Log.Add((_revision, type));
+        if (Log.Count > LogCap) Log.RemoveAt(0);
+        if (ErrorEvents.IsError(type))
         {
-            _revision++;
-            Log.Add((_revision, type));
-            if (Log.Count > LogCap) Log.RemoveAt(0);
-            if (ErrorEvents.IsError(type))
-            {
-                Errors.Add((_revision, type));
-                if (Errors.Count > ErrorCap) Errors.RemoveAt(0);
-            }
-            if (Waiters.Count > 0)
-            {
-                wake = new List<TaskCompletionSource<bool>>(Waiters);
-                Waiters.Clear();
-            }
+            Errors.Add((_revision, type));
+            if (Errors.Count > ErrorCap) Errors.RemoveAt(0);
         }
-        if (wake is null) return;
-        foreach (var w in wake) w.TrySetResult(true);
+        if (Waiters.Count == 0 && WorkWaiters.Count == 0) return null;
+        var wake = new List<TaskCompletionSource<bool>>(
+            Waiters.Count + WorkWaiters.Count);
+        wake.AddRange(Waiters);
+        wake.AddRange(WorkWaiters);
+        Waiters.Clear();
+        WorkWaiters.Clear();
+        return wake;
+    }
+
+    private static void Wake(List<TaskCompletionSource<bool>>? waiters)
+    {
+        if (waiters is null) return;
+        foreach (var waiter in waiters) waiter.TrySetResult(true);
     }
 
     // Runs on the pump every tick (GUI: each frame; host: after each
@@ -255,6 +354,25 @@ public static class Signals
         try { return await tcs.Task.WaitAsync(TimeSpan.FromMilliseconds(timeoutMs)); }
         catch (TimeoutException) { return false; }
         finally { lock (Gate) Waiters.Remove(tcs); }
+    }
+
+    // Follow observes both public revision changes and silent changes to
+    // tracked-work membership. Keeping this clock separate preserves the
+    // /obs?since contract: a correlation-only wake never claims the public
+    // state revision moved.
+    public static async Task<bool> WaitForWorkChange(long since, int timeoutMs)
+    {
+        TaskCompletionSource<bool> tcs;
+        lock (Gate)
+        {
+            if (_workRevision > since) return true;
+            tcs = new TaskCompletionSource<bool>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            WorkWaiters.Add(tcs);
+        }
+        try { return await tcs.Task.WaitAsync(TimeSpan.FromMilliseconds(timeoutMs)); }
+        catch (TimeoutException) { return false; }
+        finally { lock (Gate) WorkWaiters.Remove(tcs); }
     }
 
     // GUI callbacks do not all expose a Task or an engine event. Follow

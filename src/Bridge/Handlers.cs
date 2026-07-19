@@ -242,7 +242,6 @@ public static class Handlers
         long? logEntryId)
     {
         var deadline = DateTime.UtcNow.AddMilliseconds(timeoutMs);
-        var since = acceptedRev;
         string? candidateOutcome = null;
         string? candidateState = null;
         long candidateTick = acceptedTick;
@@ -289,8 +288,7 @@ public static class Handlers
             if (!probe.Headless && outcome is not null)
                 await Signals.WaitForTick(probe.Tick, remaining);
             else
-                await Signals.WaitForChange(since, remaining);
-            since = Signals.Revision;
+                await Signals.WaitForWorkChange(probe.WorkRev, remaining);
         }
     }
 
@@ -328,6 +326,7 @@ public static class Handlers
 
     private sealed record FollowProbe(
         long Rev,
+        long WorkRev,
         long Tick,
         string RunId,
         string Phase,
@@ -345,6 +344,7 @@ public static class Handlers
                 compact: false, decision: true, knownCardTexts: []);
             var node = JsonSerializer.SerializeToNode(snapshot)!.AsObject();
             var rev = Signals.Revision;
+            var workRev = Signals.WorkRevision;
             node["rev"] = rev;
             node["runId"] = runId;
             var legal = DecisionProjection.LegalVerbs(node, runId != "none");
@@ -377,7 +377,7 @@ public static class Handlers
             // take over (the Tick sweep picks them up), so a late fault
             // still lands in the response that caused it.
             var optionWorkOwed = pending.EventOptions > 0
-                || EventSync.SharedVotePending(rm?.EventSynchronizer);
+                || Signals.SharedVotePending();
             var eventOptionExecuting = optionWorkOwed
                 && !combatLive && !parkedDecision;
             var busy = pending.Other > 0
@@ -386,7 +386,7 @@ public static class Handlers
                 || EngineQueues.All(rm).Any(queue => queue.depth > 0);
             var hasDecision = legal.Any(verb => verb is not ("abandon" or "potion-discard"));
             return new FollowProbe(
-                rev, Signals.TickCount, runId, phaseString, RunMode.IsHeadless,
+                rev, workRev, Signals.TickCount, runId, phaseString, RunMode.IsHeadless,
                 busy, eventOptionExecuting, hasDecision, stateKey, node);
         }
 

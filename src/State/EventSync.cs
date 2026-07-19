@@ -20,6 +20,11 @@ internal static class EventSync
     public static int PendingTaskCount(EventSynchronizer? sync) =>
         PendingTasks(sync)?.Count ?? 0;
 
+    private static List<uint?>? PlayerVotes(EventSynchronizer? sync) =>
+        sync is null
+            ? null
+            : Reflect.FieldValue(sync, "_playerVotes") as List<uint?>;
+
     // True from a shared-event vote until resolution clears the slots.
     // On a multiplayer client that spans the whole network round-trip —
     // and during that window it is the ONLY signal that option work is
@@ -27,9 +32,7 @@ internal static class EventSync
     // inside the voting call, so the pending state is never observable
     // there.
     public static bool SharedVotePending(EventSynchronizer? sync) =>
-        sync is not null
-        && Reflect.FieldValue(sync, "_playerVotes") is List<uint?> votes
-        && votes.Any(vote => vote.HasValue);
+        PlayerVotes(sync)?.Any(vote => vote.HasValue) is true;
 
     // ---- test hooks (cheat verbs only) --------------------------------
 
@@ -47,8 +50,7 @@ internal static class EventSync
     // calls, so a parked value only affects our own probe.
     public static bool InjectVote(EventSynchronizer sync)
     {
-        if (Reflect.FieldValue(sync, "_playerVotes") is not List<uint?> votes)
-            return false;
+        if (PlayerVotes(sync) is not { } votes) return false;
         if (votes.Count == 0) votes.Add(0u);
         else votes[0] = 0u;
         return true;
@@ -56,7 +58,7 @@ internal static class EventSync
 
     public static void ClearVotes(EventSynchronizer sync)
     {
-        if (Reflect.FieldValue(sync, "_playerVotes") is List<uint?> votes)
+        if (PlayerVotes(sync) is { } votes)
             for (var i = 0; i < votes.Count; i++)
                 votes[i] = null;
     }

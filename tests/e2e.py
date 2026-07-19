@@ -619,6 +619,77 @@ def p14():
     to_menu()
 
 
+@case("P15 clean late event-option completion wakes its follow window")
+def p15():
+    # A client vote can resolve to a page-only Chosen() whose RunSafely
+    # task is already complete when the next Tick inspects the engine.
+    # Clearing the vote and observing that completed task must wake the
+    # originating follow; otherwise it sleeps until its full deadline.
+    launch(seed="CIEVOPTCLEAN")
+    started = time.monotonic()
+    completed = run("cheat", "event-complete-late", "--follow", "3000")
+    elapsed = time.monotonic() - started
+    assert completed["settled"] is True, completed
+    assert completed["outcome"] == "settled", completed
+    assert completed["errors"] == [], completed["errors"]
+    assert sum(event["type"] == "async:event-option"
+               for event in completed["events"]) == 1, completed["events"]
+    assert elapsed < 2.0, f"clean delivery did not wake follow ({elapsed:.2f}s)"
+    to_menu()
+
+
+@case("P16 abandoned event-option work cannot enter the next run")
+def p16():
+    launch(seed="CIEVOPTOLD")
+    run("cheat", "event-orphan")
+    status, health = http("GET", "/health")
+    assert status == 200 and health["pendingEventOptions"] == 1, health
+
+    abandoned = run("abandon", "--follow", "3000")
+    assert abandoned["outcome"] != "timeout", abandoned
+    assert abandoned["obs"]["phase"] == "main_menu", abandoned["obs"]
+    fresh = run("new-run", "IRONCLAD", "--seed", "CIEVOPTNEW",
+                "--follow", "3000")
+    assert fresh["outcome"] != "timeout", fresh
+    status, health = http("GET", "/health")
+    assert status == 200 and health["pendingEventOptions"] == 0, health
+
+    # Completing the old task after the new run is live must neither wake
+    # nor attribute its fault to the new run's verb window.
+    released = run("cheat", "event-orphan-fault", "--follow", "3000",
+                   allow_errors=True)
+    assert released["settled"] is True, released
+    assert not any("orphan event-option failure" in error
+                   for error in released["errors"]), released["errors"]
+    assert not any("engine-log-correlation" in event["type"]
+                   for event in released["events"]), released["events"]
+    entry = next(
+        verb for verb in reversed(run("runlog")["verbs"])
+        if verb["action"] == "cheat"
+        and verb.get("args", {}).get("name") == "event-orphan-fault"
+    )
+    assert not any("orphan event-option failure" in error
+                   for error in entry.get("errors", [])), entry
+    to_menu()
+
+
+@case("P17 retired tasks stay tombstoned while their synchronizer is live")
+def p17():
+    launch(seed="CIEVOPTSAME")
+    run("cheat", "event-orphan")
+    run("cheat", "event-owner-rotate")
+    released = run("cheat", "event-orphan-fault", "--follow", "3000",
+                   allow_errors=True)
+    assert released["settled"] is True, released
+    assert not any("orphan event-option failure" in error
+                   for error in released["errors"]), released["errors"]
+    assert not any("engine-log-correlation" in event["type"]
+                   for event in released["events"]), released["events"]
+    status, health = http("GET", "/health")
+    assert status == 200 and health["pendingEventOptions"] == 0, health
+    to_menu()
+
+
 # ---------- R: run lifecycle ----------
 
 @case("R1 same seed, same world")
