@@ -88,11 +88,6 @@ internal sealed class EventOptionTracker
         if (CanDiscard(retired)) _retired.Remove(task);
     }
 
-    public static Exception? Cause(Task task) =>
-        task.Exception is not { } aggregate
-            ? null
-            : aggregate.Flatten().InnerExceptions.FirstOrDefault() ?? aggregate;
-
     private void ResetGeneration()
     {
         foreach (var task in _pending)

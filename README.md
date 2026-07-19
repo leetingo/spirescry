@@ -85,7 +85,10 @@ bridge can observe, not a claim that every opaque engine continuation has
 completed. Every followed response also includes an `errors` array covering
 Error-level engine lines and tracked async faults from acceptance through
 settlement; the CLI warns about a non-empty array on stderr while preserving
-the successful verb response on stdout.
+the successful verb response on stdout. Two owner-aware exceptions never
+pollute a current verb: a known healthy post-victory stale-pop is retained as
+an `engine_note`, and a TaskHelper line proven to belong to retired run work is
+suppressed instead of being misattributed to the new run.
 Verbs: `new-run`,
 `abandon`, `option`, `proceed`, `map-move`, `pick-reward`, `pick-card`,
 `pick-relic`, `confirm`, `skip`, `buy`, `leave`, `play`, `end-turn`,
@@ -287,7 +290,7 @@ Environment:
 | `STS2_HEADLESS_LIB` | `headless/build/lib`   | host only — patched dll + deps + loc tables                     |
 | `STS2_HOST_DEBUG`   | unset                  | host only — `1` prints first-chance exception stacks except known stub misses; `2` prints all |
 | `STS2_AGENT_HTTP_LOG` | unset                | mod/host — `1` logs each bridge request: verb, status, rev movement, wall time |
-| `SPIRESCRY_EXPECT_BUILD` | unset              | CLI — require `/health.buildHash` before every verb; unknown or mismatched builds fail closed |
+| `SPIRESCRY_EXPECT_BUILD` | unset              | CLI — require `/health.buildHash` before every command; unknown or mismatched builds fail closed |
 
 ## Architecture
 
@@ -300,7 +303,8 @@ Environment:
 | `MainThreadPump`                | `src/Threading/` | engine singletons aren't thread-safe; GUI drains a queue each frame, host is a mutex    |
 | `HttpBridge`                    | `src/Bridge/`    | loopback-only `HttpListener`; no auth because it never leaves 127.0.0.1                 |
 | `PhaseDetector` / `Snapshotter` | `src/State/`     | classify what the game is showing, serialize what the agent needs for that phase        |
-| `Signals`                       | `src/State/`     | the revision stream: engine events + phase diffs, long-poll waiters, executor watchdog  |
+| `Signals` / `RevisionJournal`   | `src/State/`     | revision/work clocks, bounded journals, engine subscriptions, waiters, and watchdogs    |
+| `ErrorEvents` / `EngineLogCorrelation` | `src/State/` | format faults and attribute TaskHelper logs to current or retired tracked work          |
 | `EventSync` / `EventOptionTracker` | `src/State/`  | one compatibility boundary for pending event-option ownership and settlement            |
 | `Dispatcher`                    | `src/Actions/`   | validate a verb with the engine's own gates, then enqueue the engine's own action       |
 | `headless/`                     |                  | host boot: GodotSharp stubs, Mono.Cecil IL patcher, .NET host with Harmony shims        |
@@ -326,8 +330,9 @@ and act. A verb gets in when an agent actually needs it to keep playing.
 
 **No silent failures.** Every wait window found so far is either gated
 with an explicit `not_ready` (using the engine's own predicates — the
-menu's launch button, the map's travel tweens, queue pause flags) or
-covered by the wedge watchdog. Known bounds are documented, not hidden:
+menu's launch button, the map's travel tweens, queue pause flags), owned by
+tracked settlement work with a bounded follow timeout, or covered by the
+wedge watchdog. Known bounds are documented, not hidden:
 host-boot background continuations (unpatched engine `Task.Delay`) can
 mutate state between serialized requests — harmless for this protocol,
 but not a hard memory barrier.

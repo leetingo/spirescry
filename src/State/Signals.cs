@@ -21,14 +21,14 @@ public static class Signals
     private const int ErrorCap = 256;
 
     private static readonly object Gate = new();
-    private static readonly List<(long rev, string type)> Log = new();
-    private static readonly List<(long rev, string type)> Errors = new();
+    private static readonly RevisionJournal EventJournal = new(LogCap);
+    private static readonly RevisionJournal ErrorJournal = new(ErrorCap);
     private static readonly EventOptionTracker EventOptions = new();
     private static readonly EngineLogCorrelation EngineLogs = new();
     private static readonly List<TaskCompletionSource<bool>> Waiters = new();
     private static readonly List<TaskCompletionSource<bool>> WorkWaiters = new();
     private static readonly List<TaskCompletionSource<bool>> TickWaiters = new();
-    private static readonly HashSet<Task> PendingOtherAsync = new();
+    private static readonly HashSet<Task> PendingFireAndForget = new();
     private static long _revision;
     private static long _workRevision;
     private static long _tickCount;
@@ -121,7 +121,7 @@ public static class Signals
     {
         lock (Gate)
             return new PendingWork(
-                PendingOtherAsync.Count,
+                PendingFireAndForget.Count,
                 EventOptions.PendingCount);
     }
 
@@ -143,7 +143,7 @@ public static class Signals
                 if (!EventOptions.TryTrack(task, out eventGeneration)) return;
             }
             else
-                PendingOtherAsync.Add(task);
+                PendingFireAndForget.Add(task);
         }
         _ = task.ContinueWith(completed =>
         {
@@ -157,10 +157,10 @@ public static class Signals
                     currentOwner = EventOptions.Complete(task, eventGeneration);
                 }
                 else
-                    PendingOtherAsync.Remove(task);
+                    PendingFireAndForget.Remove(task);
                 var resolvedLog = EngineLogs.ResolveForTask(
                     completed,
-                    Environment.CurrentManagedThreadId,
+                    ManagedThreadId.Current,
                     currentOwner
                         ? EngineLogDisposition.Publish
                         : EngineLogDisposition.Suppress);
@@ -182,8 +182,8 @@ public static class Signals
 
     private static string AsyncCompletionEvent(Task task, string label)
     {
-        if (EventOptionTracker.Cause(task) is not { } cause) return $"async:{label}";
-        return ErrorEvents.FromAsyncFault(label, cause.GetType().Name, cause.Message);
+        if (TaskFault.From(task) is not { } fault) return $"async:{label}";
+        return ErrorEvents.FromAsyncFault(label, fault.TypeName, fault.Message);
     }
 
     // The engine catches exceptions from fire-and-forget task chains
@@ -217,7 +217,7 @@ public static class Signals
                 pending = EngineLogs.Register(
                     text,
                     combatInProgress,
-                    Environment.CurrentManagedThreadId);
+                    ManagedThreadId.Current);
         }
         if (pending is not null)
         {
@@ -234,13 +234,13 @@ public static class Signals
     // synthetic completion into the response.
     private static void HoldAsyncSilently(Task task)
     {
-        lock (Gate) PendingOtherAsync.Add(task);
+        lock (Gate) PendingFireAndForget.Add(task);
         _ = task.ContinueWith(_ =>
         {
             List<TaskCompletionSource<bool>>? wake = null;
             lock (Gate)
             {
-                PendingOtherAsync.Remove(task);
+                PendingFireAndForget.Remove(task);
                 _workRevision++;
                 wake = DrainWaitersLocked(WorkWaiters);
             }
@@ -276,10 +276,7 @@ public static class Signals
     // must still reach the follow response and the runlog.
     public static string[] ErrorsSince(long since)
     {
-        lock (Gate)
-            return Errors.Where(e => e.rev > since)
-                .Select(e => e.type)
-                .ToArray();
+        lock (Gate) return ErrorJournal.TypesSince(since);
     }
 
     // Call from a main-thread pump job immediately before reading state or
@@ -323,13 +320,9 @@ public static class Signals
     {
         _revision++;
         _workRevision++;
-        Log.Add((_revision, type));
-        if (Log.Count > LogCap) Log.RemoveAt(0);
+        EventJournal.Add(_revision, type);
         if (ErrorEvents.IsError(type))
-        {
-            Errors.Add((_revision, type));
-            if (Errors.Count > ErrorCap) Errors.RemoveAt(0);
-        }
+            ErrorJournal.Add(_revision, type);
         return DrainWaitersLocked(Waiters, WorkWaiters);
     }
 
@@ -438,8 +431,8 @@ public static class Signals
     public static object[] EventsSince(long since)
     {
         lock (Gate)
-            return Log.Where(e => e.rev > since)
-                .Select(e => (object)new { rev = e.rev, type = e.type })
+            return EventJournal.Since(since)
+                .Select(e => (object)new { rev = e.Revision, type = e.Type })
                 .ToArray();
     }
 

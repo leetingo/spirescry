@@ -2,12 +2,25 @@ namespace Spirescry.State;
 
 internal enum EngineLogDisposition { Publish, Suppress }
 
+internal readonly record struct ManagedThreadId(int Value)
+{
+    public static ManagedThreadId Current =>
+        new(Environment.CurrentManagedThreadId);
+}
+
+internal readonly record struct EngineLogCorrelationKey(
+    ManagedThreadId Thread, TaskFault Fault)
+{
+    public bool Matches(PendingEngineLog pending) =>
+        pending.Thread == Thread && Fault.AppearsIn(pending.Text);
+}
+
 internal sealed class PendingEngineLog(
-    string text, bool combatInProgress, int threadId)
+    string text, bool combatInProgress, ManagedThreadId thread)
 {
     public string Text { get; } = text;
     public bool CombatInProgress { get; } = combatInProgress;
-    public int ThreadId { get; } = threadId;
+    public ManagedThreadId Thread { get; } = thread;
     public TaskCompletionSource<EngineLogDisposition> Resolution { get; } =
         new(TaskCreationOptions.RunContinuationsAsynchronously);
 }
@@ -22,21 +35,19 @@ internal sealed class EngineLogCorrelation
     private readonly List<PendingEngineLog> _pending = new();
 
     public PendingEngineLog Register(
-        string text, bool combatInProgress, int threadId)
+        string text, bool combatInProgress, ManagedThreadId thread)
     {
-        var pending = new PendingEngineLog(text, combatInProgress, threadId);
+        var pending = new PendingEngineLog(text, combatInProgress, thread);
         _pending.Add(pending);
         return pending;
     }
 
     public bool ResolveForTask(
-        Task task, int threadId, EngineLogDisposition disposition)
+        Task task, ManagedThreadId thread, EngineLogDisposition disposition)
     {
-        if (Cause(task) is not { } cause) return false;
-        var pending = _pending.LastOrDefault(entry =>
-            entry.ThreadId == threadId
-            && entry.Text.Contains(cause.GetType().Name, StringComparison.Ordinal)
-            && entry.Text.Contains(cause.Message, StringComparison.Ordinal));
+        if (TaskFault.From(task) is not { } fault) return false;
+        var key = new EngineLogCorrelationKey(thread, fault);
+        var pending = _pending.LastOrDefault(key.Matches);
         if (pending is null) return false;
         _pending.Remove(pending);
         pending.Resolution.TrySetResult(disposition);
@@ -50,8 +61,4 @@ internal sealed class EngineLogCorrelation
         return true;
     }
 
-    private static Exception? Cause(Task task) =>
-        task.Exception is not { } aggregate
-            ? null
-            : aggregate.Flatten().InnerExceptions.FirstOrDefault() ?? aggregate;
 }
