@@ -40,11 +40,8 @@ internal static class HeadlessBoot
 
     public static void Start()
     {
-        // Before anything engine-shaped exists: the NGame immunization
-        // below installs a non-null dummy, which would flip the mod's
-        // NGame-null mode probe to "GUI" — the explicit flag is the mode
-        // authority in host boots.
-        RunMode.ForcedHeadless = true;
+        // Composition root: this is the only host decision about which
+        // runtime adapter owns player decisions and model settlement.
         DecisionSurface.UseHeadless();
 
         // STS2_HOST_DEBUG=1: print first-chance exception stacks — the
@@ -78,7 +75,7 @@ internal static class HeadlessBoot
         InitModelDb();
         HeadlessLocalization.Init();
         ApplyHarmonyPatches();
-        HeadlessPicker.Install();
+        DecisionSurface.Current.InstallPersistentCardSelector();
         MainThreadPump.BootstrapHeadless();
         // Background continuations (unpatched Task.Delay in engine code)
         // mutate state outside handler calls; a slow pump tick folds those
@@ -317,7 +314,7 @@ internal static class HeadlessBoot
     }
 
     private static bool BeginRelicPickingPrefix() =>
-        HeadlessTreasure.CanBeginRelicPicking;
+        DecisionSurface.Current.CanBeginTreasureRelicPicking;
 
     // MarkPreFinished is the engine's transition from combat resolution to
     // the parked post-combat choice. Capture exactly there; observation is
@@ -344,10 +341,9 @@ internal static class HeadlessBoot
     // RewardsCmd.OfferCustom → RewardsSet.Offer, which shows the GUI
     // rewards screen and validates completion against it — headless that
     // throws and the offer evaporates while the trade's cost sticks.
-    // Reroute the whole OfferCustom: generate the set, park it in
-    // HeadlessRewards, and return; the agent claims from the rewards
-    // phase like any post-combat offer. Scoped to OfferCustom so the
-    // combat/treasure Offer() paths stay untouched.
+    // Reroute the whole OfferCustom through the selected completion owner;
+    // the host adapter parks it for the agent to claim from the rewards
+    // phase. Scoped to OfferCustom so combat/treasure Offer() stay untouched.
     private static void RerouteCustomRewards()
     {
         Reroute(
@@ -362,18 +358,8 @@ internal static class HeadlessBoot
         List<MegaCrit.Sts2.Core.Rewards.Reward> rewards,
         ref Task __result)
     {
-        __result = CaptureCustomOffer(player, rewards);
-        return false;
-    }
-
-    private static async Task CaptureCustomOffer(
-        MegaCrit.Sts2.Core.Entities.Players.Player player,
-        List<MegaCrit.Sts2.Core.Rewards.Reward> rewards)
-    {
-        var set = new MegaCrit.Sts2.Core.Rewards.RewardsSet(player)
-            .WithCustomRewards(rewards);
-        await set.GenerateWithoutOffering();
-        Spirescry.State.HeadlessRewards.CaptureFromSet(set);
+        return !DecisionSurface.Current.TryOwnCustomRewardCompletion(
+            player, rewards, out __result);
     }
 
     // Cmd.Wait gates card-play pacing on UI animation time; headless has no
@@ -579,7 +565,8 @@ internal static class HeadlessBoot
         MegaCrit.Sts2.Core.Events.Custom.CrystalSphereEvent.CrystalSphereMinigame grid,
         ref MegaCrit.Sts2.Core.Nodes.Events.Custom.CrystalSphere.NCrystalSphereScreen __result)
     {
-        Spirescry.State.HeadlessCrystal.Park(grid);
+        if (!DecisionSurface.Current.TryOwnCrystalScreen(grid))
+            return true;
         __result = null!;
         return false;
     }
@@ -627,7 +614,7 @@ internal static class HeadlessBoot
     // the Amalgamator removed two Defends and never granted the Ultimate
     // Defend. Give each singleton an uninitialized body and swallow every
     // method: they are presentation output, and every one of these calls
-    // was already a guaranteed NRE headless, so a no-op is strictly more
+    // was already a guaranteed NRE in this host, so a no-op is strictly more
     // faithful to the GUI's behavior.
     private static void ImmunizeAudioSingletons()
     {
@@ -636,8 +623,8 @@ internal static class HeadlessBoot
         // NGame is the root visual node, so its dummy must be fully
         // inert: property accessors too (non-auto getters deref null
         // fields), and Task-returning members must complete rather than
-        // return null — engine code awaits them. Mode detection is
-        // insulated by RunMode.ForcedHeadless, stamped before this runs.
+        // return null — engine code awaits them. Adapter selection already
+        // happened at this composition root before the dummy is installed.
         var game = ImmunizeSingleton("MegaCrit.Sts2.Core.Nodes.NGame",
             includeSpecialNames: true, completeFaultedTasks: true);
         if (game is null) return;
@@ -730,12 +717,18 @@ internal static class HeadlessBoot
     {
         // The popup's accepted action is RunManager.Abandon(), but engine
         // AbandonInternal opens with screen closes that NRE headless and
-        // log an error line — use the headless adapter's screen-free teardown
-        // (same IsAbandoned + forced-kill pipeline, no UI).
+        // log an error line — ask the selected adapter to accept the same
+        // confirmation through its screen-free teardown.
         try
         {
             if (RunManager.Instance is { } rm)
-                HeadlessDecisionSurface.TeardownAbandon(rm);
+            {
+                var abandoned = DecisionSurface.Current
+                    .AcceptAbandonConfirmation(rm);
+                if (!abandoned.Ok)
+                    HostLog.Info(abandoned.Message
+                        ?? "trial double-down abandon was rejected");
+            }
         }
         catch (Exception ex) { HostLog.Error("trial double-down abandon", ex); }
         __result = Task.CompletedTask;

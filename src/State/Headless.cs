@@ -14,7 +14,7 @@ namespace Spirescry.State;
 // TreasureRoom.Enter primes relic picking before the GUI chest is clicked.
 // The headless host gates that engine callback so merely entering/observing
 // the room cannot reveal rewards; a bridge verb opens the gate explicitly.
-public static class HeadlessTreasure
+internal static class HeadlessTreasure
 {
     private static int _openDepth;
 
@@ -55,7 +55,7 @@ public static class HeadlessTreasure
 // HeadlessRewards — the post-combat rewards flow normally lives on
 // NRewardsScreen. Headless builds the same RewardsSet from the room and
 // drives Reward.SelectUnsynchronized directly.
-public static class HeadlessPicker
+internal static class HeadlessPicker
 {
     private static IDisposable? _scope;
     private static TaskCompletionSource<IEnumerable<CardModel>>? _tcs;
@@ -72,7 +72,7 @@ public static class HeadlessPicker
     // that fire later (TOOLS_OF_THE_TRADE at the next turn start).
     public static void Install()
     {
-        if (!RunMode.IsHeadless || _scope is not null) return;
+        if (_scope is not null) return;
         _scope = CardSelectCmd.PushSelector(new Deferred());
     }
 
@@ -153,7 +153,7 @@ public static class HeadlessPicker
 // CardSelectCmd.FromChooseABundleScreen — is UI-only, so the host boot
 // reroutes it here via a Harmony prefix: the bundles park on a TCS, the
 // agent picks one by idx, the chosen bundle's cards resolve the call.
-public static class HeadlessBundle
+internal static class HeadlessBundle
 {
     private static TaskCompletionSource<IEnumerable<CardModel>>? _tcs;
     private static IReadOnlyList<IReadOnlyList<CardModel>> _bundles = [];
@@ -197,7 +197,7 @@ public static class HeadlessBundle
 // prefix parks the live minigame here and skips the screen — the verbs
 // drive the model directly, and the minigame's own completion (last
 // divination, or ForceMinigameEnd) resumes the awaiting event.
-public static class HeadlessCrystal
+internal static class HeadlessCrystal
 {
     public static CrystalMinigame? Entity { get; private set; }
 
@@ -211,7 +211,7 @@ public static class HeadlessCrystal
 // Every stand-in above holds run-scoped state; abandon calls this so no
 // parked completion source or captured entity leaks into the next run.
 // A new stand-in belongs on this list.
-public static class HeadlessState
+internal static class HeadlessState
 {
     public static void ResetAll()
     {
@@ -223,7 +223,7 @@ public static class HeadlessState
     }
 }
 
-public static class HeadlessRewards
+internal static class HeadlessRewards
 {
     // Slot list: a picked entry's slot goes null but stays in place so the
     // other rewards keep their idx between picks.

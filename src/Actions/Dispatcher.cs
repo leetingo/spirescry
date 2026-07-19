@@ -118,7 +118,7 @@ public static class Dispatcher
 
     private static DispatchResult CheatAsyncFault()
     {
-        Fire(ForcedAsyncFault(), "forced-async-fault");
+        DecisionSurfaceActions.Track(ForcedAsyncFault(), "forced-async-fault");
         return DispatchResult.Success();
     }
 
@@ -157,7 +157,8 @@ public static class Dispatcher
         // The registry holds canonical prototypes; rooms want a run-scoped
         // mutable copy (same contract as the relic cheat).
         var room = new CombatRoom(model.ToMutable(), run.State);
-        ResolveOrFire(run.Manager.EnterRoom(room), "cheat-combat");
+        DecisionSurface.Current.TrackOrAwaitModelTask(
+            run.Manager.EnterRoom(room), "cheat-combat");
         return DispatchResult.Success();
     }
 
@@ -175,7 +176,7 @@ public static class Dispatcher
             return DispatchResult.Reject(RejectionCodes.BadRequest, $"no potion model '{entry}'");
 
         var procure = PotionCmd.TryToProcure(proto.ToMutable(), player);
-        ResolveOrFire(procure, "cheat-potion");
+        DecisionSurface.Current.TrackOrAwaitModelTask(procure, "cheat-potion");
         return DispatchResult.Success();
     }
 
@@ -213,7 +214,8 @@ public static class Dispatcher
 
         // The map screen would otherwise stay on top and mask the event.
         NMapScreen.Instance?.Close(animateOut: false);
-        ResolveOrFire(run.Manager.EnterRoom(new EventRoom(model)), "cheat-event");
+        DecisionSurface.Current.TrackOrAwaitModelTask(
+            run.Manager.EnterRoom(new EventRoom(model)), "cheat-event");
         return DispatchResult.Success();
     }
 
@@ -306,7 +308,7 @@ public static class Dispatcher
             Reflect.Invoke(card, "FinalizeUpgradeInternal");
         }
         var add = CardPileCmd.Add(card, inCombat ? PileType.Hand : PileType.Deck);
-        ResolveOrFire(add, "cheat-card");
+        DecisionSurface.Current.TrackOrAwaitModelTask(add, "cheat-card");
         return DispatchResult.Success();
     }
 
@@ -336,23 +338,11 @@ public static class Dispatcher
             binder: null, types: [typeof(Player)], modifiers: null)
             ?.Invoke(relic, [player]);
 
-        Task? obtain = null;
         // Pickup relics such as ASTROLABE open a deck picker from their
-        // AfterObtained hook. Pre-arm the same deferred selector used by
-        // event/shop/rest choices; if a choice is pending, return so the
-        // agent can drive it through card_select instead of blocking on a
-        // GUI screen that does not exist in the pure host.
-        HeadlessPicker.Around(() => obtain = RelicCmd.Obtain(relic, player));
-        if (obtain is null)
-            return DispatchResult.Reject(RejectionCodes.Internal, "relic obtain did not start");
-        if (RunMode.IsHeadless
-            && !HeadlessPicker.IsActive
-            && !DecisionSurface.Current.BundleActive
-            && !HeadlessRewards.IsActive)
-            obtain.GetAwaiter().GetResult();
-        else
-            Fire(obtain, "cheat-relic");
-        return DispatchResult.Success();
+        // AfterObtained hook. The selected decision surface owns whether
+        // that task settles inline or parks on its choice completion.
+        return FromDecisionSurface(
+            DecisionSurface.Current.ObtainRelic(relic, player));
     }
 
     // Leaves every enemy at 1 HP with no block, so one normal play ends the
@@ -443,27 +433,6 @@ public static class Dispatcher
         LocalRunContext run, MapPoint target) =>
         FromDecisionSurface(
             DecisionSurface.Current.TravelTo(run, target));
-
-    // Engine calls that return Tasks must not block the main thread —
-    // fire them and surface failures in the log.
-    private static void Fire(Task task, string context)
-    {
-        Signals.TrackAsync(task, context);
-        _ = task.ContinueWith(t =>
-        {
-            if (t.Exception is { } ex) SafeLog.Error(context, ex.InnerException ?? ex);
-        }, TaskContinuationOptions.OnlyOnFaulted);
-    }
-
-    // Model-layer tasks drain synchronously in the pure host; GUI tasks must
-    // be tracked without blocking the engine's main thread.
-    private static void ResolveOrFire(Task task, string context)
-    {
-        if (RunMode.IsHeadless)
-            task.GetAwaiter().GetResult();
-        else
-            Fire(task, context);
-    }
 
     // ---- main menu ----------------------------------------------------
 
@@ -870,7 +839,7 @@ public static class Dispatcher
         // A hand/card picker owns combat input until its completion source is
         // resolved. CombatManager remains in progress underneath, so checking
         // it alone would accept play/end-turn/potion-use and let a second
-        // picker overwrite the first HeadlessPicker frame (#31).
+        // picker overwrite the first deferred-choice frame (#31).
         if (RequirePhase(Phase.Combat) is { } phaseErr) return phaseErr;
 
         var combat = CombatManager.Instance;

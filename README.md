@@ -204,11 +204,12 @@ must never be attributed to the source run.
 
 **In-game** boots load the mod inside the game process and drive the real
 UI. The **host** boot loads an IL-patched `sts2.dll` against a stub
-GodotSharp in a plain .NET process; `RunMode` branches swap UI nodes for
-the engine's model-layer test entry points (`RunState.CreateForTest`,
-deferred `ICardSelector`s, a virtual rewards flow). Same protocol either
-way — in host mode actions also resolve inline, so `/step` returns with
-the effect already applied.
+GodotSharp in a plain .NET process. Each composition root selects one
+`DecisionSurface` adapter; the host adapter owns the engine's model-layer
+test entry points (`RunState.CreateForTest`, deferred `ICardSelector`s, a
+virtual rewards flow) without leaking boot checks into protocol modules.
+Same protocol either way — in host mode actions also resolve inline, so
+`/step` returns with the effect already applied.
 
 `host --foreground` execs the host in the invoking process instead of
 starting a background child. Use it in CI, sandboxes, and agent runners that

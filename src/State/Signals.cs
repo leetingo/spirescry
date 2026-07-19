@@ -232,7 +232,7 @@ public static class Signals
         var result = Settlement.Current.ObserveWatchdogs(new SettlementWatchdogProbe(
             running,
             running?.GetType().Name,
-            HeadlessPicker.IsActive,
+            DecisionSurface.Current.DeferredCardChoiceActive,
             combat is { IsInProgress: true },
             combat is { IsEnding: true },
             queuesEmpty,

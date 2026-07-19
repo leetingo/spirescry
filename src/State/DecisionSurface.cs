@@ -38,6 +38,8 @@ internal interface IDecisionSurface
 {
     Phase? ActivePhase { get; }
     bool RequiresSettlementFrameStability { get; }
+    bool DeferredCardChoiceActive { get; }
+    bool CanBeginTreasureRelicPicking { get; }
     bool BundleActive { get; }
     BundleDecision? Bundle { get; }
     CrystalMinigame? Crystal { get; }
@@ -87,7 +89,11 @@ internal interface IDecisionSurface
         RunManager manager, CardModel card, Creature? target);
     DecisionSurfaceResult EndTurn(
         RunManager manager, Player player, int roundNumber);
+    DecisionSurfaceResult ObtainRelic(RelicModel relic, Player player);
+    DecisionSurfaceResult AcceptAbandonConfirmation(RunManager manager);
     DecisionSurfaceResult ParkCombatRewards(CombatRoom room);
+    void InstallPersistentCardSelector();
+    void TrackOrAwaitModelTask(Task task, string context);
     void ResetRunChoices();
 
     // The headless Harmony hook asks the selected adapter whether it owns
@@ -96,6 +102,11 @@ internal interface IDecisionSurface
     bool TryOwnBundleCompletion(
         IReadOnlyList<IReadOnlyList<CardModel>> bundles,
         out Task<IEnumerable<CardModel>> completion);
+    bool TryOwnCrystalScreen(CrystalMinigame minigame);
+    bool TryOwnCustomRewardCompletion(
+        Player player,
+        IReadOnlyList<Reward> rewards,
+        out Task completion);
 }
 
 internal sealed record BundleDecision(
@@ -382,6 +393,10 @@ internal sealed class GuiDecisionSurface : IDecisionSurface
     }
 
     public bool RequiresSettlementFrameStability => true;
+
+    public bool DeferredCardChoiceActive => false;
+
+    public bool CanBeginTreasureRelicPicking => true;
 
     public bool BundleActive => BundleScreen is not null;
 
@@ -938,6 +953,23 @@ internal sealed class GuiDecisionSurface : IDecisionSurface
         return DecisionSurfaceResult.Success();
     }
 
+    public DecisionSurfaceResult ObtainRelic(RelicModel relic, Player player)
+    {
+        DecisionSurfaceActions.Track(RelicCmd.Obtain(relic, player), "cheat-relic");
+        return DecisionSurfaceResult.Success();
+    }
+
+    public DecisionSurfaceResult AcceptAbandonConfirmation(RunManager manager)
+    {
+        manager.Abandon();
+        return DecisionSurfaceResult.Success();
+    }
+
+    public void InstallPersistentCardSelector() { }
+
+    public void TrackOrAwaitModelTask(Task task, string context) =>
+        DecisionSurfaceActions.Track(task, context);
+
     public void ResetRunChoices() { }
 
     public DecisionSurfaceResult ParkCombatRewards(CombatRoom room) =>
@@ -946,6 +978,17 @@ internal sealed class GuiDecisionSurface : IDecisionSurface
     public bool TryOwnBundleCompletion(
         IReadOnlyList<IReadOnlyList<CardModel>> bundles,
         out Task<IEnumerable<CardModel>> completion)
+    {
+        completion = null!;
+        return false;
+    }
+
+    public bool TryOwnCrystalScreen(CrystalMinigame minigame) => false;
+
+    public bool TryOwnCustomRewardCompletion(
+        Player player,
+        IReadOnlyList<Reward> rewards,
+        out Task completion)
     {
         completion = null!;
         return false;
@@ -1006,6 +1049,11 @@ internal sealed class HeadlessDecisionSurface : IDecisionSurface
     }
 
     public bool RequiresSettlementFrameStability => false;
+
+    public bool DeferredCardChoiceActive => HeadlessPicker.IsActive;
+
+    public bool CanBeginTreasureRelicPicking =>
+        HeadlessTreasure.CanBeginRelicPicking;
 
     public bool BundleActive => HeadlessBundle.IsActive;
 
@@ -1422,7 +1470,32 @@ internal sealed class HeadlessDecisionSurface : IDecisionSurface
             () => manager.ActionQueueSet.EnqueueWithoutSynchronizing(
                 new EndPlayerTurnAction(player, roundNumber)));
 
-    internal static void TeardownAbandon(RunManager manager)
+    public DecisionSurfaceResult ObtainRelic(RelicModel relic, Player player)
+    {
+        Task? obtain = null;
+        HeadlessPicker.Around(() => obtain = RelicCmd.Obtain(relic, player));
+        if (obtain is null)
+            return DecisionSurfaceResult.Reject(
+                DecisionSurfaceError.Internal, "relic obtain did not start");
+        if (!DeferredCardChoiceActive && !BundleActive && !HeadlessRewards.IsActive)
+            obtain.GetAwaiter().GetResult();
+        else
+            DecisionSurfaceActions.Track(obtain, "cheat-relic");
+        return DecisionSurfaceResult.Success();
+    }
+
+    public DecisionSurfaceResult AcceptAbandonConfirmation(RunManager manager)
+    {
+        TeardownAbandon(manager);
+        return DecisionSurfaceResult.Success();
+    }
+
+    public void InstallPersistentCardSelector() => HeadlessPicker.Install();
+
+    public void TrackOrAwaitModelTask(Task task, string context) =>
+        task.GetAwaiter().GetResult();
+
+    private static void TeardownAbandon(RunManager manager)
     {
         try
         {
@@ -1533,6 +1606,29 @@ internal sealed class HeadlessDecisionSurface : IDecisionSurface
     {
         completion = HeadlessBundle.Park(bundles);
         return true;
+    }
+
+    public bool TryOwnCrystalScreen(CrystalMinigame minigame)
+    {
+        HeadlessCrystal.Park(minigame);
+        return true;
+    }
+
+    public bool TryOwnCustomRewardCompletion(
+        Player player,
+        IReadOnlyList<Reward> rewards,
+        out Task completion)
+    {
+        completion = CaptureCustomRewards(player, rewards);
+        return true;
+    }
+
+    private static async Task CaptureCustomRewards(
+        Player player, IReadOnlyList<Reward> rewards)
+    {
+        var set = new RewardsSet(player).WithCustomRewards(rewards.ToList());
+        await set.GenerateWithoutOffering();
+        HeadlessRewards.CaptureFromSet(set);
     }
 
     private static DecisionSurfaceResult BadIndex(string message) =>
