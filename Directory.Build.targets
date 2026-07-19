@@ -1,0 +1,15 @@
+<Project>
+
+  <PropertyGroup>
+    <ProtocolArtifactTool>$(MSBuildThisFileDirectory)tools/ProtocolArtifact/ProtocolArtifact.csproj</ProtocolArtifactTool>
+    <ProtocolArtifactSource Condition="'$(ProtocolArtifactSource)' == ''">$(MSBuildThisFileDirectory)protocol.json</ProtocolArtifactSource>
+    <ProtocolArtifactOutput Condition="'$(ProtocolArtifactOutput)' == ''">$(TargetDir)protocol.json</ProtocolArtifactOutput>
+  </PropertyGroup>
+
+  <Target Name="EmitProtocolArtifact"
+          AfterTargets="Build"
+          Condition="'$(DesignTimeBuild)' != 'true' And ('$(AssemblyName)' == 'spirescry' Or '$(AssemblyName)' == 'spirescry_host')">
+    <Exec Command="dotnet run --project &quot;$(ProtocolArtifactTool)&quot; --configuration &quot;$(Configuration)&quot; --property:BaseIntermediateOutputPath=&quot;obj/$(AssemblyName)/&quot; --property:BaseOutputPath=&quot;bin/$(AssemblyName)/&quot; -- --check &quot;$(ProtocolArtifactSource)&quot; --output &quot;$(ProtocolArtifactOutput)&quot;" />
+  </Target>
+
+</Project>

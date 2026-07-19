@@ -7,12 +7,12 @@ namespace Spirescry.State;
 // unit layer can pin the format.
 public static class ErrorEvents
 {
-    public const string EnginePrefix = "engine_error:";
-    public const string AsyncPrefix = "async_fault:";
+    public const string EnginePrefix = ProtocolVocabulary.FaultEvents.EngineError;
+    public const string AsyncPrefix = ProtocolVocabulary.FaultEvents.AsyncFault;
     // Known-benign engine error lines: kept in the event stream for
     // forensics, excluded from the errors array — they must not read as
     // pollution.
-    public const string NotePrefix = "engine_note:";
+    public const string NotePrefix = ProtocolVocabulary.FaultEvents.EngineNote;
 
     public static string FromLogLine(string text, bool combatInProgress) =>
         $"{(IsKnownBenignLogLine(text, combatInProgress) ? NotePrefix : EnginePrefix)}{Condense(text)}";

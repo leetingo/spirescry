@@ -10,6 +10,8 @@ cli/target/
 headless/build/
 headless/*/bin/
 headless/*/obj/
+tools/*/bin/
+tools/*/obj/
 __pycache__/
 
 # OS / editor cruft

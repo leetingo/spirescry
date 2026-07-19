@@ -57,10 +57,9 @@ public static class Dispatcher
         RunState State,
         Player? Player);
 
-    // The complete verb and cheat surfaces, in dispatch order. /health
-    // advertises them as capabilities so a CLI newer or older than the
-    // host detects the skew up front instead of mid-run; the rejection
-    // messages below quote the same lists.
+    // The complete verb surface and the compatibility view of the protocol
+    // vocabulary's cheat surface, both in dispatch order. /health advertises
+    // them so a CLI newer or older than the host detects skew up front.
     public static readonly string[] Verbs =
     {
         "new-run", "abandon", "option", "proceed", "map-move",
@@ -70,11 +69,7 @@ public static class Dispatcher
     };
 
     public static readonly string[] Cheats =
-    {
-        "goto", "gold", "heal", "hp", "wound-enemies", "event", "combat",
-        "card", "card-upgraded", "relic", "potion", "stars", "energy",
-        "async-fault", "engine-error",
-    };
+        ProtocolVocabulary.Cheats.All.Select(shape => shape.Name).ToArray();
 
     public static DispatchResult Dispatch(string action, JsonElement args) => action switch
     {

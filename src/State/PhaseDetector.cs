@@ -11,35 +11,10 @@ using CrystalScreen = MegaCrit.Sts2.Core.Nodes.Events.Custom.CrystalSphere.NCrys
 
 namespace Spirescry.State;
 
-public enum Phase
-{
-    MainMenu, Map, Combat, Event, Shop, RestSite, Treasure, Rewards,
-    CardReward, RelicReward, CardSelect, HandSelect, BundleSelect,
-    CrystalSphere, GameOver, Overlay, Unknown,
-}
-
 public static class PhaseDetector
 {
-    public static string AsString(this Phase p) => p switch
-    {
-        Phase.MainMenu => "main_menu",
-        Phase.Map => "map",
-        Phase.Combat => "combat",
-        Phase.Event => "event",
-        Phase.Shop => "shop",
-        Phase.RestSite => "rest_site",
-        Phase.Treasure => "treasure",
-        Phase.Rewards => "rewards",
-        Phase.CardReward => "card_reward",
-        Phase.RelicReward => "relic_reward",
-        Phase.CardSelect => "card_select",
-        Phase.HandSelect => "hand_select",
-        Phase.BundleSelect => "bundle_select",
-        Phase.CrystalSphere => "crystal_sphere",
-        Phase.GameOver => "game_over",
-        Phase.Overlay => "overlay",
-        _ => "unknown",
-    };
+    // Compatibility extension; ProtocolVocabulary owns the wire names.
+    public static string AsString(this Phase p) => ProtocolVocabulary.Phases.Name(p);
 
     // Must be called on the main thread; reads game singletons that are
     // not thread-safe.

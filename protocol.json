@@ -1,0 +1,176 @@
+{
+  "protocolVersion": 2,
+  "rejectionCodes": [
+    "bad_request",
+    "bad_phase",
+    "bad_index",
+    "bad_target",
+    "bad_state",
+    "not_ready",
+    "not_playable",
+    "not_enough_gold",
+    "not_enough_energy",
+    "not_enough_stars",
+    "run_exists",
+    "stale_state",
+    "external_change",
+    "resolution_partial",
+    "resolution_failed",
+    "not_found",
+    "internal"
+  ],
+  "phases": [
+    "main_menu",
+    "map",
+    "combat",
+    "event",
+    "shop",
+    "rest_site",
+    "treasure",
+    "rewards",
+    "card_reward",
+    "relic_reward",
+    "card_select",
+    "hand_select",
+    "bundle_select",
+    "crystal_sphere",
+    "game_over",
+    "overlay",
+    "unknown"
+  ],
+  "faultEventTokens": {
+    "engineError": "engine_error:",
+    "asyncFault": "async_fault:",
+    "engineNote": "engine_note:"
+  },
+  "cheatArgumentShapes": [
+    {
+      "name": "goto",
+      "arguments": [
+        {
+          "name": "col",
+          "type": "integer"
+        },
+        {
+          "name": "row",
+          "type": "integer"
+        }
+      ]
+    },
+    {
+      "name": "gold",
+      "arguments": [
+        {
+          "name": "value",
+          "type": "integer"
+        }
+      ]
+    },
+    {
+      "name": "heal",
+      "arguments": []
+    },
+    {
+      "name": "hp",
+      "arguments": [
+        {
+          "name": "value",
+          "type": "integer"
+        }
+      ]
+    },
+    {
+      "name": "wound-enemies",
+      "arguments": []
+    },
+    {
+      "name": "event",
+      "arguments": [
+        {
+          "name": "id",
+          "type": "string"
+        }
+      ]
+    },
+    {
+      "name": "combat",
+      "arguments": [
+        {
+          "name": "id",
+          "type": "string"
+        }
+      ]
+    },
+    {
+      "name": "card",
+      "arguments": [
+        {
+          "name": "id",
+          "type": "string"
+        },
+        {
+          "name": "upgraded",
+          "type": "boolean",
+          "optional": true
+        }
+      ]
+    },
+    {
+      "name": "card-upgraded",
+      "arguments": [
+        {
+          "name": "id",
+          "type": "string"
+        }
+      ]
+    },
+    {
+      "name": "relic",
+      "arguments": [
+        {
+          "name": "id",
+          "type": "string"
+        }
+      ]
+    },
+    {
+      "name": "potion",
+      "arguments": [
+        {
+          "name": "id",
+          "type": "string"
+        }
+      ]
+    },
+    {
+      "name": "stars",
+      "arguments": [
+        {
+          "name": "value",
+          "type": "integer"
+        }
+      ]
+    },
+    {
+      "name": "energy",
+      "arguments": [
+        {
+          "name": "value",
+          "type": "integer"
+        }
+      ]
+    },
+    {
+      "name": "async-fault",
+      "arguments": []
+    },
+    {
+      "name": "engine-error",
+      "arguments": []
+    },
+    {
+      "name": "engine-error-delayed",
+      "arguments": []
+    }
+  ]
+}
