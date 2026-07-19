@@ -21,6 +21,7 @@
     <Compile Include="../../src/State/DecisionProjection.cs" Link="DecisionProjection.cs" />
     <Compile Include="../../src/State/ErrorEvents.cs" Link="ErrorEvents.cs" />
     <Compile Include="../../headless/Host/FirstChanceFilter.cs" Link="FirstChanceFilter.cs" />
+    <Compile Include="../../headless/Host/HostPatchBatch.cs" Link="HostPatchBatch.cs" />
   </ItemGroup>
 
 </Project>

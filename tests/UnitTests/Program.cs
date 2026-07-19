@@ -38,6 +38,86 @@ return failures == 0 ? 0 : 1;
 
 internal static class Tests
 {
+    public static void RequiredHostPatchFailureStopsBootWithMethodAndCause()
+    {
+        var cause = new InvalidOperationException("Harmony JIT exploded");
+        var result = new HostPatchBatchResult(
+            MatchedCount: 1,
+            PatchedCount: 0,
+            Failures:
+            [
+                new HostPatchFailure(
+                    "Spirescry.Host.PatchIdentityProbe.Apply(System.Int32,System.String)",
+                    cause),
+            ]);
+        var reports = new List<(string message, Exception cause)>();
+
+        var thrown = Capture<InvalidOperationException>(() => result.Enforce(
+            "combat queue shim",
+            HostPatchFailurePolicy.Required,
+            (message, error) => reports.Add((message, error))));
+
+        True(thrown.Message.Contains("combat queue shim", StringComparison.Ordinal));
+        True(thrown.Message.Contains("PatchIdentityProbe.Apply", StringComparison.Ordinal));
+        Equal(1, reports.Count);
+        True(reports[0].message.Contains(
+            "Spirescry.Host.PatchIdentityProbe.Apply(System.Int32,System.String)",
+            StringComparison.Ordinal));
+        Equal(cause, reports[0].cause);
+    }
+
+    public static void PresentationHostPatchFailureIsReportedAndContinues()
+    {
+        var cause = new InvalidOperationException("presentation method would not JIT");
+        var result = new HostPatchBatchResult(
+            MatchedCount: 1,
+            PatchedCount: 0,
+            Failures: [new HostPatchFailure("Example.Vfx.Play()", cause)]);
+        var reports = new List<(string message, Exception cause)>();
+
+        result.Enforce(
+            "VFX finalizers",
+            HostPatchFailurePolicy.PresentationOnly,
+            (message, error) => reports.Add((message, error)));
+
+        Equal(1, reports.Count);
+        True(reports[0].message.Contains("Example.Vfx.Play()", StringComparison.Ordinal));
+        Equal(cause, reports[0].cause);
+    }
+
+    public static void RequiredHostPatchSetCannotSilentlyMatchNothing()
+    {
+        var result = new HostPatchBatchResult(
+            MatchedCount: 0,
+            PatchedCount: 0,
+            Failures: []);
+        var reports = new List<(string message, Exception cause)>();
+
+        var thrown = Capture<InvalidOperationException>(() => result.Enforce(
+            "custom reward completion",
+            HostPatchFailurePolicy.Required,
+            (message, error) => reports.Add((message, error))));
+
+        True(thrown.Message.Contains("matched no methods", StringComparison.Ordinal));
+        Equal(1, reports.Count);
+        True(reports[0].message.Contains("matched no methods", StringComparison.Ordinal));
+        True(reports[0].cause is MissingMethodException);
+    }
+
+    public static void HostPatchFailureIdentityIncludesTheOverloadSignature()
+    {
+        var method = typeof(PatchIdentityProbe).GetMethod(
+            nameof(PatchIdentityProbe.Apply),
+            [typeof(int), typeof(string)])!;
+
+        var failure = HostPatchFailure.From(
+            method, new InvalidOperationException("failure"));
+
+        Equal(
+            "PatchIdentityProbe.Apply(System.Int32,System.String)",
+            failure.MethodIdentity);
+    }
+
     public static void ProtocolVocabularyExposesTheCompleteWireContract()
     {
         var artifact = JsonNode.Parse(ProtocolVocabulary.CreateArtifactJson())!.AsObject();
@@ -1194,6 +1274,25 @@ internal static class Tests
 
         throw new InvalidOperationException($"expected {typeof(T).Name}");
     }
+
+    private static T Capture<T>(Action action) where T : Exception
+    {
+        try
+        {
+            action();
+        }
+        catch (T exception)
+        {
+            return exception;
+        }
+
+        throw new InvalidOperationException($"expected {typeof(T).Name}");
+    }
+}
+
+internal static class PatchIdentityProbe
+{
+    public static void Apply(int value, string text) { }
 }
 
 internal class BaseProbe
