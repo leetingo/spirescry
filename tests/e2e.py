@@ -195,9 +195,20 @@ def b1():
     assert "relic" in caps["cheats"], caps
     assert caps["cheatArgumentShapes"] == list(CHEAT_ARGUMENT_SHAPES), caps
     assert d["protocolVersion"] == PROTOCOL_VERSION, d["protocolVersion"]
+    # build.sh stamps <gitref>[-dirty].<12-hex content hash>. Reject
+    # "unknown" here: a direct dotnet build is alive but its inputs cannot
+    # be matched to this checkout, which would let stale-host regressions pass.
     build_hash = d["buildHash"]
-    assert (build_hash == "unknown" or
-            re.fullmatch(r"[0-9a-f]{7,12}(?:-dirty)?", build_hash)), build_hash
+    assert re.fullmatch(
+        r"[0-9a-f]{7,40}(?:-dirty)?\.[0-9a-f]{12}", build_hash), \
+        (f"buildHash '{build_hash}' is not a content stamp — "
+         "build the host via ./build.sh headless-setup so identity is verifiable")
+    expected = subprocess.run(
+        [os.path.join(REPO, "build.sh"), "stamp"],
+        capture_output=True, text=True, timeout=60, check=True,
+    ).stdout.strip()
+    assert build_hash == expected, \
+        f"host build '{build_hash}' != checkout stamp '{expected}' — stale host"
 
 
 @case("B2 boot log: patches landed, models clean", boot_only=True)
