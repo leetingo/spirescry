@@ -24,6 +24,7 @@ public static class Signals
     private static readonly List<(long rev, string type)> Log = new();
     private static readonly List<(long rev, string type)> Errors = new();
     private static readonly EventOptionTracker EventOptions = new();
+    private static readonly EngineLogCorrelation EngineLogs = new();
     private static readonly List<TaskCompletionSource<bool>> Waiters = new();
     private static readonly List<TaskCompletionSource<bool>> WorkWaiters = new();
     private static readonly List<TaskCompletionSource<bool>> TickWaiters = new();
@@ -59,11 +60,6 @@ public static class Signals
 
     public static string RunId { get { lock (Gate) return _runId; } }
 
-    public static int PendingAsyncCount
-    {
-        get { lock (Gate) return PendingOtherAsync.Count + EventOptions.PendingCount; }
-    }
-
     // The follow probe must read votes through the same authenticated
     // owner as the task sweep. RunManager retains an old synchronizer
     // after State is cleared, so reading it directly can resurrect a
@@ -95,7 +91,7 @@ public static class Signals
             if (!EventOptions.MatchesOwner(runState, sync)) return;
         if (EventSync.PendingTasks(sync) is not { } pending) return;
         foreach (var task in pending)
-            TrackAsync(task, "event-option", TrackedKind.EventOption);
+            TrackEventOption(task);
     }
 
     // An abandoned run's option task can be parked on a combat or dialog
@@ -114,11 +110,12 @@ public static class Signals
     // event option's task legitimately outlives one follow window (it
     // awaits embedded combats and parked pickers), so its kind gets the
     // three-state treatment in the probe instead of a flat "busy".
-    public enum TrackedKind { FireAndForget, EventOption }
+    private enum TrackedKind { FireAndForget, EventOption }
 
     // One atomic read of both counters — the probe must not reconstruct
     // internal state from two independently-locked reads.
-    public readonly record struct PendingWork(int Other, int EventOptions);
+    public readonly record struct PendingWork(
+        int FireAndForget, int EventOptions);
 
     public static PendingWork PendingSnapshot()
     {
@@ -131,8 +128,11 @@ public static class Signals
     // Dispatcher fire-and-forget tasks are part of action settlement too.
     // Tracking them closes the gap where GUI work had left the pump job but
     // had not yet enqueued an engine action or changed phase.
-    public static void TrackAsync(
-        Task task, string label, TrackedKind kind = TrackedKind.FireAndForget)
+    public static void TrackAsync(Task task, string label) =>
+        TrackAsync(task, label, TrackedKind.FireAndForget);
+
+    private static void TrackAsync(
+        Task task, string label, TrackedKind kind)
     {
         var isEventOption = kind == TrackedKind.EventOption;
         var eventGeneration = 0L;
@@ -151,18 +151,34 @@ public static class Signals
             List<TaskCompletionSource<bool>>? wake;
             lock (Gate)
             {
+                var currentOwner = true;
                 if (isEventOption)
                 {
-                    if (!EventOptions.Complete(task, eventGeneration)) return;
+                    currentOwner = EventOptions.Complete(task, eventGeneration);
                 }
                 else
                     PendingOtherAsync.Remove(task);
+                var resolvedLog = EngineLogs.ResolveForTask(
+                    completed,
+                    Environment.CurrentManagedThreadId,
+                    currentOwner
+                        ? EngineLogDisposition.Publish
+                        : EngineLogDisposition.Suppress);
+                if (!currentOwner)
+                {
+                    if (resolvedLog)
+                        EventOptions.MarkRetiredFaultLogResolved(task);
+                    return;
+                }
                 wake = RecordBumpLocked(type);
             }
             Wake(wake);
         }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously,
             TaskScheduler.Default);
     }
+
+    public static void TrackEventOption(Task task) =>
+        TrackAsync(task, "event-option", TrackedKind.EventOption);
 
     private static string AsyncCompletionEvent(Task task, string label)
     {
@@ -188,17 +204,25 @@ public static class Signals
         try { combatInProgress = CombatManager.Instance is { IsInProgress: true }; }
         catch { combatInProgress = true; }
         // TaskHelper logs just before its returned task transitions to
-        // Faulted. When dead-owner tasks exist, give their completion
-        // continuations a short correlation window. The window itself is
-        // tracked as pending work, so a live follow cannot settle before
-        // we either suppress an exact retired fault or publish a genuine
+        // Faulted. When dead-owner tasks exist, give the concrete task's
+        // same-thread completion continuation a short identity-correlation
+        // window. Text alone never suppresses a line. The window itself is
+        // tracked as pending work, so a live follow cannot settle before we
+        // either suppress that exact retired task or publish a genuine
         // current-run engine error.
-        bool correlateRetired;
-        lock (Gate) correlateRetired = EventOptions.HasRetired;
-        if (correlateRetired)
+        PendingEngineLog? pending = null;
+        lock (Gate)
+        {
+            if (EventOptions.HasRetired)
+                pending = EngineLogs.Register(
+                    text,
+                    combatInProgress,
+                    Environment.CurrentManagedThreadId);
+        }
+        if (pending is not null)
         {
             HoldAsyncSilently(
-                PublishEngineLogAfterRetiredCorrelation(text, combatInProgress));
+                PublishEngineLogAfterRetiredCorrelation(pending));
             return;
         }
         Bump(ErrorEvents.FromLogLine(text, combatInProgress));
@@ -218,11 +242,7 @@ public static class Signals
             {
                 PendingOtherAsync.Remove(task);
                 _workRevision++;
-                if (WorkWaiters.Count > 0)
-                {
-                    wake = new List<TaskCompletionSource<bool>>(WorkWaiters);
-                    WorkWaiters.Clear();
-                }
+                wake = DrainWaitersLocked(WorkWaiters);
             }
             Wake(wake);
         }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously,
@@ -230,17 +250,22 @@ public static class Signals
     }
 
     private static async Task PublishEngineLogAfterRetiredCorrelation(
-        string text, bool combatInProgress)
+        PendingEngineLog pending)
     {
-        await Task.Delay(RetiredLogCorrelationMs).ConfigureAwait(false);
-        lock (Gate)
+        try
         {
-            if (EventOptions.TryConsumeRetiredFault(cause =>
-                text.Contains(cause.GetType().Name, StringComparison.Ordinal)
-                && text.Contains(cause.Message, StringComparison.Ordinal)))
-                return;
+            await pending.Resolution.Task.WaitAsync(
+                TimeSpan.FromMilliseconds(RetiredLogCorrelationMs))
+                .ConfigureAwait(false);
         }
-        Bump(ErrorEvents.FromLogLine(text, combatInProgress));
+        catch (TimeoutException)
+        {
+            lock (Gate) EngineLogs.Expire(pending);
+        }
+        if (await pending.Resolution.Task.ConfigureAwait(false)
+            == EngineLogDisposition.Publish)
+            Bump(ErrorEvents.FromLogLine(
+                pending.Text, pending.CombatInProgress));
     }
 
     // Error events accepted-to-settlement: the follow response surfaces
@@ -305,14 +330,7 @@ public static class Signals
             Errors.Add((_revision, type));
             if (Errors.Count > ErrorCap) Errors.RemoveAt(0);
         }
-        if (Waiters.Count == 0 && WorkWaiters.Count == 0) return null;
-        var wake = new List<TaskCompletionSource<bool>>(
-            Waiters.Count + WorkWaiters.Count);
-        wake.AddRange(Waiters);
-        wake.AddRange(WorkWaiters);
-        Waiters.Clear();
-        WorkWaiters.Clear();
-        return wake;
+        return DrainWaitersLocked(Waiters, WorkWaiters);
     }
 
     private static void Wake(List<TaskCompletionSource<bool>>? waiters)
@@ -342,37 +360,33 @@ public static class Signals
     }
 
     // True when the revision moved past `since`; false on timeout.
-    public static async Task<bool> WaitForChange(long since, int timeoutMs)
-    {
-        TaskCompletionSource<bool> tcs;
-        lock (Gate)
-        {
-            if (_revision > since) return true;
-            tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-            Waiters.Add(tcs);
-        }
-        try { return await tcs.Task.WaitAsync(TimeSpan.FromMilliseconds(timeoutMs)); }
-        catch (TimeoutException) { return false; }
-        finally { lock (Gate) Waiters.Remove(tcs); }
-    }
+    public static Task<bool> WaitForChange(long since, int timeoutMs) =>
+        WaitForCounterChange(since, timeoutMs, workClock: false);
 
     // Follow observes both public revision changes and silent changes to
     // tracked-work membership. Keeping this clock separate preserves the
     // /obs?since contract: a correlation-only wake never claims the public
     // state revision moved.
-    public static async Task<bool> WaitForWorkChange(long since, int timeoutMs)
+    public static Task<bool> WaitForWorkChange(long since, int timeoutMs) =>
+        WaitForCounterChange(since, timeoutMs, workClock: true);
+
+    private static async Task<bool> WaitForCounterChange(
+        long since, int timeoutMs, bool workClock)
     {
         TaskCompletionSource<bool> tcs;
+        List<TaskCompletionSource<bool>> waiters;
         lock (Gate)
         {
-            if (_workRevision > since) return true;
+            var current = workClock ? _workRevision : _revision;
+            if (current > since) return true;
             tcs = new TaskCompletionSource<bool>(
                 TaskCreationOptions.RunContinuationsAsynchronously);
-            WorkWaiters.Add(tcs);
+            waiters = workClock ? WorkWaiters : Waiters;
+            waiters.Add(tcs);
         }
         try { return await tcs.Task.WaitAsync(TimeSpan.FromMilliseconds(timeoutMs)); }
         catch (TimeoutException) { return false; }
-        finally { lock (Gate) WorkWaiters.Remove(tcs); }
+        finally { lock (Gate) waiters.Remove(tcs); }
     }
 
     // GUI callbacks do not all expose a Task or an engine event. Follow
@@ -399,14 +413,26 @@ public static class Signals
         lock (Gate)
         {
             _tickCount++;
-            if (TickWaiters.Count > 0)
-            {
-                wake = new List<TaskCompletionSource<bool>>(TickWaiters);
-                TickWaiters.Clear();
-            }
+            wake = DrainWaitersLocked(TickWaiters);
         }
-        if (wake is null) return;
-        foreach (var waiter in wake) waiter.TrySetResult(true);
+        Wake(wake);
+    }
+
+    private static List<TaskCompletionSource<bool>>? DrainWaitersLocked(
+        List<TaskCompletionSource<bool>> first,
+        List<TaskCompletionSource<bool>>? second = null)
+    {
+        var count = first.Count + (second?.Count ?? 0);
+        if (count == 0) return null;
+        var wake = new List<TaskCompletionSource<bool>>(count);
+        wake.AddRange(first);
+        first.Clear();
+        if (second is not null)
+        {
+            wake.AddRange(second);
+            second.Clear();
+        }
+        return wake;
     }
 
     public static object[] EventsSince(long since)

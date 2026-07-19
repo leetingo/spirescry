@@ -11,7 +11,7 @@ internal sealed class EventOptionTracker
     private sealed class RetiredTask(EventSynchronizer? source)
     {
         public EventSynchronizer? Source { get; } = source;
-        public bool FaultLogConsumed { get; set; }
+        public bool FaultLogResolved { get; set; }
     }
 
     private readonly HashSet<Task> _seen = new();
@@ -81,19 +81,11 @@ internal sealed class EventOptionTracker
         return true;
     }
 
-    public bool TryConsumeRetiredFault(Func<Exception, bool> matches)
+    public void MarkRetiredFaultLogResolved(Task task)
     {
-        var task = _retired.FirstOrDefault(entry =>
-        {
-            if (entry.Value.FaultLogConsumed) return false;
-            var cause = Cause(entry.Key);
-            return cause is not null && matches(cause);
-        }).Key;
-        if (task is null) return false;
-        var retired = _retired[task];
-        retired.FaultLogConsumed = true;
+        if (!_retired.TryGetValue(task, out var retired)) return;
+        retired.FaultLogResolved = true;
         if (CanDiscard(retired)) _retired.Remove(task);
-        return true;
     }
 
     public static Exception? Cause(Task task) =>
@@ -121,7 +113,7 @@ internal sealed class EventOptionTracker
         {
             if (!CanDiscard(retired)) continue;
             var completedWithoutFault = task.IsCompleted && task.Exception is null;
-            if (completedWithoutFault || retired.FaultLogConsumed)
+            if (completedWithoutFault || retired.FaultLogResolved)
                 _retired.Remove(task);
         }
     }

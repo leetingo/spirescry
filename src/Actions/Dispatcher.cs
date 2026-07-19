@@ -75,7 +75,8 @@ public static class Dispatcher
         "card", "card-upgraded", "relic", "potion", "stars", "energy",
         "async-fault", "engine-error", "engine-error-delayed",
         "event-fault-delayed", "event-fault-late", "event-complete-late",
-        "event-orphan", "event-orphan-fault", "event-owner-rotate",
+        "event-orphan", "event-orphan-fault", "event-orphan-collision",
+        "event-owner-rotate",
     };
 
     public static DispatchResult Dispatch(string action, JsonElement args) => action switch
@@ -129,6 +130,8 @@ public static class Dispatcher
             "event-complete-late" => EventOptionCheats.CompleteLate(),
             "event-orphan" => EventOptionCheats.ParkOrphan(),
             "event-orphan-fault" => EventOptionCheats.FaultOrphan(),
+            "event-orphan-collision" =>
+                EventOptionCheats.FaultOrphanCollision(),
             "event-owner-rotate" => EventOptionCheats.RotateOwner(),
             var n => DispatchResult.Reject(RejectionCodes.BadRequest,
                 $"unknown cheat '{n}' (supported: {string.Join(", ", Cheats)})"),
@@ -426,7 +429,7 @@ public static class Dispatcher
             return DispatchResult.Reject(RejectionCodes.BadPhase, "no run to abandon");
         // The host installs an inert NGame dummy (display no-ops), so
         // mode comes from RunMode, not from this instance's null-ness.
-        var game = RunMode.IsHeadless ? null : NGame.Instance;
+        var game = RunMode.GuiGame;
         if (!rm.IsAbandoned && !rm.IsGameOver)
         {
             if (game is null) HeadlessAbandonTeardown(rm);
@@ -783,7 +786,7 @@ public static class Dispatcher
             return DispatchResult.Reject(RejectionCodes.BadRequest,
                 "args.ascension must be a non-negative 32-bit integer");
 
-        var game = RunMode.IsHeadless ? null : NGame.Instance;
+        var game = RunMode.GuiGame;
         if (game is null) return NewRunHeadless(character, seed, ascension);
 
         // The same gate a human click passes: the menu enables its
@@ -957,7 +960,7 @@ public static class Dispatcher
         // upgrade, …) awaits a card selection with no screen to serve it —
         // Around pre-arms the deferred picker for that.
         var sync = RunManager.Instance!.EventSynchronizer;
-        var before = EventSync.PendingTaskCount(sync);
+        var before = EventSync.PendingTaskSnapshot(sync);
         HeadlessPicker.Around(() => sync.ChooseLocalOption(idx));
         TrackPendingEventOptions(sync, before);
         return DispatchResult.Success();
@@ -967,23 +970,21 @@ public static class Dispatcher
     // keeps them only in a private list (drained at room exit) — nothing
     // the follow probe counts would otherwise cover a still-running
     // option effect, so a continuation could fault after follow reported
-    // settled with errors: []. Track the whole suffix this dispatch
-    // appended: a shared-event choice completing on the local vote adds
-    // one task PER PLAYER, not one. Reading the list leaves the engine's
+    // settled with errors: []. Track every task identity this dispatch
+    // added: a shared-event choice completing on the local vote adds one
+    // task PER PLAYER, not one, and the engine may clear/repopulate the
+    // list during dispatch. Reading the list leaves the engine's
     // own room-exit await untouched, and Signals' per-tick sweep covers
     // tasks appended outside any dispatch (a client's vote delivered by
     // a network message). Shared dispatcher code — GUI boots get the
     // same settlement coverage as the pure host.
     private static void TrackPendingEventOptions(
-        MegaCrit.Sts2.Core.Multiplayer.Game.EventSynchronizer sync, int before)
+        MegaCrit.Sts2.Core.Multiplayer.Game.EventSynchronizer sync,
+        IReadOnlySet<Task> before)
     {
         if (EventSync.PendingTasks(sync) is not { } pending) return;
-        // A canonical-event change inside the dispatch clears the list;
-        // a shrunken count means the prefix is gone, so track everything.
-        var start = pending.Count < before ? 0 : before;
-        for (var i = start; i < pending.Count; i++)
-            Signals.TrackAsync(
-                pending[i], "event-option", Signals.TrackedKind.EventOption);
+        foreach (var task in pending)
+            if (!before.Contains(task)) Signals.TrackEventOption(task);
     }
 
     private static DispatchResult RestOption(int idx)
@@ -1024,7 +1025,7 @@ public static class Dispatcher
             case Phase.Event:
                 // The host installs an inert NEventRoom dummy; mode comes
                 // from RunMode, not from this instance's null-ness.
-                if (!RunMode.IsHeadless && NEventRoom.Instance is { })
+                if (RunMode.GuiEventRoom is { })
                 {
                     Fire(NEventRoom.Proceed(), "proceed");
                     return DispatchResult.Success();

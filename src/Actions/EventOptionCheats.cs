@@ -14,6 +14,10 @@ internal static class EventOptionCheats
     private const int NetworkDeliveryDelayMs = 600;
     private const int OrphanFaultDelayMs = 200;
     private const int FollowWindowHoldMs = 600;
+    private const string OrphanFaultMessage =
+        "forced orphan event-option failure";
+    private const string CurrentCollisionMarker =
+        "current-run duplicate marker";
     private static TaskCompletionSource<bool>? _orphan;
 
     // Mimics a network delivery outside dispatcher tracking. Valid in any
@@ -50,13 +54,18 @@ internal static class EventOptionCheats
             : MissingOptionState("option state");
     }
 
-    public static DispatchResult FaultOrphan()
+    public static DispatchResult FaultOrphan() => FaultOrphan(collision: false);
+
+    public static DispatchResult FaultOrphanCollision() =>
+        FaultOrphan(collision: true);
+
+    private static DispatchResult FaultOrphan(bool collision)
     {
         if (_orphan is not { } orphan)
             return DispatchResult.Reject(
                 RejectionCodes.BadState, "no orphan event option is parked");
         _orphan = null;
-        _ = FaultDuringCurrentWindow(orphan);
+        _ = FaultDuringCurrentWindow(orphan, collision);
         Signals.TrackAsync(
             Task.Delay(FollowWindowHoldMs), "orphan-release-window");
         return DispatchResult.Success();
@@ -104,11 +113,14 @@ internal static class EventOptionCheats
     }
 
     private static async Task FaultDuringCurrentWindow(
-        TaskCompletionSource<bool> orphan)
+        TaskCompletionSource<bool> orphan, bool collision)
     {
         await Task.Delay(OrphanFaultDelayMs).ConfigureAwait(false);
-        orphan.TrySetException(new InvalidOperationException(
-            "forced orphan event-option failure"));
+        orphan.TrySetException(new InvalidOperationException(OrphanFaultMessage));
+        if (collision)
+            MegaCrit.Sts2.Core.Logging.Log.Error(
+                $"System.InvalidOperationException: {OrphanFaultMessage} "
+                + $"[{CurrentCollisionMarker}]");
     }
 
     private static async Task DelayedFault()

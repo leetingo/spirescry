@@ -17,8 +17,11 @@ internal static class EventSync
             ? null
             : Reflect.FieldValue(sync, "_pendingOptionTasks") as List<Task>;
 
-    public static int PendingTaskCount(EventSynchronizer? sync) =>
-        PendingTasks(sync)?.Count ?? 0;
+    // Identity snapshot for dispatcher attribution. A count cannot tell a
+    // retained prefix from a list that was cleared and repopulated to the
+    // same or a larger length during ChooseLocalOption.
+    public static HashSet<Task> PendingTaskSnapshot(EventSynchronizer? sync) =>
+        PendingTasks(sync)?.ToHashSet() ?? [];
 
     private static List<uint?>? PlayerVotes(EventSynchronizer? sync) =>
         sync is null

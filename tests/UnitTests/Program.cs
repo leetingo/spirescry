@@ -290,6 +290,56 @@ internal static class Tests
             combatInProgress: false)));
     }
 
+    public static void EngineLogsRequireTaskIdentityBeforeRetiredSuppression()
+    {
+        const string duplicate =
+            "System.InvalidOperationException: duplicate failure";
+        var correlation = new EngineLogCorrelation();
+        var directCurrentLog = correlation.Register(
+            duplicate, combatInProgress: false, threadId: 7);
+
+        // A current Error line with the same type/message as some retired
+        // task has no completing-task identity. It must time out to Publish,
+        // never be consumed merely because its text happens to collide.
+        True(correlation.Expire(directCurrentLog));
+        Equal(EngineLogDisposition.Publish,
+            directCurrentLog.Resolution.Task.GetAwaiter().GetResult());
+
+        var retiredLog = correlation.Register(
+            duplicate, combatInProgress: false, threadId: 7);
+        var retiredTask = Task.FromException(
+            new InvalidOperationException("duplicate failure"));
+        True(correlation.ResolveForTask(
+            retiredTask, threadId: 7, EngineLogDisposition.Suppress));
+        Equal(EngineLogDisposition.Suppress,
+            retiredLog.Resolution.Task.GetAwaiter().GetResult());
+
+        var currentTaskLog = correlation.Register(
+            duplicate, combatInProgress: false, threadId: 7);
+        var currentTask = Task.FromException(
+            new InvalidOperationException("duplicate failure"));
+        True(correlation.ResolveForTask(
+            currentTask, threadId: 7, EngineLogDisposition.Publish));
+        Equal(EngineLogDisposition.Publish,
+            currentTaskLog.Resolution.Task.GetAwaiter().GetResult());
+
+        // The real collision order is current direct log first, then the
+        // retired TaskHelper line immediately before its task completes.
+        // Resolve the most recent matching same-thread line, leaving the
+        // current marker to expire conservatively to Publish.
+        var collidingCurrent = correlation.Register(
+            duplicate + " [current marker]", false, threadId: 11);
+        var collidingRetired = correlation.Register(
+            duplicate, false, threadId: 11);
+        True(correlation.ResolveForTask(
+            retiredTask, threadId: 11, EngineLogDisposition.Suppress));
+        Equal(EngineLogDisposition.Suppress,
+            collidingRetired.Resolution.Task.GetAwaiter().GetResult());
+        True(correlation.Expire(collidingCurrent));
+        Equal(EngineLogDisposition.Publish,
+            collidingCurrent.Resolution.Task.GetAwaiter().GetResult());
+    }
+
     public static void DecisionClosedChestAdvertisesTheOpeningPickRelic()
     {
         // Headless closed chest: relics empty, proceed always available.

@@ -35,7 +35,7 @@ public static class Handlers
                 // The two counters behind the follow probe's busy flag —
                 // a follow that times out with an idle executor is almost
                 // always one of these stuck above zero.
-                pendingAsync = pending.Other + pending.EventOptions,
+                pendingAsync = pending.FireAndForget + pending.EventOptions,
                 pendingEventOptions = pending.EventOptions,
                 queues,
             };
@@ -380,7 +380,7 @@ public static class Handlers
                 || Signals.SharedVotePending();
             var eventOptionExecuting = optionWorkOwed
                 && !combatLive && !parkedDecision;
-            var busy = pending.Other > 0
+            var busy = pending.FireAndForget > 0
                 || eventOptionExecuting
                 || rm?.ActionExecutor?.CurrentlyRunningAction is not null
                 || EngineQueues.All(rm).Any(queue => queue.depth > 0);

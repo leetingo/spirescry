@@ -9,8 +9,19 @@ namespace Spirescry.State;
 // never sets it and keeps the node probe.
 internal static class RunMode
 {
-    public static bool ForcedHeadless;
+    public static bool ForcedHeadless { get; set; }
 
     public static bool IsHeadless =>
         ForcedHeadless || MegaCrit.Sts2.Core.Nodes.NGame.Instance is null;
+
+    // Keep dummy-aware mode selection out of individual verbs. The host
+    // installs inert visual singletons, so checking Instance directly is
+    // not a valid boot-mode test.
+    public static MegaCrit.Sts2.Core.Nodes.NGame? GuiGame =>
+        IsHeadless ? null : MegaCrit.Sts2.Core.Nodes.NGame.Instance;
+
+    public static MegaCrit.Sts2.Core.Nodes.Rooms.NEventRoom? GuiEventRoom =>
+        IsHeadless
+            ? null
+            : MegaCrit.Sts2.Core.Nodes.Rooms.NEventRoom.Instance;
 }
