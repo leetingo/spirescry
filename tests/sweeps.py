@@ -37,6 +37,22 @@ TRANSIENT_CLAIMS = {
 }
 
 
+def follow_result(*args, timeout_ms=10000):
+    """Return a followed action envelope while preserving rejection text."""
+    result = run(
+        *args, "--follow", str(timeout_ms), allow_fail=True,
+        timeout=max(1, timeout_ms / 1000),
+    )
+    if "_err" in result:
+        return result
+    if result.get("settled") is not True or not isinstance(result.get("obs"), dict):
+        return {"_err": (
+            f"did not settle ({result.get('outcome')}); "
+            f"obs={type(result.get('obs')).__name__}"
+        )}
+    return result
+
+
 def model_entries(kind):
     port = os.environ.get("STS2_AGENT_PORT", "7777")
     with urllib.request.urlopen(
@@ -163,36 +179,30 @@ def cards(log=print, only=None):
             d = bridge.follow("cheat", "stars", "99")
             if len(d["hand"]) >= 9:  # keep room for the graft
                 d = bridge.follow("end-turn", timeout_ms=30000)
-                bridge.follow("cheat", "heal")
-                bridge.follow("cheat", "energy", "99")
-                d = bridge.follow("cheat", "stars", "99")
                 if d["phase"] != bridge.PHASE.COMBAT:
                     fresh_run(character=active_character)
                     d = enter_sandbag()
-            before_graft = d["rev"]
-            r = run("cheat", "card", card, allow_fail=True)
+                else:
+                    bridge.follow("cheat", "heal")
+                    bridge.follow("cheat", "energy", "99")
+                    d = bridge.follow("cheat", "stars", "99")
+            r = follow_result("cheat", "card", card)
             if "_err" in r:
                 failures[card] = f"graft: {r['_err'][:90]}"
                 continue
-            d = bridge.wait_until(
-                lambda snapshot: any(
-                    held.get("model") == card
-                    for held in snapshot.get("hand", [])),
-                description=f"grafted card {card} to reach the hand",
-                after_rev=before_graft,
-            )
+            d = r["obs"]
             mine = next((c for c in d.get("hand", []) if c["model"] == card), None)
             if mine is None:
                 failures[card] = "grafted card never reached the hand"
                 continue
             if mine.get("unplayable"):
-                res = bridge.cli("play", card)
-                if res.returncode == 0:
+                rejected = follow_result("play", card)
+                if "_err" not in rejected:
                     failures[card] = "unplayable card was accepted"
-                elif f"not_playable: {card}:" not in res.stderr:
+                elif f"not_playable: {card}:" not in rejected["_err"]:
                     failures[card] = (
                         "unplayable card rejected with wrong error: "
-                        f"{res.stderr.strip()[:100]}")
+                        f"{rejected['_err'][:100]}")
                 else:
                     skipped.append(card)  # rejected cleanly — by design
                 continue
@@ -206,9 +216,9 @@ def cards(log=print, only=None):
                     d = enter_sandbag()
                     continue
                 args += ["--target", str(alive[0]["id"])]
-            res = bridge.cli(*args)
-            if res.returncode != 0:
-                err = res.stderr.strip()
+            followed = follow_result(*args)
+            if "_err" in followed:
+                err = followed["_err"]
                 if f"not_playable: {card}:" in err:
                     # Some cards require a state the single-player atomic
                     # sandbox cannot generically manufacture (empty draw
@@ -221,7 +231,8 @@ def cards(log=print, only=None):
                 continue
             plays_in_fight += 1
             playable_executed += 1
-            ph = bridge.walk_world(**TRANSIENT_CLAIMS)["phase"]
+            ph = bridge.walk_world(
+                initial=followed["obs"], **TRANSIENT_CLAIMS)["phase"]
             w = wedge_events(rev)
             if w:
                 failures[card] = f"wedge: {w}"
@@ -280,19 +291,12 @@ def potions(log=print):
                 fresh_run()
                 enter_sandbag()
                 used_in_fight = 0
-            healed = bridge.follow("cheat", "heal")
-            before_procure = healed["rev"]
-            r = run("cheat", "potion", pot, allow_fail=True)
+            bridge.follow("cheat", "heal")
+            r = follow_result("cheat", "potion", pot)
             if "_err" in r:
                 failures[pot] = f"procure: {r['_err'][:90]}"
                 continue
-            d = bridge.wait_until(
-                lambda snapshot: any(
-                    held.get("model") == pot
-                    for held in snapshot.get("potions", [])),
-                description=f"procured potion {pot} to reach the belt",
-                after_rev=before_procure,
-            )
+            d = r["obs"]
             slot = next((p for p in d.get("potions", [])
                          if p["model"] == pot), None)
             if slot is None:
@@ -303,20 +307,21 @@ def potions(log=print):
             if slot.get("target") == "anyenemy":
                 alive = [e for e in d["enemies"] if e["alive"]]
                 args += ["--target", str(alive[0]["id"])]
-            res = bridge.cli(*args)
-            if res.returncode != 0:
+            followed = follow_result(*args)
+            if "_err" in followed:
                 # not usable here (out-of-combat potion?) — try the map
                 settled = bridge.walk_world(bridge.PHASE.MAP, **MAP_CLAIMS)
                 if settled["phase"] != bridge.PHASE.MAP:
                     fresh_run()
-                res = bridge.cli(*args)
-                if res.returncode != 0:
-                    failures[pot] = f"use: {res.stderr.strip()[:110]}"
+                followed = follow_result(*args)
+                if "_err" in followed:
+                    failures[pot] = f"use: {followed['_err'][:110]}"
                 enter_sandbag()
                 used_in_fight = 0
                 continue
             used_in_fight += 1
-            bridge.walk_world(**TRANSIENT_CLAIMS)
+            d = bridge.walk_world(
+                initial=followed["obs"], **TRANSIENT_CLAIMS)
             w = wedge_events(rev)
             if w:
                 failures[pot] = f"wedge: {w}"
@@ -324,7 +329,6 @@ def potions(log=print):
                 enter_sandbag()
                 used_in_fight = 0
                 continue
-            d = obs()
             if d.get("phase") == bridge.PHASE.COMBAT and any(
                     p["slot"] == slot["slot"] and p["model"] == pot
                     for p in d.get("potions", [])):
@@ -355,18 +359,19 @@ def relics(log=print):
     fresh_run("SWEEPREL")
 
     def grant_and_settle(relic):
-        r = run("cheat", "relic", relic, allow_fail=True)
+        r = follow_result("cheat", "relic", relic)
         if "_err" in r:
             if "not_playable:" in r["_err"]:
                 return "LEGAL_REJECT"
             return f"grant: {r['_err'][:90]}"
         try:
-            phase = bridge.walk_world(**TRANSIENT_CLAIMS)["phase"]
+            settled = bridge.walk_world(
+                initial=r["obs"], **TRANSIENT_CLAIMS)
         except AssertionError as e:
             return f"obtain picker: {str(e)[:90]}"
-        if phase != bridge.PHASE.MAP:
-            return f"obtain hook settled at {phase}, expected map"
-        if relic not in obs()["player"]["relics"]:
+        if settled["phase"] != bridge.PHASE.MAP:
+            return f"obtain hook settled at {settled['phase']}, expected map"
+        if relic not in settled["player"]["relics"]:
             return "obtain completed but relic is absent from inventory"
         return None
 

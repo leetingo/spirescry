@@ -31,7 +31,7 @@ def fresh_run(seed=None):
     if bridge.wait_phase(
             bridge.PHASE.MAP, timeout=20, raise_on_timeout=False) is None:
         sys.exit("could not reach map for a fresh run")
-    run("cheat", "gold", "500")
+    bridge.follow("cheat", "gold", "500")
 
 def walk_or_stuck(*wanted, **walk_options):
     """Keep the sweep aggregating after one option wedges or times out."""
