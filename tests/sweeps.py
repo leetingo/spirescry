@@ -158,23 +158,14 @@ def cards(log=print, only=None):
                 fresh_run(character=active_character)
                 d = enter_sandbag()
                 plays_in_fight = 0
-            run("cheat", "heal", allow_fail=True)
-            run("cheat", "energy", "99", allow_fail=True)
-            run("cheat", "stars", "99", allow_fail=True)
-            d = obs()
+            bridge.follow("cheat", "heal")
+            bridge.follow("cheat", "energy", "99")
+            d = bridge.follow("cheat", "stars", "99")
             if len(d["hand"]) >= 9:  # keep room for the graft
-                before_turn = d["rev"]
-                run("end-turn", allow_fail=True)
-                d = bridge.wait_until(
-                    lambda snapshot: snapshot.get("phase") != bridge.PHASE.COMBAT
-                    or snapshot.get("side") == "player",
-                    description="card sweep next player turn",
-                    after_rev=before_turn,
-                )
-                run("cheat", "heal", allow_fail=True)
-                run("cheat", "energy", "99", allow_fail=True)
-                run("cheat", "stars", "99", allow_fail=True)
-                d = obs()
+                d = bridge.follow("end-turn", timeout_ms=30000)
+                bridge.follow("cheat", "heal")
+                bridge.follow("cheat", "energy", "99")
+                d = bridge.follow("cheat", "stars", "99")
                 if d["phase"] != bridge.PHASE.COMBAT:
                     fresh_run(character=active_character)
                     d = enter_sandbag()
@@ -289,8 +280,8 @@ def potions(log=print):
                 fresh_run()
                 enter_sandbag()
                 used_in_fight = 0
-            run("cheat", "heal", allow_fail=True)
-            before_procure = obs()["rev"]
+            healed = bridge.follow("cheat", "heal")
+            before_procure = healed["rev"]
             r = run("cheat", "potion", pot, allow_fail=True)
             if "_err" in r:
                 failures[pot] = f"procure: {r['_err'][:90]}"

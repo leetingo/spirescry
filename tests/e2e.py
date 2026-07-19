@@ -992,11 +992,10 @@ def w3():
     assert "pick-relic" in closed["legal"], closed["legal"]
 
     relics0 = len(first["player"]["relics"])
-    run("pick-relic", "0")  # first verb opens the headless chest
-    opened = obs()
+    opened = bridge.follow("pick-relic", "0")
     assert opened["chestOpened"] is True and opened["relics"], opened
-    run("pick-relic", "0")  # second selects from the now-visible offer
-    assert len(obs()["player"]["relics"]) == relics0 + 1
+    claimed = bridge.follow("pick-relic", "0")
+    assert len(claimed["player"]["relics"]) == relics0 + 1
     # Resolved offer: chest stays open, pick-relic is no longer legal.
     resolved = run("obs", "--decision")
     assert resolved["chestOpened"] is True, resolved
@@ -1405,10 +1404,10 @@ def c5():
     assert any(i["damage"] != i["baseDamage"] for i in attacks), attacks
 
     target = behind[0]
-    run("cheat", "card", "STRIKE_DEFECT")
-    run("cheat", "energy", "99")
-    run("play", "STRIKE_DEFECT", "--target", str(target["id"]))
-    after = obs()
+    bridge.follow("cheat", "card", "STRIKE_DEFECT")
+    bridge.follow("cheat", "energy", "99")
+    after = bridge.follow(
+        "play", "STRIKE_DEFECT", "--target", str(target["id"]))
     assert after["you"]["facing"] == target["side"], after["you"]
     after_behind = [e for e in after["enemies"] if e["isBehind"]]
     assert len(after_behind) == 1 and after_behind[0]["side"] != target["side"], after
