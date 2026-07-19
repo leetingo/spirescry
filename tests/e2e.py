@@ -126,6 +126,17 @@ def reject(args, code):
     return err
 
 
+def followed_http_obs(status, result, description):
+    """Validate a raw /step follow response before consuming its snapshot."""
+    assert status == 200 and result.get("ok") is True, \
+        f"{description}: {status} {result}"
+    assert result.get("settled") is True, \
+        f"{description} did not settle: {result.get('outcome')}"
+    snapshot = result.get("obs")
+    assert isinstance(snapshot, dict), f"{description} returned no observation"
+    return snapshot
+
+
 def host_log():
     assert LOG_PATH, "boot-only case ran without --boot"
     with open(LOG_PATH, encoding="utf-8", errors="replace") as f:
@@ -853,9 +864,7 @@ def s2():
             "action": "cheat", "args": {"name": "potion", "id": model},
             "follow": 5000,
         })
-        assert status == 200 and result.get("ok") is True, \
-            f"could not procure {model}: {status} {result}"
-        return result["obs"]
+        return followed_http_obs(status, result, f"could not procure {model}")
 
     procured = cheat_potion("FOUL_POTION")
     foul = next(p for p in procured["player"]["potions"]
@@ -869,9 +878,8 @@ def s2():
         "action": "potion-use", "args": {"slot": foul["slot"]},
         "follow": 5000,
     })
-    assert status == 200 and result.get("ok") is True, \
-        f"Foul Potion merchant redemption failed: {status} {result}"
-    d = result["obs"]
+    d = followed_http_obs(
+        status, result, "Foul Potion merchant redemption")
     gained = d["gold"] - gold_before
     assert gained > 0, f"Foul Potion awarded no gold: {gold_before} -> {d['gold']}"
     assert f"[blue]{gained}[/blue]" in foul["description"], \
@@ -1038,8 +1046,8 @@ def w5():
         "action": "pick-reward", "args": {"idx": reward_idx},
         "follow": 5000,
     })
-    assert status == 200 and result.get("ok") is True, result
-    belt_after_first = result["obs"]["player"]["potions"]
+    claimed = followed_http_obs(status, result, "potion reward claim")
+    belt_after_first = claimed["player"]["potions"]
     added = [p for p in belt_after_first if p["slot"] not in belt_before]
     assert len(added) == 1, \
         f"potion reward changed the belt by {len(added)} slots: {belt_before} -> {belt_after_first}"
@@ -1508,9 +1516,7 @@ def c9():
         "args": {"model": "STRIKE_IRONCLAD+", "target": target},
         "follow": 5000,
     })
-    assert status == 200 and result.get("ok") is True, \
-        f"could not select upgraded copy: {status} {result}"
-    d = result["obs"]
+    d = followed_http_obs(status, result, "upgraded card play")
     assert copies(d, True) == upgraded_before - 1, "upgraded copy stayed in hand"
     assert copies(d, False) == base_before, "MODEL+ played an unupgraded copy"
 
@@ -1519,8 +1525,7 @@ def c9():
         "args": {"model": "STRIKE_IRONCLAD", "target": target},
         "follow": 5000,
     })
-    assert status == 200 and result.get("ok") is True, result
-    d = result["obs"]
+    d = followed_http_obs(status, result, "base card play")
     assert copies(d, False) == base_before - 1, "base MODEL did not play a base copy"
     assert copies(d, True) == upgraded_before - 1, "base MODEL played an upgraded copy"
     to_menu()
@@ -1753,8 +1758,8 @@ def i2():
     to_map(seed="CIEVENTTIPS")
     run("cheat", PHASE.EVENT, "DOLL_ROOM")
     bridge.wait_phase(PHASE.EVENT)
-    run("option", "1")
-    d = bridge.wait_phase(PHASE.EVENT)
+    d = bridge.follow("option", "1")
+    assert d.get("phase") == PHASE.EVENT, d
     assert len(d["options"]) == 2, d["options"]
     for option in d["options"]:
         hints = option.get("hints")
@@ -1780,8 +1785,8 @@ def i4():
     to_map(seed="CIEVENTTEXT")
     run("cheat", PHASE.EVENT, "JUNGLE_MAZE_ADVENTURE")
     bridge.wait_phase(PHASE.EVENT)
-    run("option", "0")
-    d = bridge.wait_phase(PHASE.EVENT)
+    d = bridge.follow("option", "0")
+    assert d.get("phase") == PHASE.EVENT, d
     assert "{IsMultiplayer:" not in d["description"], d["description"]
     to_menu()
 
