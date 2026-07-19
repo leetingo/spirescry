@@ -62,7 +62,8 @@ if command -v shasum >/dev/null 2>&1; then HASH_CMD="shasum -a 256"; else HASH_C
 content_stamp() {
     {
         git ls-files -co -z --exclude-standard -- \
-            src headless cli/src cli/Cargo.toml cli/Cargo.lock mods build.sh \
+            src headless cli/src cli/build.rs cli/Cargo.toml cli/Cargo.lock \
+            protocol.json mods build.sh \
             | LC_ALL=C sort -z | xargs -0 $HASH_CMD
         for dll in lib/*.dll; do
             if [ -f "$dll" ]; then $HASH_CMD "$dll"; fi

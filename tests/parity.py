@@ -63,7 +63,7 @@ def confirm_if_selecting():
     # itself once max cards are picked. Both are legal under the protocol:
     # after pick-card, re-read and confirm only if still selecting.
     time.sleep(1)
-    if phase() == "card_select":
+    if phase() == bridge.PHASE.CARD_SELECT:
         run("confirm")
 
 
@@ -86,7 +86,7 @@ def exercise_bundle_pilot():
                   f"{[option.get('title') for option in offer.get('options', [])]}")
 
     run("option", str(pack["idx"]))
-    wait_phase("bundle_select")
+    wait_phase(bridge.PHASE.BUNDLE_SELECT)
     bundle = obs()
     assert bundle.get("bundles") and bundle["bundles"][0].get("cards"), bundle
     run("pick-card", "0")
@@ -95,11 +95,11 @@ def exercise_bundle_pilot():
     # headless stand-in owns completion directly and leaves this phase on
     # pick. Both paths are the same decision-surface protocol.
     time.sleep(1)
-    if phase() == "bundle_select":
+    if phase() == bridge.PHASE.BUNDLE_SELECT:
         run("confirm")
-    wait_phase("event", "map")
+    wait_phase(bridge.PHASE.EVENT, bridge.PHASE.MAP)
     run("abandon")
-    wait_phase("main_menu")
+    wait_phase(bridge.PHASE.MAIN_MENU)
 
 
 
@@ -117,12 +117,12 @@ def drive(seed=None):
 
     step("neow: proceed past")
     run("proceed")
-    wait_phase("map")
+    wait_phase(bridge.PHASE.MAP)
 
     step("map-move to first monster")
     node = next(p for p in obs()["next"] if p["type"] == "monster")
     run("map-move", str(node["col"]), str(node["row"]))
-    wait_phase("combat")
+    wait_phase(bridge.PHASE.COMBAT)
 
     step("combat: intents")
     en = obs()["enemies"][0]
@@ -135,17 +135,17 @@ def drive(seed=None):
 
     step("combat: kill")
     bridge.kill_current_combat(on_obs=record)
-    wait_phase("rewards")
+    wait_phase(bridge.PHASE.REWARDS)
 
     step("rewards: claim all (re-read between picks; GUI reflows idx)")
     for _ in range(8):
         d = obs()
-        if d["phase"] == "card_reward":
+        if d["phase"] == bridge.PHASE.CARD_REWARD:
             print("    card offer:", [c["model"] for c in d["cards"]])
             run("pick-card", "0")
             time.sleep(1.5)
             continue
-        rewards = d.get("rewards", [])
+        rewards = d.get(bridge.PHASE.REWARDS, [])
         if not rewards:
             break
         pre = d["rev"]
@@ -156,18 +156,18 @@ def drive(seed=None):
         d = obs()
         assert d["rev"] > pre, f"rev stuck at {pre} after pick-reward"
         time.sleep(1.5)
-    wait_phase("rewards")
+    wait_phase(bridge.PHASE.REWARDS)
     run("proceed")
-    wait_phase("map")
+    wait_phase(bridge.PHASE.MAP)
 
     step("rest site: smith upgrade")
     rest = next(p for p in obs()["graph"] if p["type"] == "restsite")
     run("cheat", "goto", str(rest["col"]), str(rest["row"]))
-    wait_phase("rest_site")
+    wait_phase(bridge.PHASE.REST_SITE)
     opts = obs()["options"]
     smith = next(o for o in opts if o["id"] == "SMITH")
     run("option", str(smith["idx"]))
-    wait_phase("card_select")
+    wait_phase(bridge.PHASE.CARD_SELECT)
     d = obs()
     print(f"    picker: min={d['min']} max={d['max']} cards={len(d['cards'])}")
     preview = next((c for c in d["cards"] if c["upgradedPreview"] is not None), None)
@@ -177,18 +177,18 @@ def drive(seed=None):
     assert "upgradedPlayCost" in preview and "upgradedStarCost" in preview, preview
     run("pick-card", "1")
     confirm_if_selecting()
-    wait_phase("rest_site")
+    wait_phase(bridge.PHASE.REST_SITE)
     run("proceed")
-    wait_phase("map")
+    wait_phase(bridge.PHASE.MAP)
 
     step("shop: card removal")
-    shop = next((p for p in obs()["graph"] if p["type"] == "shop"), None)
+    shop = next((p for p in obs()["graph"] if p["type"] == bridge.PHASE.SHOP), None)
     if shop is None:
         print("    no shop on this map — skipped")
     else:
         run("cheat", "gold", "1000")
         run("cheat", "goto", str(shop["col"]), str(shop["row"]))
-        wait_phase("shop")
+        wait_phase(bridge.PHASE.SHOP)
         inventory = obs()
         for kind in ("cards", "colorless", "relics", "potions"):
             for entry in inventory[kind]:
@@ -200,10 +200,10 @@ def drive(seed=None):
         if removal is not None:
             assert removal["cost"] == removal["price"], removal
         run("buy", "card_removal", "--idx", "0")
-        wait_phase("card_select")
+        wait_phase(bridge.PHASE.CARD_SELECT)
         run("pick-card", "0")
         confirm_if_selecting()
-        wait_phase("shop")
+        wait_phase(bridge.PHASE.SHOP)
         gold = obs()["gold"]
         assert gold == 925, f"expected 925 gold after removal, got {gold}"
 
@@ -225,15 +225,15 @@ def drive(seed=None):
                 "potion-discard did not clear the slot"
 
         run("leave")
-        wait_phase("map")
+        wait_phase(bridge.PHASE.MAP)
 
-    step("treasure")
-    tre = next((p for p in obs()["graph"] if p["type"] == "treasure"), None)
+    step(bridge.PHASE.TREASURE)
+    tre = next((p for p in obs()["graph"] if p["type"] == bridge.PHASE.TREASURE), None)
     if tre is None:
         print("    no treasure on this map — skipped")
     else:
         run("cheat", "goto", str(tre["col"]), str(tre["row"]))
-        wait_phase("treasure")
+        wait_phase(bridge.PHASE.TREASURE)
         d = obs()
         if not d["chestOpened"]:
             run("pick-relic", "0")
@@ -242,19 +242,19 @@ def drive(seed=None):
         if d["relics"]:
             run("pick-relic", "0")
         run("proceed")
-        wait_phase("map")
+        wait_phase(bridge.PHASE.MAP)
 
     step("boss → act transition")
     d = obs()
     boss = next(p for p in d["graph"] if p["type"] == "boss")
     run("cheat", "goto", str(boss["col"]), str(boss["row"]), allow_fail=True)
-    wait_phase("combat", timeout=30)
+    wait_phase(bridge.PHASE.COMBAT, timeout=30)
     bridge.kill_current_combat(on_obs=record)
-    wait_phase("rewards")
+    wait_phase(bridge.PHASE.REWARDS)
     run("proceed")
     for _ in range(60):
         d = obs()
-        if d["phase"] == "map" and d.get("act") == 1:
+        if d["phase"] == bridge.PHASE.MAP and d.get("act") == 1:
             break
         time.sleep(1)
     assert obs().get("act") == 1, "act transition did not reach act 1"
@@ -262,25 +262,25 @@ def drive(seed=None):
 
     step("defeat → game_over")
     run("abandon")
-    wait_phase("main_menu")
+    wait_phase(bridge.PHASE.MAIN_MENU)
     time.sleep(3)
     bridge.launch_run(
         seed=seed, timeout=40, on_obs=record,
         on_retry=lambda: print("    launch didn't land, retrying"))
     run("proceed")
-    wait_phase("map")
+    wait_phase(bridge.PHASE.MAP)
     node = next(p for p in obs()["next"] if p["type"] == "monster")
     run("map-move", str(node["col"]), str(node["row"]))
-    wait_phase("combat")
+    wait_phase(bridge.PHASE.COMBAT)
     for _ in range(20):
         d = obs()
-        if d["phase"] == "game_over":
+        if d["phase"] == bridge.PHASE.GAME_OVER:
             break
-        if d["phase"] == "combat" and d.get("side") == "player":
+        if d["phase"] == bridge.PHASE.COMBAT and d.get("side") == "player":
             run("cheat", "hp", "1", allow_fail=True)
             run("end-turn", allow_fail=True)
         time.sleep(1.5)
-    wait_phase("game_over", timeout=30)
+    wait_phase(bridge.PHASE.GAME_OVER, timeout=30)
     d = obs()
     assert d.get("outcome") == "defeat", f"expected defeat, got {d.get('outcome')}"
     # Death position in act-local terms: a fresh run that died on the
@@ -298,7 +298,7 @@ def drive(seed=None):
 
     step("abandon → main menu")
     run("abandon")
-    wait_phase("main_menu")
+    wait_phase(bridge.PHASE.MAIN_MENU)
     print("PASS")
 
 
@@ -308,7 +308,7 @@ def compare(a_path, b_path):
     drift = []
     pilot_slots = {"top", "bundles[]", "bundles[].cards[]"}
     for path, recording in ((a_path, a), (b_path, b)):
-        pilot = recording.get("bundle_select")
+        pilot = recording.get(bridge.PHASE.BUNDLE_SELECT)
         if pilot is None:
             drift.append(f"{path}: missing required bundle_select pilot phase")
             continue

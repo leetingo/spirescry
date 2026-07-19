@@ -181,6 +181,10 @@ auto-confirm at max picks — `confirm` accepts a partial pick.
    acceptance while tracked queues/tasks are busy and includes resolution
    events plus a fresh decision `obs`; GUI-only callbacks must expose the
    same boundary for three consecutive frames.
+<!-- protocol:fault-event-tokens:start -->
+Fault-event prefixes: `engine_error:`, `async_fault:`, `engine_note:`.
+<!-- protocol:fault-event-tokens:end -->
+
 4. Inspect `outcome`: `settled` means tracked work is quiet (and the GUI
    boundary was stable for those frames), not proof that every opaque engine
    continuation has completed;
@@ -188,14 +192,14 @@ auto-confirm at max picks — `confirm` accepts a partial pick.
    needs one verb; `timeout` means the verb was accepted but has not
    resolved — do not fire another verb, rescry and inspect `health`.
    Then inspect `errors`: it lists engine exceptions logged between
-   acceptance and settlement (`engine_error:…` / `async_fault:…`). The
+   acceptance and settlement (the first two fault-event prefixes above). The
    engine logs-and-swallows faults inside its own task chains, so a verb
    whose effect **half-executed** still reads `settled` — non-empty
    `errors` (the CLI also warns on stderr) is an impossible observation:
    save `runlog` first, then follow that protocol before the next verb.
-   An `engine_note:…` entry in `events` is a classified-benign engine
-   line (e.g. the victory-cleanup stale pop) — informational, never
-   pollution.
+   An entry with the third fault-event prefix in `events` is a
+   classified-benign engine line (e.g. the victory-cleanup stale pop) —
+   informational, never pollution.
 5. Repeat 2–4 until `game_over`; report outcome, where it ended
    (`actNumber` / `actFloor` / `encounter.title`), and the seed, then
    `abandon` to return to the menu.
@@ -310,6 +314,7 @@ potions, relics, deck — enchanted/afflicted cards are distinct). The table
 is orientation only; fire a verb only when the current `legal` array names
 it.
 
+<!-- protocol:phases:start -->
 | phase | you see | verbs |
 |---|---|---|
 | `main_menu` | — | `new-run <CHARACTER>` (bad names are rejected with the valid list) |
@@ -327,7 +332,12 @@ it.
 | `bundle_select` | card packs (e.g. Neow) | `pick-card <idx>`; GUI may then expose `confirm` |
 | `crystal_sphere` | divination minigame | `map-move <col> <row>` picks a cell, `option 0`/`1` picks the tool, `proceed` leaves |
 | `game_over` | `outcome`, `seed`, where the run ended: `actNumber`/`actFloor` (1-based), `mapCoord`, `encounter` (model + title). Legacy pair: `act` is the zero-based act index, `floor` the run-cumulative floor — prefer the 1-based fields in reports. | `abandon` → main menu |
-| any (in a run) | — | `potion-discard <slot>`, `abandon` |
+| `overlay` | overlay type name | No action; rescry or inspect `health` if it persists. |
+| `unknown` | unmapped phase diagnostics | No action; inspect `health` and logs. |
+<!-- protocol:phases:end -->
+
+Across any phase in a live run, `potion-discard <slot>` and `abandon` remain
+available when named by `legal`.
 
 ## Reading combat
 

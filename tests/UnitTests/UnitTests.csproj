@@ -10,6 +10,7 @@
 
   <ItemGroup>
     <Compile Include="../../src/ProtocolVocabulary.cs" Link="ProtocolVocabulary.cs" />
+    <Compile Include="../../src/ProtocolCapabilities.cs" Link="ProtocolCapabilities.cs" />
     <Compile Include="../../src/Reflect.cs" Link="Reflect.cs" />
     <Compile Include="../../src/RejectionCodes.cs" Link="RejectionCodes.cs" />
     <Compile Include="../../src/State/ResolutionGuards.cs" Link="ResolutionGuards.cs" />

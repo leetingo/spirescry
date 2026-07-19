@@ -41,7 +41,7 @@ public static class Handlers
             version = Mod.Version,
             buildHash = Mod.BuildHash,
             protocolVersion = Mod.ProtocolVersion,
-            capabilities = new { verbs = Dispatcher.Verbs, cheats = Dispatcher.Cheats },
+            capabilities = ProtocolCapabilities.Create(Dispatcher.Verbs),
             snapshot.phase,
             snapshot.rev,
             snapshot.runId,

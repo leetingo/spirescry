@@ -1,4 +1,6 @@
 using System.Reflection;
+using System.Text.Json;
+using System.Text.Json.Nodes;
 using Spirescry;
 using Spirescry.Host;
 using Spirescry.State;
@@ -38,45 +40,49 @@ internal static class Tests
 {
     public static void ProtocolVocabularyExposesTheCompleteWireContract()
     {
-        var cheats = string.Join(';', ProtocolVocabulary.Cheats.All.Select(shape =>
-            $"{shape.Name}({string.Join(',', shape.Arguments.Select(argument =>
-                $"{argument.Name}:{argument.Type}{(argument.Optional ? "?" : "")}"))})"));
-        var actual = $"""
-            version={ProtocolVocabulary.ProtocolVersion}
-            rejections={string.Join(',', ProtocolVocabulary.Rejections.All)}
-            phases={string.Join(',', ProtocolVocabulary.Phases.All)}
-            faults={string.Join(',', ProtocolVocabulary.FaultEvents.All)}
-            cheats={cheats}
-            """;
+        var artifact = JsonNode.Parse(ProtocolVocabulary.CreateArtifactJson())!.AsObject();
 
-        Equal("""
-            version=2
-            rejections=bad_request,bad_phase,bad_index,bad_target,bad_state,not_ready,not_playable,not_enough_gold,not_enough_energy,not_enough_stars,run_exists,stale_state,external_change,resolution_partial,resolution_failed,not_found,internal
-            phases=main_menu,map,combat,event,shop,rest_site,treasure,rewards,card_reward,relic_reward,card_select,hand_select,bundle_select,crystal_sphere,game_over,overlay,unknown
-            faults=engine_error:,async_fault:,engine_note:
-            cheats=goto(col:Integer,row:Integer);gold(value:Integer);heal();hp(value:Integer);wound-enemies();event(id:String);combat(id:String);card(id:String,upgraded:Boolean?);card-upgraded(id:String);relic(id:String);potion(id:String);stars(value:Integer);energy(value:Integer);async-fault();engine-error();engine-error-delayed()
-            """, actual);
+        Equal(ProtocolVocabulary.ProtocolVersion,
+            artifact["protocolVersion"]!.GetValue<int>());
+        Equal(ProtocolVocabulary.Rejections.All.Count,
+            artifact["rejectionCodes"]!.AsArray().Count);
+        Equal(ProtocolVocabulary.Phases.All.Count,
+            artifact["phases"]!.AsArray().Count);
+        Equal(ProtocolVocabulary.FaultEvents.All.Count,
+            artifact["faultEventTokens"]!.AsObject().Count);
+        Equal(ProtocolVocabulary.Cheats.All.Count,
+            artifact["cheatArgumentShapes"]!.AsArray().Count);
     }
 
     public static void ProtocolVocabularyMapsEveryPhaseAndUnknownValues()
     {
-        var actual = string.Join(',', Enum.GetValues<Phase>()
-            .Select(ProtocolVocabulary.Phases.Name));
+        var mapped = Enum.GetValues<Phase>()
+            .Select(ProtocolVocabulary.Phases.Name).ToArray();
 
-        Equal("main_menu,map,combat,event,shop,rest_site,treasure,rewards,"
-            + "card_reward,relic_reward,card_select,hand_select,bundle_select,"
-            + "crystal_sphere,game_over,overlay,unknown,unknown",
-            $"{actual},{ProtocolVocabulary.Phases.Name((Phase)999)}");
+        True(mapped.SequenceEqual(ProtocolVocabulary.Phases.All));
+        Equal(ProtocolVocabulary.Phases.Unknown,
+            ProtocolVocabulary.Phases.Name((Phase)999));
+    }
+
+    public static void HealthCapabilitiesAdvertiseCheatArgumentShapes()
+    {
+        var capabilities = JsonSerializer.SerializeToNode(
+            ProtocolCapabilities.Create([]))!.AsObject();
+        var names = capabilities["cheats"]!.AsArray()
+            .Select(item => item!.GetValue<string>());
+        var shapes = capabilities["cheatArgumentShapes"]!.AsArray();
+        var artifactShapes = JsonNode.Parse(
+            ProtocolVocabulary.CreateArtifactJson())!["cheatArgumentShapes"];
+
+        Equal(string.Join(',', ProtocolVocabulary.Cheats.All.Select(shape => shape.Name)),
+            string.Join(',', names));
+        True(JsonNode.DeepEquals(artifactShapes, shapes));
     }
 
     public static void RejectionCodesExposeTheCompleteDispatcherGrammar()
     {
-        Equal("bad_request", RejectionCodes.BadRequest);
-        Equal("bad_request,bad_phase,bad_index,bad_target,bad_state,not_ready,not_playable,"
-            + "not_enough_gold,not_enough_energy,not_enough_stars,run_exists,"
-            + "stale_state,external_change,resolution_partial,resolution_failed,"
-            + "not_found,internal",
-            string.Join(',', RejectionCodes.All));
+        Equal(ProtocolVocabulary.Rejections.BadRequest, RejectionCodes.BadRequest);
+        True(RejectionCodes.All.SequenceEqual(ProtocolVocabulary.Rejections.All));
     }
 
     public static void FieldValueFindsPrivateFieldsDeclaredOnBaseTypes()

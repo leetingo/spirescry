@@ -10,8 +10,14 @@ import subprocess
 import sys
 import time
 
+import protocol
+
 # CI points this at the freshly built binary; default is the deployed one.
 BIN = os.environ.get("SPIRESCRY_BIN", "spirescry")
+PROTOCOL = protocol.DOCUMENT
+PHASE = protocol.PHASE
+REJECTION = protocol.REJECTION
+FAULT_EVENT = protocol.FAULT_EVENT
 
 
 def cli(*args, timeout=30):
@@ -95,7 +101,7 @@ def launch_run(character="IRONCLAD", seed=None, *, timeout=30,
     for attempt in range(3):
         run(*args, allow_fail=allow_first_failure or attempt > 0)
         started = wait_phase(
-            "event", timeout=timeout, raise_on_timeout=False, on_obs=on_obs)
+            PHASE.EVENT, timeout=timeout, raise_on_timeout=False, on_obs=on_obs)
         if started is not None:
             return started
         if attempt < 2 and on_retry:
@@ -114,14 +120,14 @@ def kill_current_combat(*, on_obs=None):
     used_potion = False
     for _ in range(30):
         d = observe()
-        if d["phase"] in ("hand_select", "card_select"):
+        if d["phase"] in (PHASE.HAND_SELECT, PHASE.CARD_SELECT):
             run("pick-card", "0", allow_fail=True)
             time.sleep(1)
-            if observe()["phase"] in ("hand_select", "card_select"):
+            if observe()["phase"] in (PHASE.HAND_SELECT, PHASE.CARD_SELECT):
                 run("confirm", allow_fail=True)
                 time.sleep(1)
             continue
-        if d["phase"] != "combat":
+        if d["phase"] != PHASE.COMBAT:
             return
         if d.get("side") != "player":
             time.sleep(1.5)
@@ -139,9 +145,9 @@ def kill_current_combat(*, on_obs=None):
         run("cheat", "heal", allow_fail=True)
         run("cheat", "wound-enemies", allow_fail=True)
         d = observe()
-        if d["phase"] in ("hand_select", "card_select"):
+        if d["phase"] in (PHASE.HAND_SELECT, PHASE.CARD_SELECT):
             continue
-        if d["phase"] != "combat":
+        if d["phase"] != PHASE.COMBAT:
             return
         alive = [e for e in d["enemies"] if e["alive"]]
         if not alive:
@@ -167,31 +173,31 @@ def resolve_transient_phase(d, *, claim_reward_tiles=False,
                             claim_relic_reward=False):
     """Advance one non-event transient phase; return an error if rejected."""
     phase = d.get("phase")
-    if phase in ("card_select", "hand_select"):
+    if phase in (PHASE.CARD_SELECT, PHASE.HAND_SELECT):
         need = max(1, d.get("min", 1))
         for card in d.get("cards", [])[:need]:
             picked = run("pick-card", str(card["idx"]), allow_fail=True)
             if "_err" in picked:
                 return f"pick:{picked['_err'][:60]}"
-            if obs().get("phase") not in ("card_select", "hand_select"):
+            if obs().get("phase") not in (PHASE.CARD_SELECT, PHASE.HAND_SELECT):
                 break
-        if obs().get("phase") in ("card_select", "hand_select"):
+        if obs().get("phase") in (PHASE.CARD_SELECT, PHASE.HAND_SELECT):
             confirmed = run("confirm", allow_fail=True)
             if "_err" in confirmed:
                 return f"confirm:{confirmed['_err'][:60]}"
-    elif phase == "bundle_select":
+    elif phase == PHASE.BUNDLE_SELECT:
         run("pick-card", "0", allow_fail=True)
-    elif phase == "combat":
+    elif phase == PHASE.COMBAT:
         kill_current_combat()
-    elif phase == "rewards" and claim_reward_tiles and d.get("rewards"):
+    elif phase == PHASE.REWARDS and claim_reward_tiles and d.get("rewards"):
         run("pick-reward", str(d["rewards"][0]["idx"]), allow_fail=True)
-    elif phase == "card_reward" and claim_card_reward and d.get("cards"):
+    elif phase == PHASE.CARD_REWARD and claim_card_reward and d.get("cards"):
         run("pick-card", str(d["cards"][0]["idx"]), allow_fail=True)
-    elif phase == "relic_reward" and claim_relic_reward and d.get("relics"):
+    elif phase == PHASE.RELIC_REWARD and claim_relic_reward and d.get("relics"):
         run("pick-relic", str(d["relics"][0]["idx"]), allow_fail=True)
-    elif phase in ("card_reward", "relic_reward"):
+    elif phase in (PHASE.CARD_REWARD, PHASE.RELIC_REWARD):
         run("skip", allow_fail=True)
-    elif phase == "shop":
+    elif phase == PHASE.SHOP:
         run("leave", allow_fail=True)
     else:
         run("proceed", allow_fail=True)

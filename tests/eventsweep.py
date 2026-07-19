@@ -21,34 +21,34 @@ def fresh_run(seed=None):
         seed=seed, timeout=30, allow_first_failure=True)
     run("proceed", allow_fail=True)
     if bridge.wait_phase(
-            "map", timeout=20, raise_on_timeout=False) is None:
+            bridge.PHASE.MAP, timeout=20, raise_on_timeout=False) is None:
         sys.exit("could not reach map for a fresh run")
     run("cheat", "gold", "500", allow_fail=True)
 
 def ensure_map():
     d = obs()
-    if d["phase"] == "map":
+    if d["phase"] == bridge.PHASE.MAP:
         return
     # try the generic exits first, else nuke
     for _ in range(4):
         ph = obs()["phase"]
-        if ph == "map":
+        if ph == bridge.PHASE.MAP:
             return
-        if ph in ("event", "rest_site", "treasure", "rewards"):
+        if ph in (bridge.PHASE.EVENT, bridge.PHASE.REST_SITE, bridge.PHASE.TREASURE, bridge.PHASE.REWARDS):
             run("proceed", allow_fail=True)
-        elif ph == "shop":
+        elif ph == bridge.PHASE.SHOP:
             run("leave", allow_fail=True)
-        elif ph in ("card_select", "bundle_select"):
+        elif ph in (bridge.PHASE.CARD_SELECT, bridge.PHASE.BUNDLE_SELECT):
             run("pick-card", "0", allow_fail=True)
             run("skip", allow_fail=True)
-        elif ph == "crystal_sphere":
+        elif ph == bridge.PHASE.CRYSTAL_SPHERE:
             run("proceed", allow_fail=True)
-        elif ph in ("combat", "hand_select", "card_reward", "relic_reward"):
+        elif ph in (bridge.PHASE.COMBAT, bridge.PHASE.HAND_SELECT, bridge.PHASE.CARD_REWARD, bridge.PHASE.RELIC_REWARD):
             break  # fresh run below
         else:
             break
         time.sleep(0.5)
-    if obs()["phase"] != "map":
+    if obs()["phase"] != bridge.PHASE.MAP:
         fresh_run()
 
 def drain(max_steps=30):
@@ -57,9 +57,9 @@ def drain(max_steps=30):
     for _ in range(max_steps):
         d = obs()
         ph = d.get("phase")
-        if ph in ("map", "main_menu", "game_over"):
+        if ph in (bridge.PHASE.MAP, bridge.PHASE.MAIN_MENU, bridge.PHASE.GAME_OVER):
             return ph
-        if ph == "event":
+        if ph == bridge.PHASE.EVENT:
             opts = [o for o in d.get("options", [])
                     if not o.get("locked") and not o.get("chosen")]
             if opts:
@@ -79,7 +79,7 @@ def settle_to_event_or_exit(max_steps=30):
     for _ in range(max_steps):
         d = obs()
         ph = d.get("phase")
-        if ph in ("event", "map", "main_menu", "game_over"):
+        if ph in (bridge.PHASE.EVENT, bridge.PHASE.MAP, bridge.PHASE.MAIN_MENU, bridge.PHASE.GAME_OVER):
             return d
         error = bridge.resolve_transient_phase(d)
         if error:
@@ -91,11 +91,11 @@ def settle_to_event_or_exit(max_steps=30):
 def force(ev):
     """Force one event from a settled map; return its snapshot or None."""
     ensure_map()
-    if "_err" in run("cheat", "event", ev, allow_fail=True):
+    if "_err" in run("cheat", bridge.PHASE.EVENT, ev, allow_fail=True):
         return None
     d = obs()
     for _ in range(10):  # engine boots mount the room over a few frames
-        if d.get("phase") != "map":
+        if d.get("phase") != bridge.PHASE.MAP:
             break
         time.sleep(0.5)
         d = obs()
@@ -112,7 +112,7 @@ def replay_event_path(ev, path):
     if d is None:
         return None, "REFORCE-FAIL"
     for idx in path:
-        if d.get("phase") != "event":
+        if d.get("phase") != bridge.PHASE.EVENT:
             return None, f"path {path} left event at {d.get('phase')}"
         opts = d.get("options", [])
         if idx >= len(opts) or opts[idx].get("locked"):
@@ -148,7 +148,7 @@ def explore_all_event_options(ev):
         page, err = replay_event_path(ev, path)
         if err:
             return outcomes, clicked, locked, err
-        if page.get("phase") != "event":
+        if page.get("phase") != bridge.PHASE.EVENT:
             return outcomes, clicked, locked, f"path {path} ended at {page.get('phase')}"
         signature = page_signature(page)
         if signature in seen_pages:
@@ -171,7 +171,7 @@ def explore_all_event_options(ev):
             time.sleep(0.4)
             clicked += 1
             after = settle_to_event_or_exit()
-            if after.get("phase") == "event":
+            if after.get("phase") == bridge.PHASE.EVENT:
                 if page_signature(after) not in seen_pages:
                     queue.append(path + (idx,))
                 landed = drain()
@@ -188,14 +188,14 @@ def sweep(all_options=False):
     tests/e2e.py runs this as its event-coverage case."""
     # event list from the cheat's known-list error (needs map phase)
     fresh_run()
-    err = run("cheat", "event", "__LIST__", allow_fail=True).get("_err", "")
+    err = run("cheat", bridge.PHASE.EVENT, "__LIST__", allow_fail=True).get("_err", "")
     ids = sorted(set(err.split("known: ", 1)[1].rstrip(")").split(","))) if "known: " in err else []
     if not ids:
         sys.exit(f"could not enumerate events: {err[:200]}")
     print(f"{len(ids)} events to sweep"
           + (" (every option, drained)" if all_options else ""))
 
-    special_ok = {"bundle_select", "crystal_sphere", "card_select", "shop", "combat", "treasure", "rest_site"}
+    special_ok = {bridge.PHASE.BUNDLE_SELECT, bridge.PHASE.CRYSTAL_SPHERE, bridge.PHASE.CARD_SELECT, bridge.PHASE.SHOP, bridge.PHASE.COMBAT, bridge.PHASE.TREASURE, bridge.PHASE.REST_SITE}
     results = {}
     options_clicked = locked_skipped = 0
     for i, ev in enumerate(ids):
@@ -207,7 +207,7 @@ def sweep(all_options=False):
         if ph in special_ok:
             results[ev] = f"special:{ph}"
             continue
-        if ph != "event":
+        if ph != bridge.PHASE.EVENT:
             results[ev] = f"UNEXPECTED phase={ph} overlay={d.get('overlay')}"
             continue
         opts = d.get("options", [])
@@ -234,7 +234,7 @@ def sweep(all_options=False):
         outcomes = []
         for idx in take:
             d = obs() if idx == take[0] else force(ev)
-            if d is None or d.get("phase") != "event":
+            if d is None or d.get("phase") != bridge.PHASE.EVENT:
                 outcomes.append(f"{idx}:REFORCE-FAIL")
                 continue
             opts_now = d.get("options", [])

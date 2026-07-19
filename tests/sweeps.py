@@ -46,7 +46,7 @@ def fresh_run(seed="SWEEP", character="IRONCLAD"):
         character=character, seed=seed, timeout=30,
         allow_first_failure=True)
     run("proceed", allow_fail=True)
-    bridge.wait_phase("map", timeout=20)
+    bridge.wait_phase(bridge.PHASE.MAP, timeout=20)
 
 
 def settle_to_map(max_steps=40):
@@ -55,29 +55,29 @@ def settle_to_map(max_steps=40):
     for _ in range(max_steps):
         d = obs()
         ph = d["phase"]
-        if ph == "map":
+        if ph == bridge.PHASE.MAP:
             return
-        if ph == "main_menu" or ph == "game_over":
+        if ph == bridge.PHASE.MAIN_MENU or ph == bridge.PHASE.GAME_OVER:
             fresh_run()
             return
-        if ph == "rewards":
+        if ph == bridge.PHASE.REWARDS:
             tiles = d.get("rewards", [])
             if tiles:
                 run("pick-reward", str(tiles[0]["idx"]), allow_fail=True)
             else:
                 run("proceed", allow_fail=True)
-        elif ph == "card_reward":
+        elif ph == bridge.PHASE.CARD_REWARD:
             run("skip", allow_fail=True)
-        elif ph in ("card_select", "hand_select", "bundle_select"):
+        elif ph in (bridge.PHASE.CARD_SELECT, bridge.PHASE.HAND_SELECT, bridge.PHASE.BUNDLE_SELECT):
             resolve_pickers()
-        elif ph == "event":
+        elif ph == bridge.PHASE.EVENT:
             opts = [x for x in d.get("options", [])
                     if not x.get("locked") and not x.get("chosen")]
             if opts:
                 run("option", str(opts[0]["idx"]), allow_fail=True)
             else:
                 run("proceed", allow_fail=True)
-        elif ph == "combat":
+        elif ph == bridge.PHASE.COMBAT:
             bridge.kill_current_combat()
         else:
             run("proceed", allow_fail=True)
@@ -92,8 +92,8 @@ def wedge_events(since):
 
 def enter_sandbag():
     settle_to_map()
-    run("cheat", "combat", SANDBAG)
-    d = bridge.wait_phase("combat", timeout=20)
+    run("cheat", bridge.PHASE.COMBAT, SANDBAG)
+    d = bridge.wait_phase(bridge.PHASE.COMBAT, timeout=20)
     for _ in range(10):
         if d.get("side") == "player":
             break
@@ -108,10 +108,10 @@ def resolve_pickers(deadline_s=8):
     while time.monotonic() < end:
         d = obs()
         ph = d["phase"]
-        if ph == "bundle_select":
+        if ph == bridge.PHASE.BUNDLE_SELECT:
             run("pick-card", "0", allow_fail=True)
             time.sleep(0.5)
-        elif ph in ("card_select", "hand_select"):
+        elif ph in (bridge.PHASE.CARD_SELECT, bridge.PHASE.HAND_SELECT):
             # Exercise the effect, not its cancel path. Multi-card picks
             # (ASTROLABE transforms three) need distinct candidates until
             # min is satisfied; max-selection auto-confirms in headless.
@@ -120,33 +120,33 @@ def resolve_pickers(deadline_s=8):
                 picked = run("pick-card", str(card["idx"]), allow_fail=True)
                 if "_err" in picked:
                     raise AssertionError(f"picker rejected card {card['idx']}: {picked['_err'][:100]}")
-                if obs()["phase"] not in ("card_select", "hand_select"):
+                if obs()["phase"] not in (bridge.PHASE.CARD_SELECT, bridge.PHASE.HAND_SELECT):
                     break
             time.sleep(0.5)
-            if obs()["phase"] in ("card_select", "hand_select"):
+            if obs()["phase"] in (bridge.PHASE.CARD_SELECT, bridge.PHASE.HAND_SELECT):
                 confirmed = run("confirm", allow_fail=True)
                 if "_err" in confirmed:
                     run("skip", allow_fail=True)
                     raise AssertionError(f"picker confirm failed: {confirmed['_err'][:100]}")
                 time.sleep(0.5)
-        elif ph == "crystal_sphere":
+        elif ph == bridge.PHASE.CRYSTAL_SPHERE:
             run("proceed", allow_fail=True)
             time.sleep(0.5)
-        elif ph == "rewards":
+        elif ph == bridge.PHASE.REWARDS:
             rewards = d.get("rewards", [])
             if rewards:
                 run("pick-reward", str(rewards[0]["idx"]), allow_fail=True)
             else:
                 run("proceed", allow_fail=True)
             time.sleep(0.5)
-        elif ph == "card_reward":
+        elif ph == bridge.PHASE.CARD_REWARD:
             cards = d.get("cards", [])
             if cards:
                 run("pick-card", str(cards[0]["idx"]), allow_fail=True)
             else:
                 run("skip", allow_fail=True)
             time.sleep(0.5)
-        elif ph == "relic_reward":
+        elif ph == bridge.PHASE.RELIC_REWARD:
             relics = d.get("relics", [])
             if relics:
                 run("pick-relic", str(relics[0]["idx"]), allow_fail=True)
@@ -171,11 +171,11 @@ def encounters(log=print):
         try:
             settle_to_map()
             rev = obs()["rev"]
-            r = run("cheat", "combat", enc, allow_fail=True)
+            r = run("cheat", bridge.PHASE.COMBAT, enc, allow_fail=True)
             if "_err" in r:
                 failures[enc] = f"force: {r['_err'][:90]}"
                 continue
-            d = bridge.wait_phase("combat", timeout=20)
+            d = bridge.wait_phase(bridge.PHASE.COMBAT, timeout=20)
             for _ in range(10):
                 if d.get("side") == "player" and d.get("enemies"):
                     break
@@ -230,7 +230,7 @@ def cards(log=print, only=None):
                 fresh_run(character=active_character)
                 d = enter_sandbag()
                 plays_in_fight = 0
-            elif obs()["phase"] != "combat" or plays_in_fight >= 25:
+            elif obs()["phase"] != bridge.PHASE.COMBAT or plays_in_fight >= 25:
                 # bound power/deck pollution; also recovers ended fights
                 fresh_run(character=active_character)
                 d = enter_sandbag()
@@ -246,7 +246,7 @@ def cards(log=print, only=None):
                 run("cheat", "energy", "99", allow_fail=True)
                 run("cheat", "stars", "99", allow_fail=True)
                 d = obs()
-                if d["phase"] != "combat":
+                if d["phase"] != bridge.PHASE.COMBAT:
                     fresh_run(character=active_character)
                     d = enter_sandbag()
             r = run("cheat", "card", card, allow_fail=True)
@@ -302,7 +302,7 @@ def cards(log=print, only=None):
                 fresh_run(character=active_character)
                 d = enter_sandbag()
                 plays_in_fight = 0
-            elif ph != "combat":
+            elif ph != bridge.PHASE.COMBAT:
                 # the play legitimately ended the fight (kill, escape…)
                 settle_to_map()
                 d = enter_sandbag()
@@ -351,7 +351,7 @@ def potions(log=print):
     used_in_fight = 0
     for i, pot in enumerate(ids):
         try:
-            if obs()["phase"] != "combat" or used_in_fight >= 20:
+            if obs()["phase"] != bridge.PHASE.COMBAT or used_in_fight >= 20:
                 fresh_run()
                 enter_sandbag()
                 used_in_fight = 0
@@ -392,7 +392,7 @@ def potions(log=print):
                 used_in_fight = 0
                 continue
             d = obs()
-            if d.get("phase") == "combat" and any(
+            if d.get("phase") == bridge.PHASE.COMBAT and any(
                     p["slot"] == slot["slot"] and p["model"] == pot
                     for p in d.get("potions", [])):
                 failures[pot] = "drink did not clear the slot"
@@ -431,7 +431,7 @@ def relics(log=print):
             phase = resolve_pickers()
         except AssertionError as e:
             return f"obtain picker: {str(e)[:90]}"
-        if phase != "map":
+        if phase != bridge.PHASE.MAP:
             return f"obtain hook settled at {phase}, expected map"
         if relic not in obs()["player"]["relics"]:
             return "obtain completed but relic is absent from inventory"

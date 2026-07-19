@@ -67,6 +67,13 @@ HOST_DLL = os.path.join(REPO, "headless", "Host", "bin", "Release", "spirescry_h
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import bridge  # noqa: E402
+from protocol import (  # noqa: E402
+    CHEAT_ARGUMENT_SHAPES,
+    FAULT_EVENT_TOKENS,
+    PHASE,
+    PROTOCOL_VERSION,
+    REJECTION,
+)
 
 run, obs = bridge.run, bridge.obs
 
@@ -117,7 +124,7 @@ def host_log():
 
 def to_menu():
     bridge.run("abandon", allow_fail=True)
-    bridge.wait_phase("main_menu", timeout=15)
+    bridge.wait_phase(PHASE.MAIN_MENU, timeout=15)
 
 
 def launch(character="IRONCLAD", seed=None):
@@ -127,7 +134,7 @@ def launch(character="IRONCLAD", seed=None):
 
 def character_roster():
     to_menu()
-    err = reject(["new-run", "NOT_A_CHARACTER"], "bad_request")
+    err = reject(["new-run", "NOT_A_CHARACTER"], REJECTION.BAD_REQUEST)
     names = [n for n in re.findall(r"[A-Z][A-Z_]{3,}", err)
              if n != "NOT_A_CHARACTER"]
     assert "IRONCLAD" in names, f"roster not in the rejection: {err}"
@@ -145,11 +152,11 @@ def settle_to_map(max_steps=40):
     for _ in range(max_steps):
         d = obs()
         phase = d.get("phase")
-        if phase == "map":
+        if phase == PHASE.MAP:
             return d
-        if phase in ("main_menu", "game_over"):
+        if phase in (PHASE.MAIN_MENU, PHASE.GAME_OVER):
             raise AssertionError(f"run ended while settling to map: {phase}")
-        if phase == "event":
+        if phase == PHASE.EVENT:
             options = [option for option in d.get("options", [])
                        if not option.get("locked") and not option.get("chosen")]
             if options:
@@ -168,14 +175,14 @@ def settle_to_map(max_steps=40):
 def to_map(seed=None, character="IRONCLAD"):
     launch(character=character, seed=seed)
     run("proceed")
-    return bridge.wait_phase("map")
+    return bridge.wait_phase(PHASE.MAP)
 
 
 def into_combat(seed=None, character="IRONCLAD"):
     d = to_map(seed=seed, character=character)
     node = next(p for p in d["next"] if p["type"] == "monster")
     run("map-move", str(node["col"]), str(node["row"]))
-    d = bridge.wait_phase("combat")
+    d = bridge.wait_phase(PHASE.COMBAT)
     for _ in range(10):  # intents/side settle over a tick or two
         if d.get("side") == "player":
             return d
@@ -201,7 +208,8 @@ def b1():
     caps = d["capabilities"]
     assert "end-turn" in caps["verbs"], caps
     assert "relic" in caps["cheats"], caps
-    assert d["protocolVersion"] == 2, d["protocolVersion"]
+    assert caps["cheatArgumentShapes"] == list(CHEAT_ARGUMENT_SHAPES), caps
+    assert d["protocolVersion"] == PROTOCOL_VERSION, d["protocolVersion"]
     build_hash = d["buildHash"]
     assert (build_hash == "unknown" or
             re.fullmatch(r"[0-9a-f]{7,12}(?:-dirty)?", build_hash)), build_hash
@@ -288,7 +296,7 @@ def p3b():
 def p4():
     for method, path in (("GET", "/nope"), ("POST", "/obs"), ("GET", "/step")):
         status, d = http(method, path, {} if method == "POST" else None)
-        assert status == 404 and d.get("err") == "not_found", \
+        assert status == 404 and d.get("err") == REJECTION.NOT_FOUND, \
             f"{method} {path} -> {status} {d}"
 
 
@@ -300,7 +308,7 @@ def p5():
 @case("P6 unknown cheat lists the surface")
 def p6():
     launch(seed="CIP6")
-    err = reject(["cheat", "bogus"], "bad_request")
+    err = reject(["cheat", "bogus"], REJECTION.BAD_REQUEST)
     for tok in ("wound-enemies", "card-upgraded", "relic"):
         assert tok in err, f"'{tok}' missing from: {err}"
     to_menu()
@@ -326,21 +334,21 @@ def p8():
     status, d = http("POST", "/step", {
         "action": "proceed", "args": {}, "ifRun": "replaced-run",
     })
-    assert status == 400 and d.get("err") == "external_change", d
+    assert status == 400 and d.get("err") == REJECTION.EXTERNAL_CHANGE, d
     assert d.get("runId") == run_id, d
 
     status, d = http("POST", "/step", {
         "action": "proceed", "args": {}, "ifRun": run_id,
         "ifRev": max(0, rev - 1),
     })
-    assert status == 400 and d.get("err") == "stale_state", d
+    assert status == 400 and d.get("err") == REJECTION.STALE_STATE, d
     assert d.get("runId") == run_id, d
 
     for bad in ({"ifRev": "1"}, {"ifRev": -1}, {"ifRun": ""}):
         status, d = http("POST", "/step", {
             "action": "proceed", "args": {}, **bad,
         })
-        assert status == 400 and d.get("err") == "bad_request", (bad, d)
+        assert status == 400 and d.get("err") == REJECTION.BAD_REQUEST, (bad, d)
         assert d.get("runId") == run_id, d
 
     status, d = http("POST", "/step", {
@@ -348,7 +356,7 @@ def p8():
     })
     assert status == 200 and d.get("ok") is True, d
     assert d.get("runId") == run_id, d
-    bridge.wait_phase("map")
+    bridge.wait_phase(PHASE.MAP)
     to_menu()
 
 
@@ -401,7 +409,7 @@ def p10():
     assert launched["outcome"] in ("settled", "next_decision"), launched
     assert launched["acceptedRev"] <= launched["rev"], launched
     assert launched["runId"] == launched["obs"]["runId"], launched
-    assert launched["obs"]["phase"] == "event", launched["obs"]
+    assert launched["obs"]["phase"] == PHASE.EVENT, launched["obs"]
     assert launched["obs"].get("legal"), launched["obs"]
     # The engine-fault channel is part of the follow contract: present,
     # and empty on a clean action.
@@ -411,27 +419,27 @@ def p10():
         status, d = http("POST", "/step", {
             "action": "proceed", "args": {}, "follow": bad_follow,
         })
-        assert status == 400 and d.get("err") == "bad_request", (bad_follow, d)
+        assert status == 400 and d.get("err") == REJECTION.BAD_REQUEST, (bad_follow, d)
         assert d.get("runId") == launched["runId"], d
 
     run("proceed", "--follow", "5000")
-    d = bridge.wait_phase("map")
+    d = bridge.wait_phase(PHASE.MAP)
     rest = next(point for point in d["graph"] if point["type"] == "restsite")
     entered = run(
         "cheat", "goto", str(rest["col"]), str(rest["row"]), "--follow", "5000")
-    assert entered["obs"]["phase"] == "rest_site", entered["obs"]
+    assert entered["obs"]["phase"] == PHASE.REST_SITE, entered["obs"]
     rest_obs = entered["obs"]
     smith = next(option for option in rest_obs["options"]
                  if "smith" in option["id"].lower() and option["enabled"])
 
     picking = run("option", str(smith["idx"]), "--follow", "5000")
     assert picking["outcome"] == "next_decision", picking
-    assert picking["obs"]["phase"] == "card_select", picking["obs"]
+    assert picking["obs"]["phase"] == PHASE.CARD_SELECT, picking["obs"]
     assert "pick-card" in picking["obs"]["legal"], picking["obs"]["legal"]
 
     resolved = run("pick-card", "0", "--follow", "5000")
     assert resolved["outcome"] == "settled", resolved
-    assert resolved["obs"]["phase"] == "rest_site", resolved["obs"]
+    assert resolved["obs"]["phase"] == PHASE.REST_SITE, resolved["obs"]
     to_menu()
 
 
@@ -449,7 +457,7 @@ def p11():
 
     run("new-run", "IRONCLAD", "--seed", "CIRUNLOG", "--follow", "5000")
     run("proceed", "--follow", "5000")
-    bridge.wait_phase("map")
+    bridge.wait_phase(PHASE.MAP)
     log = run("runlog")
     assert log["complete"] is True, log
     assert log["kind"] == "diagnostic_reconstruction_recipe", log
@@ -507,7 +515,8 @@ def p12():
     took = time.monotonic() - t0
     fault_events = [
         event for event in changed.get("events", [])
-        if event["type"].startswith("async_fault:forced-async-fault:")
+        if event["type"].startswith(
+            FAULT_EVENT_TOKENS["asyncFault"] + "forced-async-fault:")
     ]
     assert changed.get("changed") is True, changed
     assert fault_events, changed.get("events")
@@ -517,7 +526,7 @@ def p12():
     # "settled" alone is engine quiescence, not proof of a clean effect.
     followed = run("cheat", "async-fault", "--follow", "5000", allow_errors=True)
     assert any(
-        error.startswith("async_fault:forced-async-fault:")
+        error.startswith(FAULT_EVENT_TOKENS["asyncFault"] + "forced-async-fault:")
         for error in followed["errors"]
     ), followed["errors"]
 
@@ -532,7 +541,8 @@ def p13():
     faulted = run("cheat", "engine-error", "--follow", "5000", allow_errors=True)
     assert faulted["settled"] is True, faulted
     assert any(
-        error.startswith("engine_error:") and "forced engine log error" in error
+        error.startswith(FAULT_EVENT_TOKENS["engineError"])
+        and "forced engine log error" in error
         for error in faulted["errors"]
     ), faulted["errors"]
 
@@ -555,7 +565,7 @@ def r1():
         launch(seed="CIDETERM")
         neow = [o.get("title") for o in obs().get("options", [])]
         run("proceed")
-        d = bridge.wait_phase("map")
+        d = bridge.wait_phase(PHASE.MAP)
         return (d.get("seed"), neow,
                 json.dumps(d.get("graph"), sort_keys=True))
     a, b = fingerprint(), fingerprint()
@@ -573,10 +583,10 @@ def r2():
         missing = [k for k in ("hp", "gold", "deck", "relics") if k not in p]
         assert not missing, f"{c}: player footer missing {missing}"
         run("proceed")
-        d = bridge.wait_phase("map")
+        d = bridge.wait_phase(PHASE.MAP)
         node = next(x for x in d["next"] if x["type"] == "monster")
         run("map-move", str(node["col"]), str(node["row"]))
-        d = bridge.wait_phase("combat")
+        d = bridge.wait_phase(PHASE.COMBAT)
         for _ in range(10):
             if d.get("side") == "player":
                 break
@@ -599,7 +609,7 @@ def r2():
 def r3():
     to_map(seed="CIR3")
     run("abandon")
-    bridge.wait_phase("main_menu")
+    bridge.wait_phase(PHASE.MAIN_MENU)
 
 
 @case("R3b pre-combat abandon tolerates missing combat manager", boot_only=True)
@@ -607,7 +617,7 @@ def r3b():
     to_map(seed="CIR3B")
     before = len(host_log())
     run("abandon")
-    bridge.wait_phase("main_menu")
+    bridge.wait_phase(PHASE.MAIN_MENU)
     teardown_log = host_log()[before:]
     assert "abandon combat reset" not in teardown_log, teardown_log[-1000:]
 
@@ -622,7 +632,7 @@ def r4():
     into_combat(seed="CIR4A")
     to_menu()
     d = into_combat(seed="CIR4B")
-    assert d.get("phase") == "combat", f"combat did not load: {d.get('phase')}"
+    assert d.get("phase") == PHASE.COMBAT, f"combat did not load: {d.get('phase')}"
     to_menu()
 
 
@@ -643,13 +653,13 @@ def c1():
         f"energy {e0} - {defend['cost']} != {d['you']['energy'][0]}"
 
     atk = next(c for c in d["hand"] if c["target"] == "anyenemy")
-    reject(["play", atk["model"], "--target", "99"], "bad_target")
+    reject(["play", atk["model"], "--target", "99"], REJECTION.BAD_TARGET)
 
     # Drain energy with the cheapest legal plays; the first over-cost
     # attempt must come back as not_enough_energy, not something vaguer.
     for _ in range(8):
         d = obs()
-        if d["phase"] != "combat":
+        if d["phase"] != PHASE.COMBAT:
             break
         energy = d["you"]["energy"][0]
         hand = [c for c in d["hand"] if not c.get("unplayable")]
@@ -660,7 +670,7 @@ def c1():
             args = ["play", c["model"]]
             if c["target"] == "anyenemy":
                 args += ["--target", str(alive_enemy(d)["id"])]
-            reject(args, "not_enough_energy")
+            reject(args, REJECTION.NOT_ENOUGH_ENERGY)
             break
         assert playable, "hand emptied before any card went over cost"
         c = min(playable, key=lambda c: c["cost"])
@@ -675,9 +685,9 @@ def c1():
     # Leave through the real death pipeline (R4 covers the mid-combat
     # abandon path directly).
     bridge.kill_current_combat()
-    bridge.wait_phase("rewards")
+    bridge.wait_phase(PHASE.REWARDS)
     run("proceed")
-    bridge.wait_phase("map")
+    bridge.wait_phase(PHASE.MAP)
     to_menu()
 
 
@@ -724,11 +734,11 @@ def c3():
 @case("S1 shop: every buy kind, gold accounting, leave")
 def s1():
     d = to_map(seed="CISHOP")
-    shop = next((p for p in d["graph"] if p["type"] == "shop"), None)
+    shop = next((p for p in d["graph"] if p["type"] == PHASE.SHOP), None)
     assert shop, "seed CISHOP grew no shop — re-pin the seed"
     run("cheat", "gold", "5000")
     run("cheat", "goto", str(shop["col"]), str(shop["row"]))
-    d = bridge.wait_phase("shop")
+    d = bridge.wait_phase(PHASE.SHOP)
 
     def buy(kind, stock_key):
         before = obs()
@@ -758,16 +768,16 @@ def s1():
     d = obs()
     assert d["cardRemoval"] and not d["cardRemoval"]["used"], d.get("cardRemoval")
     run("buy", "card_removal", "--idx", "0")
-    d = bridge.wait_phase("card_select")
+    d = bridge.wait_phase(PHASE.CARD_SELECT)
     run("pick-card", "0")
     time.sleep(1)
-    if obs()["phase"] == "card_select":
+    if obs()["phase"] == PHASE.CARD_SELECT:
         run("confirm")
-    bridge.wait_phase("shop")
+    bridge.wait_phase(PHASE.SHOP)
     assert len(obs()["player"]["deck"]) == deck0 + 1, "removal did not shrink the deck"
 
     run("leave")
-    bridge.wait_phase("map")
+    bridge.wait_phase(PHASE.MAP)
     to_menu()
 
 
@@ -786,9 +796,9 @@ def s2():
     foul = next(p for p in obs()["player"]["potions"]
                 if p["model"] == "FOUL_POTION")
 
-    shop = next(p for p in d["graph"] if p["type"] == "shop")
+    shop = next(p for p in d["graph"] if p["type"] == PHASE.SHOP)
     run("cheat", "goto", str(shop["col"]), str(shop["row"]))
-    d = bridge.wait_phase("shop")
+    d = bridge.wait_phase(PHASE.SHOP)
     gold_before = d["gold"]
     status, result = http("POST", "/step", {
         "action": "potion-use", "args": {"slot": foul["slot"]},
@@ -809,7 +819,7 @@ def s2():
     status, result = http("POST", "/step", {
         "action": "potion-use", "args": {"slot": energy["slot"]},
     })
-    assert status == 400 and result.get("err") == "not_playable", \
+    assert status == 400 and result.get("err") == REJECTION.NOT_PLAYABLE, \
         f"ordinary potion got the wrong merchant gate: {status} {result}"
     assert "merchant" in result.get("msg", "").lower(), result
     assert any(p["slot"] == energy["slot"] for p in obs()["player"]["potions"]), \
@@ -823,9 +833,9 @@ def s3():
     status, result = http("POST", "/step", {
         "action": "potion-use", "args": {"slot": 0},
     })
-    assert status == 400 and result.get("err") == "bad_phase", result
+    assert status == 400 and result.get("err") == REJECTION.BAD_PHASE, result
     message = result.get("msg", "").lower()
-    assert "combat" in message, result
+    assert PHASE.COMBAT in message, result
     assert "foul potion" in message and "merchant" in message, result
     to_menu()
 
@@ -836,26 +846,26 @@ def w1():
     run("cheat", "wound-enemies", allow_fail=True)
     atk = next(c for c in d["hand"] if c["target"] == "anyenemy")
     run("play", atk["model"], "--target", str(alive_enemy(d)["id"]))
-    d = bridge.wait_phase("rewards")
+    d = bridge.wait_phase(PHASE.REWARDS)
 
     deck0 = len(obs()["player"]["deck"])
     card_tile = next(t for t in d["rewards"] if t["type"] == "card")
     run("pick-reward", str(card_tile["idx"]))
-    d = bridge.wait_phase("card_reward")
+    d = bridge.wait_phase(PHASE.CARD_REWARD)
     assert d.get("cards"), "card reward offered nothing"
     run("skip")
     time.sleep(1)
     assert len(obs()["player"]["deck"]) == deck0, "skip still added a card"
-    bridge.wait_phase("rewards", "map")
-    if obs()["phase"] == "rewards":
+    bridge.wait_phase(PHASE.REWARDS, PHASE.MAP)
+    if obs()["phase"] == PHASE.REWARDS:
         run("proceed")
-        bridge.wait_phase("map")
+        bridge.wait_phase(PHASE.MAP)
 
-    tre = next((p for p in obs()["graph"] if p["type"] == "treasure"), None)
+    tre = next((p for p in obs()["graph"] if p["type"] == PHASE.TREASURE), None)
     assert tre, "seed CISKIP grew no treasure — re-pin the seed"
     relics0 = len(obs()["player"]["relics"])
     run("cheat", "goto", str(tre["col"]), str(tre["row"]))
-    d = bridge.wait_phase("treasure")
+    d = bridge.wait_phase(PHASE.TREASURE)
     assert d.get("chestOpened") is False and not d.get("relics"), d
     run("skip")  # opens the chest; observation stays read-only
     assert obs().get("relics"), "opened treasure offered no relics"
@@ -879,17 +889,17 @@ def w2():
     run("cheat", "wound-enemies", allow_fail=True)
     atk = next(c for c in d["hand"] if c["target"] == "anyenemy")
     run("play", atk["model"], "--target", str(alive_enemy(d)["id"]))
-    rewards = bridge.wait_phase("rewards")
+    rewards = bridge.wait_phase(PHASE.REWARDS)
     card_tile = next(t for t in rewards["rewards"] if t["type"] == "card")
     deck0 = len(obs()["player"]["deck"])
     run("pick-reward", str(card_tile["idx"]))
-    offered = bridge.wait_phase("card_reward")
+    offered = bridge.wait_phase(PHASE.CARD_REWARD)
     alternatives = offered.get("alternatives", [])
     assert len(alternatives) >= 2, alternatives
 
-    reject(["skip"], "bad_request")
+    reject(["skip"], REJECTION.BAD_REQUEST)
     run("skip", str(alternatives[-1]["idx"]))
-    bridge.wait_phase("rewards", "map")
+    bridge.wait_phase(PHASE.REWARDS, PHASE.MAP)
     assert len(obs()["player"]["deck"]) == deck0, "alternative skip added a card"
     to_menu()
 
@@ -897,11 +907,11 @@ def w2():
 @case("W3 treasure observation is read-only until a verb opens the chest")
 def w3():
     to_map(seed="CITREASUREOBS")
-    tre = next((p for p in obs()["graph"] if p["type"] == "treasure"), None)
+    tre = next((p for p in obs()["graph"] if p["type"] == PHASE.TREASURE), None)
     assert tre, "seed CITREASUREOBS grew no treasure — re-pin the seed"
     run("cheat", "goto", str(tre["col"]), str(tre["row"]))
 
-    first = bridge.wait_phase("treasure")
+    first = bridge.wait_phase(PHASE.TREASURE)
     second = obs()
     assert first["chestOpened"] is False and second["chestOpened"] is False
     assert first["relics"] == [] and second["relics"] == []
@@ -924,16 +934,16 @@ def w3():
     assert resolved["chestOpened"] is True, resolved
     assert "pick-relic" not in resolved["legal"], resolved["legal"]
     run("proceed")
-    bridge.wait_phase("map")
+    bridge.wait_phase(PHASE.MAP)
     to_menu()
 
 
 @case("W4 treasure relic can be followed by skip")
 def w4():
     d = to_map(seed=PARITY_SEED)
-    treasure = next(p for p in d["graph"] if p["type"] == "treasure")
+    treasure = next(p for p in d["graph"] if p["type"] == PHASE.TREASURE)
     run("cheat", "goto", str(treasure["col"]), str(treasure["row"]))
-    bridge.wait_phase("treasure")
+    bridge.wait_phase(PHASE.TREASURE)
 
     run("pick-relic", "0")  # first verb opens the headless chest
     d = bridge.wait_until(
@@ -943,11 +953,11 @@ def w4():
     )
     run("pick-relic", str(d["relics"][0]["idx"]))
     d = obs()
-    if d.get("phase") == "treasure":
+    if d.get("phase") == PHASE.TREASURE:
         status, result = http("POST", "/step", {"action": "skip", "args": {}})
         assert status == 200 and result.get("ok") is True, \
             f"skip after pick-relic was permanently rejected: {status} {result}"
-    bridge.wait_phase("map")
+    bridge.wait_phase(PHASE.MAP)
     to_menu()
 
 
@@ -955,7 +965,7 @@ def w4():
 def w5():
     into_combat(seed=PARITY_SEED)
     bridge.kill_current_combat()
-    d = bridge.wait_phase("rewards")
+    d = bridge.wait_phase(PHASE.REWARDS)
     reward = next(r for r in d["rewards"] if r["type"] == "potion")
     reward_idx = reward["idx"]
     belt_before = {p["slot"]: p for p in d["player"]["potions"]}
@@ -976,7 +986,7 @@ def w5():
     status, result = http("POST", "/step", {
         "action": "pick-reward", "args": {"idx": reward_idx},
     })
-    assert status == 400 and result.get("err") == "bad_index", \
+    assert status == 400 and result.get("err") == REJECTION.BAD_INDEX, \
         f"consumed reward slot was claimable twice: {status} {result}"
     belt_after_second = obs()["player"]["potions"]
     assert belt_after_second == belt_after_first, \
@@ -995,12 +1005,12 @@ def w6():
     for next_act in range(1, 4):
         boss = next(p for p in d["graph"] if p["type"] == "boss")
         run("cheat", "goto", str(boss["col"]), str(boss["row"]), allow_fail=True)
-        bridge.wait_phase("combat", timeout=30)
+        bridge.wait_phase(PHASE.COMBAT, timeout=30)
         bridge.kill_current_combat()
-        bridge.wait_phase("rewards")
+        bridge.wait_phase(PHASE.REWARDS)
         run("proceed")
         d = bridge.wait_until(
-            lambda snapshot: snapshot.get("phase") == "map"
+            lambda snapshot: snapshot.get("phase") == PHASE.MAP
             and snapshot.get("act") == next_act,
             timeout=30,
             description=f"act {next_act + 1} map",
@@ -1008,30 +1018,30 @@ def w6():
 
     graph = d["graph"]
     treasure = None
-    for target in (p for p in graph if p["type"] == "treasure"):
+    for target in (p for p in graph if p["type"] == PHASE.TREASURE):
         predecessors = [p for p in graph
                         if p["row"] == target["row"] - 1
                         and abs(p["col"] - target["col"]) <= 1
                         and p["type"] != "unknown"]
         predecessors.sort(key=lambda p: (
             {"monster": 0, "elite": 0, "restsite": 1,
-             "shop": 2, "treasure": 3}.get(p["type"], 4),
+             PHASE.SHOP: 2, PHASE.TREASURE: 3}.get(p["type"], 4),
             abs(p["col"] - target["col"]),
         ))
         for predecessor in predecessors:
             run("cheat", "goto", str(predecessor["col"]), str(predecessor["row"]),
                 allow_fail=True)
             phase = bridge.wait_phase(
-                "combat", "rest_site", "shop", "treasure", timeout=30)["phase"]
-            if phase == "combat":
+                PHASE.COMBAT, PHASE.REST_SITE, PHASE.SHOP, PHASE.TREASURE, timeout=30)["phase"]
+            if phase == PHASE.COMBAT:
                 bridge.kill_current_combat()
-                bridge.wait_phase("rewards")
+                bridge.wait_phase(PHASE.REWARDS)
                 run("proceed")
-            elif phase == "shop":
+            elif phase == PHASE.SHOP:
                 run("leave")
             else:
                 run("proceed")
-            d = bridge.wait_phase("map")
+            d = bridge.wait_phase(PHASE.MAP)
             if any(p["col"] == target["col"] and p["row"] == target["row"]
                    for p in d["next"]):
                 treasure = target
@@ -1041,7 +1051,7 @@ def w6():
 
     assert treasure, "could not establish a reachable Act 4 treasure predecessor"
     run("map-move", str(treasure["col"]), str(treasure["row"]))
-    bridge.wait_phase("treasure", timeout=12)
+    bridge.wait_phase(PHASE.TREASURE, timeout=12)
     run("pick-relic", "0")  # first verb opens the headless chest
     d = bridge.wait_until(
         lambda snapshot: bool(snapshot.get("relics")),
@@ -1052,9 +1062,9 @@ def w6():
     run("pick-relic", str(d["relics"][0]["idx"]))
     assert len(obs()["player"]["relics"]) == relics_before + 1, \
         "Act 4 treasure selection did not grant exactly one relic"
-    if obs().get("phase") == "treasure":
+    if obs().get("phase") == PHASE.TREASURE:
         run("skip")
-    bridge.wait_phase("map")
+    bridge.wait_phase(PHASE.MAP)
     assert "wedge:" not in host_log(), \
         "Act 4 treasure travel tripped the executor watchdog"
     to_menu()
@@ -1065,10 +1075,10 @@ def w6():
 @case("X1 crystal sphere: dig, tool verb, rewards out")
 def x1():
     to_map(seed="CICRYS")
-    run("cheat", "event", "CRYSTAL_SPHERE")
-    d = bridge.wait_phase("event")
+    run("cheat", PHASE.EVENT, "CRYSTAL_SPHERE")
+    d = bridge.wait_phase(PHASE.EVENT)
     run("option", "0")  # Uncover Future
-    d = bridge.wait_phase("crystal_sphere")
+    d = bridge.wait_phase(PHASE.CRYSTAL_SPHERE)
     assert d["grid"]["width"] > 0 and d["divinationsLeft"] > 0, d["grid"]
     assert d["cells"], "no cells in the crystal snapshot"
     before = d.get("tool")
@@ -1080,16 +1090,16 @@ def x1():
     left = d["divinationsLeft"]
     for _ in range(left + 2):
         d = obs()
-        if d["phase"] != "crystal_sphere" or d.get("finished"):
+        if d["phase"] != PHASE.CRYSTAL_SPHERE or d.get("finished"):
             break
         hidden = next((c for c in d["cells"] if c["hidden"]), None)
         assert hidden, "no hidden cells left but the minigame isn't finished"
         run("map-move", str(hidden["col"]), str(hidden["row"]))
         time.sleep(0.8)
-    d = bridge.wait_phase("rewards", "map", "event", timeout=15)
-    if d["phase"] == "rewards":
+    d = bridge.wait_phase(PHASE.REWARDS, PHASE.MAP, PHASE.EVENT, timeout=15)
+    if d["phase"] == PHASE.REWARDS:
         run("proceed")
-        bridge.wait_phase("map")
+        bridge.wait_phase(PHASE.MAP)
     to_menu()
 
 
@@ -1103,14 +1113,14 @@ def x2():
                   f"{[o.get('title') for o in d.get('options', [])]}")
     deck0 = len(obs()["player"]["deck"])
     run("option", str(pack["idx"]))
-    d = bridge.wait_phase("bundle_select")
+    d = bridge.wait_phase(PHASE.BUNDLE_SELECT)
     bundles = d.get("bundles")
     assert bundles and bundles[0]["cards"], f"empty bundle offer: {d}"
     picked = len(bundles[0]["cards"])
     run("pick-card", "0")
     time.sleep(1)
     d = obs()
-    assert d["phase"] != "bundle_select", "pick-card did not resolve the bundle"
+    assert d["phase"] != PHASE.BUNDLE_SELECT, "pick-card did not resolve the bundle"
     assert len(obs()["player"]["deck"]) == deck0 + picked, \
         f"deck did not grow by the pack ({picked})"
     to_menu()
@@ -1119,11 +1129,11 @@ def x2():
 @case("X3 compact crystal reveals decisions without dumping the board")
 def x3():
     to_map(seed="CICRYSTALINFO")
-    run("cheat", "event", "CRYSTAL_SPHERE")
-    d = bridge.wait_phase("event")
+    run("cheat", PHASE.EVENT, "CRYSTAL_SPHERE")
+    d = bridge.wait_phase(PHASE.EVENT)
     option = next(o for o in d["options"] if not o["locked"])
     run("option", str(option["idx"]))
-    full = bridge.wait_phase("crystal_sphere")
+    full = bridge.wait_phase(PHASE.CRYSTAL_SPHERE)
 
     compact = run("obs", "--compact")
     width, height = full["grid"]["width"], full["grid"]["height"]
@@ -1204,7 +1214,7 @@ def k2():
 
     monster = next(n for n in full_obs["graph"] if n["type"] == "monster")
     run("cheat", "goto", str(monster["col"]), str(monster["row"]))
-    combat = bridge.wait_phase("combat", timeout=30)
+    combat = bridge.wait_phase(PHASE.COMBAT, timeout=30)
     combat_flower = next(r for r in combat["you"]["relics"]
                          if r["model"] == "HAPPY_FLOWER")
     assert isinstance(combat_flower["counter"], int), \
@@ -1223,12 +1233,12 @@ def k3():
 
     boss = next(p for p in d["graph"] if p["type"] == "boss")
     run("cheat", "goto", str(boss["col"]), str(boss["row"]), allow_fail=True)
-    bridge.wait_phase("combat", timeout=30)
+    bridge.wait_phase(PHASE.COMBAT, timeout=30)
     bridge.kill_current_combat()
-    bridge.wait_phase("rewards")
+    bridge.wait_phase(PHASE.REWARDS)
     run("proceed")
     d = bridge.wait_until(
-        lambda snapshot: snapshot.get("phase") == "map" and snapshot.get("act") == 1,
+        lambda snapshot: snapshot.get("phase") == PHASE.MAP and snapshot.get("act") == 1,
         timeout=30,
         description="act 2 map",
     )
@@ -1254,8 +1264,8 @@ def c4():
     # flow, and the final lethal lands inside EndPlayerTurnAction rather
     # than a played card.
     to_map(seed="CIC2MILLI", character="DEFECT")
-    run("cheat", "combat", "DECIMILLIPEDE_ELITE")
-    d = bridge.wait_phase("combat", timeout=30)
+    run("cheat", PHASE.COMBAT, "DECIMILLIPEDE_ELITE")
+    d = bridge.wait_phase(PHASE.COMBAT, timeout=30)
     assert len(d.get("enemies", [])) >= 3, d.get("enemies")
     assert all("MILLIPEDE" in (e.get("model") or "") for e in d["enemies"]), d["enemies"]
     run("cheat", "wound-enemies")
@@ -1269,25 +1279,25 @@ def c4():
         run("cheat", "energy", "99")
         run("play", "STRIKE_DEFECT", "--target", str(alive[0]["id"]))
         time.sleep(0.5)
-        assert obs()["phase"] == "combat", "fight ended before the orb-passive lethal"
+        assert obs()["phase"] == PHASE.COMBAT, "fight ended before the orb-passive lethal"
 
     assert len(alive) == 1 and alive[0]["hp"][0] == 1, alive
     result = run("end-turn")
     assert result.get("ok") is True, result
-    bridge.wait_phase("rewards", timeout=25)
+    bridge.wait_phase(PHASE.REWARDS, timeout=25)
     status, health = http("GET", "/health")
     assert status == 200 and all(q["depth"] == 0 for q in health["queues"]), health
     assert health["executorStuckMs"] < 8000, health
     run("proceed")
-    bridge.wait_phase("map")
+    bridge.wait_phase(PHASE.MAP)
     to_menu()
 
 
 @case("C5 facing/back-attack fields track a surround fight")
 def c5():
     to_map(seed="CIC3CRAB", character="DEFECT")
-    run("cheat", "combat", "KAISER_CRAB_BOSS")
-    d = bridge.wait_phase("combat", timeout=30)
+    run("cheat", PHASE.COMBAT, "KAISER_CRAB_BOSS")
+    d = bridge.wait_phase(PHASE.COMBAT, timeout=30)
 
     assert {e["model"] for e in d["enemies"]} == {"CRUSHER", "ROCKET"}, d["enemies"]
     assert d["you"]["facing"] in ("left", "right"), d["you"]
@@ -1323,24 +1333,24 @@ def c6():
     run("cheat", "energy", "99")
     run("play", "TOOLS_OF_THE_TRADE")
     run("end-turn")
-    first = bridge.wait_phase("hand_select", timeout=25)
+    first = bridge.wait_phase(PHASE.HAND_SELECT, timeout=25)
     assert first.get("cards"), first
 
     run("cheat", "card", "ARMAMENTS")
     run("cheat", "energy", "99")
-    err = reject(["play", "ARMAMENTS"], "bad_phase")
-    assert "hand_select" in err, err
-    err = reject(["potion-discard", str(potion_slot)], "bad_phase")
-    assert "hand_select" in err, err
+    err = reject(["play", "ARMAMENTS"], REJECTION.BAD_PHASE)
+    assert PHASE.HAND_SELECT in err, err
+    err = reject(["potion-discard", str(potion_slot)], REJECTION.BAD_PHASE)
+    assert PHASE.HAND_SELECT in err, err
 
     still_first = obs()
-    assert still_first["phase"] == "hand_select", still_first
+    assert still_first["phase"] == PHASE.HAND_SELECT, still_first
     assert [c["model"] for c in still_first["cards"]] == [
         c["model"] for c in first["cards"]
     ], (first, still_first)
     run("pick-card", str(still_first["cards"][0]["idx"]))
     time.sleep(0.5)
-    assert obs()["phase"] == "combat", obs()
+    assert obs()["phase"] == PHASE.COMBAT, obs()
     to_menu()
 
 
@@ -1352,9 +1362,9 @@ def c7():
     to_map(seed="CIPAIRTEARDOWN")
     for encounter in ("SOUL_NEXUS_ELITE", "SPINY_TOAD_NORMAL"):
         settle_to_map()
-        run("cheat", "combat", encounter)
+        run("cheat", PHASE.COMBAT, encounter)
         combat = bridge.wait_phase(
-            "combat", timeout=20, raise_on_timeout=False)
+            PHASE.COMBAT, timeout=20, raise_on_timeout=False)
         assert combat is not None and combat.get("enemies"), (
             encounter, obs())
         bridge.kill_current_combat()
@@ -1367,11 +1377,11 @@ def c8():
     d = to_map(seed="CIBADSTATE")
     rest = next(point for point in d["graph"] if point["type"] == "restsite")
     run("cheat", "goto", str(rest["col"]), str(rest["row"]))
-    d = bridge.wait_phase("rest_site")
+    d = bridge.wait_phase(PHASE.REST_SITE)
     smith = next(option for option in d["options"]
                  if "smith" in option["id"].lower() and option["enabled"])
     run("option", str(smith["idx"]))
-    bridge.wait_phase("card_select")
+    bridge.wait_phase(PHASE.CARD_SELECT)
 
     rejected = bridge.cli("confirm")
     assert rejected.returncode == 1, rejected
@@ -1402,7 +1412,7 @@ def c9():
         "action": "play",
         "args": {"model": "STRIKE_IRONCLAD+", "target": "not-an-id"},
     })
-    assert status == 400 and result.get("err") == "bad_request", result
+    assert status == 400 and result.get("err") == REJECTION.BAD_REQUEST, result
     assert copies(obs(), True) == upgraded_before, "malformed target played a card"
 
     status, result = http("POST", "/step", {
@@ -1430,10 +1440,10 @@ def c9():
 def c10():
     launch(character="REGENT", seed="CIPOWERDESC")
     run("proceed")
-    d = bridge.wait_phase("map")
+    d = bridge.wait_phase(PHASE.MAP)
     node = next(p for p in d["next"] if p["type"] == "monster")
     run("map-move", str(node["col"]), str(node["row"]))
-    bridge.wait_phase("combat")
+    bridge.wait_phase(PHASE.COMBAT)
 
     def power(model):
         return next(p for p in obs()["you"]["powers"] if p["id"] == model)
@@ -1443,7 +1453,7 @@ def c10():
         run("cheat", "heal", allow_fail=True)
         run("end-turn")
         bridge.wait_until(
-            lambda snapshot: snapshot.get("phase") == "combat"
+            lambda snapshot: snapshot.get("phase") == PHASE.COMBAT
             and snapshot.get("side") == "player"
             and snapshot.get("turn", before_turn) > before_turn,
             timeout=8,
@@ -1481,7 +1491,7 @@ def c11():
     d = to_map(seed="CIPLOW")
     boss = next(p for p in d["graph"] if p["type"] == "boss")
     run("cheat", "goto", str(boss["col"]), str(boss["row"]), allow_fail=True)
-    d = bridge.wait_phase("combat", timeout=30)
+    d = bridge.wait_phase(PHASE.COMBAT, timeout=30)
     owner = next((enemy for enemy in d["enemies"]
                   if any(power["id"] == "SLIPPERY_POWER" for power in enemy["powers"])), None)
     assert owner, f"CIPLOW no longer selects the OwnerName boss: {d['enemies']}"
@@ -1498,23 +1508,23 @@ def c11():
 def v1():
     launch(seed="CIVICT")
     run("proceed")
-    bridge.wait_phase("map")
+    bridge.wait_phase(PHASE.MAP)
     for _ in range(8):  # acts; the loop exits on game_over
         d = obs()
-        if d["phase"] != "map":
+        if d["phase"] != PHASE.MAP:
             break
         boss = next(p for p in d["graph"] if p["type"] == "boss")
         run("cheat", "goto", str(boss["col"]), str(boss["row"]), allow_fail=True)
-        bridge.wait_phase("combat", timeout=30)
+        bridge.wait_phase(PHASE.COMBAT, timeout=30)
         bridge.kill_current_combat()
         # walk whatever follows — reward tiles, transition events,
         # pickers — until the next act's map or the victory screen
         for _ in range(40):
             d = obs()
             ph = d["phase"]
-            if ph in ("map", "game_over"):
+            if ph in (PHASE.MAP, PHASE.GAME_OVER):
                 break
-            if ph == "event":
+            if ph == PHASE.EVENT:
                 opts = [x for x in d.get("options", [])
                         if not x.get("locked") and not x.get("chosen")]
                 if opts:
@@ -1526,10 +1536,10 @@ def v1():
                     d, claim_reward_tiles=True, claim_relic_reward=True)
                 assert error is None, f"{ph}: {error}"
             time.sleep(0.8)
-        if obs()["phase"] == "game_over":
+        if obs()["phase"] == PHASE.GAME_OVER:
             break
     d = obs()
-    assert d["phase"] == "game_over", f"never reached game_over: {d['phase']}"
+    assert d["phase"] == PHASE.GAME_OVER, f"never reached game_over: {d['phase']}"
     assert d.get("outcome") == "victory", f"outcome: {d.get('outcome')}"
     assert d.get("seed") == "CIVICT", d.get("seed")
     assert d.get("actNumber", 0) >= 3, \
@@ -1556,8 +1566,8 @@ def e2():
     # aborted there and the player paid two cards for nothing (the
     # follow guard also asserts the fault no longer fires at all).
     to_map(seed="CIAMALG")
-    run("cheat", "event", "AMALGAMATOR")
-    d = bridge.wait_phase("event")
+    run("cheat", PHASE.EVENT, "AMALGAMATOR")
+    d = bridge.wait_phase(PHASE.EVENT)
     combine = next(
         o for o in d["options"]
         if "defend" in ((o.get("title") or "") + (o.get("description") or "")).lower()
@@ -1565,7 +1575,7 @@ def e2():
     models0 = [c["model"] for c in obs()["player"]["deck"]]
 
     picking = run("option", str(combine["idx"]), "--follow", "5000")
-    assert picking["obs"]["phase"] == "card_select", picking["obs"]["phase"]
+    assert picking["obs"]["phase"] == PHASE.CARD_SELECT, picking["obs"]["phase"]
     run("pick-card", "0", "--follow", "5000")
     run("pick-card", "1", "--follow", "5000")  # max picks auto-resolve
 
@@ -1618,11 +1628,11 @@ def m5():
     run("cheat", "energy", "99")
     run("play", "TOOLS_OF_THE_TRADE")
     run("end-turn")
-    pick = bridge.wait_phase("hand_select", timeout=25)
+    pick = bridge.wait_phase(PHASE.HAND_SELECT, timeout=25)
     assert pick.get("min") == 1 and pick.get("cards"), pick
     run("pick-card", str(pick["cards"][0]["idx"]))
     time.sleep(0.8)
-    assert obs()["phase"] == "combat", obs()["phase"]
+    assert obs()["phase"] == PHASE.COMBAT, obs()["phase"]
     to_menu()
 
 
@@ -1656,8 +1666,8 @@ def h1():
 def i1():
     to_map(seed="CIEVENTREAD")
     run("cheat", "gold", "500")
-    run("cheat", "event", "LOST_WISP")
-    first = bridge.wait_phase("event")
+    run("cheat", PHASE.EVENT, "LOST_WISP")
+    first = bridge.wait_phase(PHASE.EVENT)
     second = obs()
     assert first["options"] == second["options"], \
         f"/obs mutated event options: {first['options']} -> {second['options']}"
@@ -1669,10 +1679,10 @@ def i1():
 @case("I2 event options expose GUI hover-tip decisions")
 def i2():
     to_map(seed="CIEVENTTIPS")
-    run("cheat", "event", "DOLL_ROOM")
-    bridge.wait_phase("event")
+    run("cheat", PHASE.EVENT, "DOLL_ROOM")
+    bridge.wait_phase(PHASE.EVENT)
     run("option", "1")
-    d = bridge.wait_phase("event")
+    d = bridge.wait_phase(PHASE.EVENT)
     assert len(d["options"]) == 2, d["options"]
     for option in d["options"]:
         hints = option.get("hints")
@@ -1686,8 +1696,8 @@ def i2():
 def i3():
     to_map(seed="CIEVENTLETHAL")
     run("cheat", "hp", "1")
-    run("cheat", "event", "BRAIN_LEECH")
-    d = bridge.wait_phase("event")
+    run("cheat", PHASE.EVENT, "BRAIN_LEECH")
+    d = bridge.wait_phase(PHASE.EVENT)
     rip = next(o for o in d["options"] if o["title"] == "Rip the Leech Off")
     assert rip.get("lethal") is True, rip
     to_menu()
@@ -1696,10 +1706,10 @@ def i3():
 @case("I4 event page conditionals match GUI rendering")
 def i4():
     to_map(seed="CIEVENTTEXT")
-    run("cheat", "event", "JUNGLE_MAZE_ADVENTURE")
-    bridge.wait_phase("event")
+    run("cheat", PHASE.EVENT, "JUNGLE_MAZE_ADVENTURE")
+    bridge.wait_phase(PHASE.EVENT)
     run("option", "0")
-    d = bridge.wait_phase("event")
+    d = bridge.wait_phase(PHASE.EVENT)
     assert "{IsMultiplayer:" not in d["description"], d["description"]
     to_menu()
 
@@ -1708,8 +1718,8 @@ def i4():
 def i5():
     to_map(seed="CIFAKESHOP")
     run("cheat", "gold", "500")
-    run("cheat", "event", "FAKE_MERCHANT")
-    d = bridge.wait_phase("event")
+    run("cheat", PHASE.EVENT, "FAKE_MERCHANT")
+    d = bridge.wait_phase(PHASE.EVENT)
     shop = d.get("fakeMerchant")
     assert shop and len(shop["relics"]) == 6, d
     first = shop["relics"][0]

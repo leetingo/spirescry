@@ -14,7 +14,8 @@ use serde_json::{json, Value};
 
 const DEFAULT_HTTP_TIMEOUT_MS: u64 = 70_000;
 const HTTP_TIMEOUT_GRACE_MS: u64 = 10_000;
-const PROTOCOL_VERSION: u64 = 2;
+
+include!(concat!(env!("OUT_DIR"), "/protocol.rs"));
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum CliError {
@@ -380,29 +381,45 @@ fn skip_args(idx: Option<i32>) -> Value {
     }
 }
 
-// Positional sugar for the known cheat arg shapes; the bridge's own
-// per-cheat validation is the source of truth.
+// Positional sugar driven by the checked protocol artifact. Unknown cheat
+// names still reach the bridge so its supported-list rejection remains the
+// source of truth for a host with a different surface.
 fn cheat_args(name: &str, values: &[String]) -> Result<Value, String> {
     let mut args = json!({ "name": name });
-    let num = |s: &String| {
-        s.parse::<i32>()
-            .map_err(|_| format!("invalid number: {}", s))
+    let Some(shape) = CHEAT_ARGUMENT_SHAPES
+        .iter()
+        .find(|shape| shape.name == name)
+    else {
+        return Ok(args);
     };
-    match (name, values) {
-        ("goto", [col, row]) => {
-            args["col"] = json!(num(col)?);
-            args["row"] = json!(num(row)?);
-        }
-        ("gold", [value]) | ("hp", [value]) | ("stars", [value]) | ("energy", [value]) => {
-            args["value"] = json!(num(value)?)
-        }
-        ("event", [id])
-        | ("combat", [id])
-        | ("card", [id])
-        | ("card-upgraded", [id])
-        | ("relic", [id])
-        | ("potion", [id]) => args["id"] = json!(id),
-        _ => {}
+    let required = shape
+        .arguments
+        .iter()
+        .filter(|argument| !argument.optional)
+        .count();
+    if values.len() < required || values.len() > shape.arguments.len() {
+        let expected = if required == shape.arguments.len() {
+            format!("{} arguments", required)
+        } else {
+            format!("{}..={} arguments", required, shape.arguments.len())
+        };
+        return Err(format!(
+            "cheat '{}' expects {}, got {}",
+            name,
+            expected,
+            values.len()
+        ));
+    }
+    for (argument, value) in shape.arguments.iter().zip(values) {
+        args[argument.name] = match argument.kind {
+            ProtocolArgumentKind::Boolean => json!(value
+                .parse::<bool>()
+                .map_err(|_| format!("invalid boolean: {}", value))?),
+            ProtocolArgumentKind::Integer => json!(value
+                .parse::<i32>()
+                .map_err(|_| format!("invalid number: {}", value))?),
+            ProtocolArgumentKind::String => json!(value),
+        };
     }
     Ok(args)
 }
@@ -486,7 +503,7 @@ fn replay_value(client: &impl ReplayTransport, log: &Value) -> CliResult<Value> 
     }
 
     let mut current = client.get("/obs")?;
-    if current.get("phase").and_then(Value::as_str) != Some("main_menu")
+    if current.get("phase").and_then(Value::as_str) != Some(PHASE_MAIN_MENU)
         || current.get("runId").and_then(Value::as_str) != Some("none")
     {
         return Err(format!(
@@ -787,8 +804,8 @@ fn validate_health_expecting(
                 .collect::<Vec<_>>()
                 .join(", ");
             return Err(format!(
-                "bad_request: host does not advertise '{}' (supported: {})",
-                action, supported
+                "{}: host does not advertise '{}' (supported: {})",
+                REJECTION_BAD_REQUEST, action, supported
             )
             .into());
         }
@@ -806,8 +823,8 @@ fn validate_health_expecting(
                 .collect::<Vec<_>>()
                 .join(", ");
             return Err(format!(
-                "bad_request: host does not advertise cheat '{}' (supported: {})",
-                cheat, supported
+                "{}: host does not advertise cheat '{}' (supported: {})",
+                REJECTION_BAD_REQUEST, cheat, supported
             )
             .into());
         }
@@ -869,7 +886,7 @@ fn parse_bridge_value(value: Value) -> CliResult<Value> {
             .unwrap_or("unknown");
         let msg = value.get("msg").and_then(Value::as_str).unwrap_or("");
         let rendered = format!("{}: {}", err, msg);
-        return if err == "not_ready" {
+        return if err == REJECTION_NOT_READY {
             Err(CliError::transient(rendered))
         } else {
             Err(CliError::fatal(rendered))
@@ -1367,6 +1384,62 @@ mod tests {
     }
 
     #[test]
+    fn cheat_optional_boolean_is_mapped_from_the_generated_shape() {
+        let args = cheat_args("card", &strings(&["WHIRLWIND", "true"])).unwrap();
+
+        assert_eq!(
+            args,
+            json!({ "name": "card", "id": "WHIRLWIND", "upgraded": true })
+        );
+    }
+
+    #[test]
+    fn known_cheat_cardinality_is_enforced_from_the_generated_shape() {
+        let missing = cheat_args("goto", &strings(&["3"])).unwrap_err();
+        let extra = cheat_args("heal", &strings(&["surplus"])).unwrap_err();
+
+        assert!(missing.contains("expects 2 arguments"), "{missing}");
+        assert!(extra.contains("expects 0 arguments"), "{extra}");
+    }
+
+    #[test]
+    fn generated_protocol_constants_match_the_checked_artifact() {
+        let artifact: Value = serde_json::from_str(include_str!("../../protocol.json")).unwrap();
+        let faults = FAULT_EVENT_TOKENS
+            .iter()
+            .map(|(name, value)| ((*name).to_string(), json!(value)))
+            .collect::<serde_json::Map<_, _>>();
+        let cheats = CHEAT_ARGUMENT_SHAPES
+            .iter()
+            .map(|shape| {
+                let arguments = shape
+                    .arguments
+                    .iter()
+                    .map(|argument| {
+                        let kind = match argument.kind {
+                            ProtocolArgumentKind::Boolean => "boolean",
+                            ProtocolArgumentKind::Integer => "integer",
+                            ProtocolArgumentKind::String => "string",
+                        };
+                        let mut value = json!({ "name": argument.name, "type": kind });
+                        if argument.optional {
+                            value["optional"] = json!(true);
+                        }
+                        value
+                    })
+                    .collect::<Vec<_>>();
+                json!({ "name": shape.name, "arguments": arguments })
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(artifact["protocolVersion"], PROTOCOL_VERSION);
+        assert_eq!(artifact["rejectionCodes"], json!(REJECTION_CODES));
+        assert_eq!(artifact["phases"], json!(PHASES));
+        assert_eq!(artifact["faultEventTokens"], Value::Object(faults));
+        assert_eq!(artifact["cheatArgumentShapes"], json!(cheats));
+    }
+
+    #[test]
     fn cheat_card_upgraded_potion_and_relic_map_id() {
         let upgraded = cheat_args("card-upgraded", &strings(&["WHIRLWIND"])).unwrap();
         let potion = cheat_args("potion", &strings(&["FOUL_POTION"])).unwrap();
@@ -1409,9 +1482,9 @@ mod tests {
 
     #[test]
     fn unknown_cheat_passes_name_for_bridge_validation() {
-        let args = cheat_args("heal", &[]).unwrap();
+        let args = cheat_args("future-cheat", &[]).unwrap();
 
-        assert_eq!(args, json!({ "name": "heal" }));
+        assert_eq!(args, json!({ "name": "future-cheat" }));
     }
 
     #[test]
@@ -1461,8 +1534,8 @@ mod tests {
     fn expected_build_mismatch_fails_every_health_gate() {
         let value = health(PROTOCOL_VERSION, &["play"], &[]);
 
-        let err = validate_health_expecting(&value, Some("play"), None, Some("fff9999"))
-            .unwrap_err();
+        let err =
+            validate_health_expecting(&value, Some("play"), None, Some("fff9999")).unwrap_err();
         assert!(err.contains("host build mismatch"), "{err}");
         assert!(err.contains("abc1234"), "{err}");
         assert!(err.contains("fff9999"), "{err}");

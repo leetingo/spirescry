@@ -62,11 +62,14 @@ a stable `textKey` that includes upgrade, enchantment, and affliction;
 pass cached keys back as repeatable `--known-card <key>` flags to omit
 their prose without any process-global or read-order-dependent state.
 
+<!-- protocol:phases:start -->
 Phases: `main_menu`, `map`, `combat`, `event`, `shop`, `rest_site`,
 `treasure`, `rewards`, `card_reward`, `relic_reward`, `card_select`,
 `hand_select`, `bundle_select`, `crystal_sphere`, `game_over` — plus
-`overlay`/`unknown` for anything unmapped, carrying the overlay's type
-name so a stuck screen is diagnosable from `/obs` alone.
+`overlay`, `unknown`.
+<!-- protocol:phases:end -->
+Anything unmapped carries the overlay's type name so a stuck screen is
+diagnosable from `/obs` alone.
 
 Shop inventory keeps `cost` as its original gold-price field and also
 exposes the clearer `price` alias. Card stock adds `playCost` and `starCost`;
@@ -90,6 +93,7 @@ Verbs: `new-run`,
 Errors ride on 4xx/5xx as `{"ok": false, "err": "<code>", "msg": "..."}`
 with a stable machine-readable vocabulary:
 
+<!-- protocol:rejection-codes:start -->
 | Code | Meaning |
 | --- | --- |
 | `bad_request` | The verb or arguments are malformed or unsupported. |
@@ -109,6 +113,7 @@ with a stable machine-readable vocabulary:
 | `resolution_failed` | An inline engine action faulted before observable state changed. |
 | `not_found` | The HTTP route does not exist. |
 | `internal` | The bridge hit an invariant or unexpected implementation failure. |
+<!-- protocol:rejection-codes:end -->
 
 The CLI prints failures on stderr and exits `75` (`EX_TEMPFAIL`) only for
 `not_ready`; every other bridge rejection, local validation error, transport
@@ -230,9 +235,31 @@ picks), and text comes from tables extracted out of your local install's
   Neow's card-pack bundles, the crystal-sphere minigame (`map-move`
   clicks a cell, `option 0/1` picks the divination tool).
 - **Reproducibility**: `new-run --seed --ascension`.
-- **Dev cheats** for single-point verification:
-  `cheat goto|gold|hp|stars|energy|heal|wound-enemies|event|combat|card|card-upgraded|relic|potion|async-fault`
-  — jump anywhere on the act map, end fights fast, force any event or
+- **Dev cheats** for single-point verification use these positional shapes
+  (the same shapes are advertised by `/health`):
+
+  <!-- protocol:cheat-argument-shapes:start -->
+  | Cheat | Positional arguments |
+  | --- | --- |
+  | `goto` | `col:integer row:integer` |
+  | `gold` | `value:integer` |
+  | `heal` | — |
+  | `hp` | `value:integer` |
+  | `wound-enemies` | — |
+  | `event` | `id:string` |
+  | `combat` | `id:string` |
+  | `card` | `id:string [upgraded:boolean]` |
+  | `card-upgraded` | `id:string` |
+  | `relic` | `id:string` |
+  | `potion` | `id:string` |
+  | `stars` | `value:integer` |
+  | `energy` | `value:integer` |
+  | `async-fault` | — |
+  | `engine-error` | — |
+  | `engine-error-delayed` | — |
+  <!-- protocol:cheat-argument-shapes:end -->
+
+  They jump anywhere on the act map, end fights fast, force any event or
   encounter by model id, graft content into the run, or deliberately fault
   tracked async work to verify the failure event stream. `models
   card|relic|potion|event|encounter|character` enumerates the current
