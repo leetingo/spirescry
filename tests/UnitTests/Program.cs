@@ -292,6 +292,32 @@ internal static class Tests
         Equal(0, snapshot.Length);
     }
 
+    public static void ConsumerCardPlayableDistinguishesFalseFromReadFailure()
+    {
+        var playable = ConsumerSemanticRead.CardPlayable(() => false);
+
+        False(playable);
+        var error = Capture<InvalidOperationException>(() =>
+            ConsumerSemanticRead.CardPlayable(
+                () => throw new ArgumentException("broken CanPlay")));
+        True(error.Message.Contains("card playable semantic state"));
+        True(error.InnerException is ArgumentException);
+    }
+
+    public static void ConsumerMapMarkersDistinguishEmptyFromReadFailure()
+    {
+        var markers = ConsumerSemanticRead.MapMarkerIdentities(
+            "map marker semantic state at 2,3", Array.Empty<string>);
+
+        Equal(0, markers.Length);
+        var error = Capture<InvalidOperationException>(() =>
+            ConsumerSemanticRead.MapMarkerIdentities(
+                "map marker semantic state at 2,3",
+                () => throw new ArgumentException("broken quest collection")));
+        True(error.Message.Contains("map marker semantic state at 2,3"));
+        True(error.InnerException is ArgumentException);
+    }
+
     public static void SettlementReturnsImmediateQuietBoundary()
     {
         var clock = new FakeSettlementClock();

@@ -829,11 +829,8 @@ internal static class Snapshotter
         return !_knownCardTexts.Contains(key) && _emittedCardTexts.Add(key);
     }
 
-    private static bool CanPlayCard(CardModel card)
-    {
-        try { return card.CanPlay(out _, out _); }
-        catch { return false; }
-    }
+    private static bool CanPlayCard(CardModel card) =>
+        ConsumerSemanticRead.CardPlayable(() => card.CanPlay(out _, out _));
 
     // Shared per-card views — both boots build their snapshots through
     // these, so the shapes can't drift between modes (tests/parity.py
@@ -983,13 +980,19 @@ internal static class Snapshotter
                 .OrderBy(coord => coord[1])
                 .ThenBy(coord => coord[0])
                 .ToArray(),
-            MapMarkers(point));
+            SemanticMapMarkers(point));
+
+    private static string[] SemanticMapMarkers(
+        MegaCrit.Sts2.Core.Map.MapPoint point) =>
+        ConsumerSemanticRead.MapMarkerIdentities(
+            $"map marker semantic state at {point.coord.col},{point.coord.row}",
+            () => MapMarkerIdentities(point));
 
     private static string[] MapMarkers(MegaCrit.Sts2.Core.Map.MapPoint point)
     {
         try
         {
-            return point.Quests.Select(q => q.Id.Entry)
+            return MapMarkerIdentities(point)
                 .OrderBy(id => id, StringComparer.Ordinal)
                 .ToArray();
         }
@@ -999,6 +1002,10 @@ internal static class Snapshotter
             return [];
         }
     }
+
+    private static IEnumerable<string> MapMarkerIdentities(
+        MegaCrit.Sts2.Core.Map.MapPoint point) =>
+        point.Quests.Select(quest => quest.Id.Entry);
 
     // BFS over the act map from its start points. The final act's second
     // boss hangs off the map without a child edge — include it explicitly.
