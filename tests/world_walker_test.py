@@ -12,17 +12,23 @@ import eventsweep
 
 class WorldWalkerTests(unittest.TestCase):
     def drive(self, snapshots, *wanted, **claims):
-        remaining = iter(snapshots)
+        prepared = []
+        for revision, snapshot in enumerate(snapshots, start=1):
+            snapshot = dict(snapshot)
+            snapshot.setdefault("rev", revision)
+            prepared.append(snapshot)
+        remaining = iter(prepared)
         actions = []
 
         def observe(*_args, **_kwargs):
             return next(remaining)
 
         def act(*args, **kwargs):
-            actions.append((args, kwargs))
+            action_args = args[:-2] if args[-2:] == ("--follow", "10000") else args
+            actions.append((action_args, kwargs))
             return {}
 
-        def kill():
+        def kill(**_kwargs):
             actions.append((("kill-current-combat",), {}))
 
         with mock.patch.object(bridge, "obs", side_effect=observe), \
@@ -36,8 +42,9 @@ class WorldWalkerTests(unittest.TestCase):
     def test_walk_to_map_claims_reward_tiles_when_requested(self):
         settled, actions, sleeps = self.drive(
             [
-                {"phase": "rewards", "rewards": [{"idx": 4}]},
-                {"phase": "map"},
+                {"phase": "rewards", "rev": 41,
+                 "rewards": [{"idx": 4}]},
+                {"phase": "map", "rev": 42},
             ],
             "map",
             claim_reward_tiles=True,
@@ -45,7 +52,118 @@ class WorldWalkerTests(unittest.TestCase):
 
         self.assertEqual("map", settled["phase"])
         self.assertEqual(("pick-reward", "4"), actions[0][0])
-        self.assertEqual(1, sleeps)
+        self.assertEqual(0, sleeps)
+
+    def test_action_rejection_is_reported_before_another_observation(self):
+        with mock.patch.object(
+                bridge, "obs",
+                return_value={"phase": "event", "rev": 17,
+                              "options": [{"idx": 2}]}) as observe, \
+                mock.patch.object(
+                    bridge, "run",
+                    return_value={"_err": "bad_state: option disappeared"}) as act:
+            with self.assertRaisesRegex(
+                    AssertionError, "option.*bad_state: option disappeared"):
+                bridge.walk_world("map")
+
+        observe.assert_called_once_with()
+        act.assert_called_once_with("option", "2", allow_fail=True)
+
+    def test_transient_action_rejections_keep_their_verb_and_error(self):
+        cases = [
+            ({"phase": "bundle_select", "rev": 20,
+              "confirmable": False}, {}, "pick-card"),
+            ({"phase": "rewards", "rev": 21,
+              "rewards": [{"idx": 3}]},
+             {"claim_reward_tiles": True}, "pick-reward"),
+            ({"phase": "card_reward", "rev": 22,
+              "cards": [{"idx": 4}]},
+             {"claim_card_reward": True}, "pick-card"),
+            ({"phase": "relic_reward", "rev": 23,
+              "relics": [{"idx": 5}]},
+             {"claim_relic_reward": True}, "pick-relic"),
+            ({"phase": "shop", "rev": 24}, {}, "leave"),
+        ]
+        for snapshot, claims, verb in cases:
+            with self.subTest(phase=snapshot["phase"]), \
+                    mock.patch.object(
+                        bridge, "obs", return_value=snapshot) as observe, \
+                    mock.patch.object(
+                        bridge, "run",
+                        return_value={"_err": "bad_state: rejected"}):
+                with self.assertRaisesRegex(
+                        AssertionError, f"{verb}.*bad_state: rejected"):
+                    bridge.walk_world("map", **claims)
+
+                observe.assert_called_once_with()
+
+    def test_combat_walker_surfaces_action_rejection_without_sleeping(self):
+        combat = {
+            "phase": "combat", "rev": 31, "side": "player",
+            "potions": [], "enemies": [{"alive": True, "id": 1}],
+            "you": {"energy": [3, 3]}, "hand": [],
+        }
+        with mock.patch.object(bridge, "obs", return_value=combat), \
+                mock.patch.object(
+                    bridge, "run",
+                    return_value={"_err": "bad_state: heal rejected"}), \
+                mock.patch.object(bridge.time, "sleep") as sleep:
+            with self.assertRaisesRegex(
+                    AssertionError, "cheat heal.*bad_state: heal rejected"):
+                bridge.kill_current_combat()
+
+        sleep.assert_not_called()
+
+    def test_wait_until_requires_a_revision_change_after_an_action(self):
+        with mock.patch.object(
+                bridge, "obs",
+                side_effect=[
+                    {"phase": "event", "rev": 10, "changed": True},
+                    {"phase": "event", "rev": 11, "changed": False},
+                    {"phase": "event", "rev": 12, "changed": True},
+                ]) as observe:
+            settled = bridge.wait_until(
+                lambda snapshot: snapshot["phase"] == "event",
+                after_rev=11,
+                description="event action applied",
+            )
+
+        self.assertEqual(12, settled["rev"])
+        self.assertEqual(11, observe.call_args_list[0].args[0])
+
+    def test_follow_returns_only_a_settled_observation(self):
+        response = {
+            "settled": True,
+            "outcome": "settled",
+            "obs": {"phase": "treasure", "rev": 19},
+        }
+        with mock.patch.object(bridge, "run", return_value=response) as act:
+            settled = bridge.follow("skip")
+
+        self.assertEqual(response["obs"], settled)
+        act.assert_called_once_with(
+            "skip", "--follow", "10000", allow_errors=False, timeout=30)
+
+    def test_follow_rejects_an_unsettled_boundary(self):
+        with mock.patch.object(
+                bridge, "run",
+                return_value={"settled": False, "outcome": "timeout"}):
+            with self.assertRaisesRegex(AssertionError, "skip did not settle"):
+                bridge.follow("skip")
+
+    def test_launch_is_single_checked_action_followed_by_revision_wait(self):
+        started = {"phase": bridge.PHASE.EVENT, "rev": 8}
+        with mock.patch.object(
+                bridge, "obs", return_value={"phase": "main_menu", "rev": 7}), \
+                mock.patch.object(bridge, "run", return_value={}) as act, \
+                mock.patch.object(
+                    bridge, "wait_phase", return_value=started) as wait:
+            actual = bridge.launch_run(seed="SEED", timeout=40)
+
+        self.assertEqual(started, actual)
+        act.assert_called_once_with("new-run", "IRONCLAD", "--seed", "SEED")
+        wait.assert_called_once_with(
+            bridge.PHASE.EVENT, timeout=40, on_obs=None, after_rev=7)
 
     def test_claim_flags_select_card_and_relic_in_shared_grammar(self):
         cases = [
@@ -153,9 +271,15 @@ class WorldWalkerTests(unittest.TestCase):
     def test_event_force_restarts_instead_of_inheriting_non_map_state(self):
         with mock.patch.object(
                 eventsweep, "obs",
-                side_effect=[{"phase": "combat"}, {"phase": "event"}]), \
+                side_effect=[
+                    {"phase": "combat", "rev": 8},
+                    {"phase": "map", "rev": 9},
+                ]), \
                 mock.patch.object(eventsweep, "fresh_run") as fresh, \
-                mock.patch.object(eventsweep, "run", return_value={}):
+                mock.patch.object(eventsweep, "run", return_value={}), \
+                mock.patch.object(
+                    eventsweep.bridge, "obs",
+                    return_value={"phase": "event", "rev": 10}):
             result = eventsweep.force("TEST_EVENT")
 
         fresh.assert_called_once_with()

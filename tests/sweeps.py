@@ -12,7 +12,6 @@ world at the main menu. Each returns a dict of failures: {} == clean.
 import json
 import os
 import sys
-import time
 import urllib.request
 
 import bridge
@@ -46,12 +45,14 @@ def model_entries(kind):
 
 
 def fresh_run(seed="SWEEP", character="IRONCLAD"):
-    run("abandon", allow_fail=True)
-    time.sleep(0.4)
+    d = obs()
+    if d.get("phase") != bridge.PHASE.MAIN_MENU:
+        run("abandon")
+        bridge.wait_phase(
+            bridge.PHASE.MAIN_MENU, after_rev=d["rev"])
     bridge.launch_run(
-        character=character, seed=seed, timeout=30,
-        allow_first_failure=True)
-    run("proceed", allow_fail=True)
+        character=character, seed=seed, timeout=30)
+    run("proceed")
     bridge.wait_phase(bridge.PHASE.MAP, timeout=20)
 
 
@@ -64,14 +65,15 @@ def enter_sandbag():
     settled = bridge.walk_world(bridge.PHASE.MAP, **MAP_CLAIMS)
     if settled["phase"] != bridge.PHASE.MAP:
         fresh_run()
+        settled = obs()
+    before_rev = settled["rev"]
     run("cheat", bridge.PHASE.COMBAT, SANDBAG)
-    d = bridge.wait_phase(bridge.PHASE.COMBAT, timeout=20)
-    for _ in range(10):
-        if d.get("side") == "player":
-            break
-        time.sleep(1)
-        d = obs()
-    return d
+    return bridge.wait_until(
+        lambda snapshot: snapshot.get("phase") == bridge.PHASE.COMBAT
+        and snapshot.get("side") == "player",
+        description="sandbag combat player turn",
+        after_rev=before_rev,
+    )
 
 
 # ---------- sweep: every encounter ----------
@@ -93,12 +95,13 @@ def encounters(log=print):
             if "_err" in r:
                 failures[enc] = f"force: {r['_err'][:90]}"
                 continue
-            d = bridge.wait_phase(bridge.PHASE.COMBAT, timeout=20)
-            for _ in range(10):
-                if d.get("side") == "player" and d.get("enemies"):
-                    break
-                time.sleep(1)
-                d = obs()
+            d = bridge.wait_until(
+                lambda snapshot: snapshot.get("phase") == bridge.PHASE.COMBAT
+                and snapshot.get("side") == "player"
+                and bool(snapshot.get("enemies")),
+                description=f"encounter {enc} player turn",
+                after_rev=rev,
+            )
             bad = [e for e in d.get("enemies", []) if not e.get("title")]
             if not d.get("enemies") or bad:
                 failures[enc] = f"load: enemies={d.get('enemies')}"
@@ -160,8 +163,14 @@ def cards(log=print, only=None):
             run("cheat", "stars", "99", allow_fail=True)
             d = obs()
             if len(d["hand"]) >= 9:  # keep room for the graft
+                before_turn = d["rev"]
                 run("end-turn", allow_fail=True)
-                time.sleep(1.2)
+                d = bridge.wait_until(
+                    lambda snapshot: snapshot.get("phase") != bridge.PHASE.COMBAT
+                    or snapshot.get("side") == "player",
+                    description="card sweep next player turn",
+                    after_rev=before_turn,
+                )
                 run("cheat", "heal", allow_fail=True)
                 run("cheat", "energy", "99", allow_fail=True)
                 run("cheat", "stars", "99", allow_fail=True)
@@ -169,12 +178,18 @@ def cards(log=print, only=None):
                 if d["phase"] != bridge.PHASE.COMBAT:
                     fresh_run(character=active_character)
                     d = enter_sandbag()
+            before_graft = d["rev"]
             r = run("cheat", "card", card, allow_fail=True)
             if "_err" in r:
                 failures[card] = f"graft: {r['_err'][:90]}"
                 continue
-            time.sleep(0.3)
-            d = obs()
+            d = bridge.wait_until(
+                lambda snapshot: any(
+                    held.get("model") == card
+                    for held in snapshot.get("hand", [])),
+                description=f"grafted card {card} to reach the hand",
+                after_rev=before_graft,
+            )
             mine = next((c for c in d.get("hand", []) if c["model"] == card), None)
             if mine is None:
                 failures[card] = "grafted card never reached the hand"
@@ -275,12 +290,18 @@ def potions(log=print):
                 enter_sandbag()
                 used_in_fight = 0
             run("cheat", "heal", allow_fail=True)
+            before_procure = obs()["rev"]
             r = run("cheat", "potion", pot, allow_fail=True)
             if "_err" in r:
                 failures[pot] = f"procure: {r['_err'][:90]}"
                 continue
-            time.sleep(0.3)
-            d = obs()
+            d = bridge.wait_until(
+                lambda snapshot: any(
+                    held.get("model") == pot
+                    for held in snapshot.get("potions", [])),
+                description=f"procured potion {pot} to reach the belt",
+                after_rev=before_procure,
+            )
             slot = next((p for p in d.get("potions", [])
                          if p["model"] == pot), None)
             if slot is None:

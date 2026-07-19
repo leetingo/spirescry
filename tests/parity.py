@@ -16,7 +16,6 @@ recordings: same phase => same keys, so the modes can't silently drift.
 import argparse
 import json
 import sys
-import time
 
 import bridge
 
@@ -55,16 +54,21 @@ def phase():
 
 
 def wait_phase(*want, timeout=20):
-    bridge.wait_phase(*want, timeout=timeout, on_obs=record)
+    return bridge.wait_phase(*want, timeout=timeout, on_obs=record)
 
 
-def confirm_if_selecting():
+def confirm_if_selecting(after_rev):
     # GUI pickers wait for an explicit confirm; the host picker resolves
     # itself once max cards are picked. Both are legal under the protocol:
     # after pick-card, re-read and confirm only if still selecting.
-    time.sleep(1)
-    if phase() == bridge.PHASE.CARD_SELECT:
+    d = bridge.wait_after(
+        after_rev, description="card pick to apply", on_obs=record)
+    if d.get("phase") == bridge.PHASE.CARD_SELECT:
+        before_confirm = d["rev"]
         run("confirm")
+        bridge.wait_after(
+            before_confirm,
+            description="card selection confirm to apply", on_obs=record)
 
 
 def step(msg):
@@ -74,11 +78,13 @@ def step(msg):
 def exercise_bundle_pilot():
     """Record the Neow bundle decision in both boots before the act loop."""
     step("decision surface: Neow bundle pilot")
-    run("abandon", allow_fail=True)
-    time.sleep(5)
-    bridge.launch_run(
-        seed="BX16", timeout=40, on_obs=record,
-        on_retry=lambda: print("    bundle pilot launch didn't land, retrying"))
+    d = obs()
+    if d.get("phase") != bridge.PHASE.MAIN_MENU:
+        run("abandon")
+        bridge.wait_phase(
+            bridge.PHASE.MAIN_MENU, on_obs=record,
+            after_rev=d["rev"])
+    bridge.launch_run(seed="BX16", timeout=40, on_obs=record)
     offer = obs()
     pack = next((option for option in offer.get("options", [])
                  if "pack" in (option.get("description") or "").lower()), None)
@@ -89,15 +95,22 @@ def exercise_bundle_pilot():
     wait_phase(bridge.PHASE.BUNDLE_SELECT)
     bundle = obs()
     assert bundle.get("bundles") and bundle["bundles"][0].get("cards"), bundle
+    before_pick = bundle["rev"]
     run("pick-card", "0")
 
     # GUI previews the selected bundle and completes on confirm; the
     # headless stand-in owns completion directly and leaves this phase on
     # pick. Both paths are the same decision-surface protocol.
-    time.sleep(1)
-    if phase() == bridge.PHASE.BUNDLE_SELECT:
+    d = bridge.wait_after(
+        before_pick, description="bundle pick to apply", on_obs=record)
+    if d.get("phase") == bridge.PHASE.BUNDLE_SELECT:
+        before_confirm = d["rev"]
         run("confirm")
-    wait_phase(bridge.PHASE.EVENT, bridge.PHASE.MAP)
+        bridge.wait_phase(
+            bridge.PHASE.EVENT, bridge.PHASE.MAP, on_obs=record,
+            after_rev=before_confirm)
+    else:
+        assert d.get("phase") in (bridge.PHASE.EVENT, bridge.PHASE.MAP), d
     run("abandon")
     wait_phase(bridge.PHASE.MAIN_MENU)
 
@@ -107,13 +120,13 @@ def drive(seed=None):
     exercise_bundle_pilot()
 
     step("new-run")
-    run("abandon", allow_fail=True)
-    # The bridge comes up during mod init, before a cold engine boot's
-    # menu is actually ready. Settle, then launch.
-    time.sleep(5)
-    bridge.launch_run(
-        seed=seed, timeout=40, on_obs=record,
-        on_retry=lambda: print("    launch didn't land, retrying"))
+    d = obs()
+    if d.get("phase") != bridge.PHASE.MAIN_MENU:
+        run("abandon")
+        bridge.wait_phase(
+            bridge.PHASE.MAIN_MENU, on_obs=record,
+            after_rev=d["rev"])
+    bridge.launch_run(seed=seed, timeout=40, on_obs=record)
 
     step("neow: proceed past")
     run("proceed")
@@ -125,10 +138,16 @@ def drive(seed=None):
     wait_phase(bridge.PHASE.COMBAT)
 
     step("combat: intents")
-    en = obs()["enemies"][0]
-    if not en["intents"]:
-        time.sleep(2)
-        en = obs()["enemies"][0]
+    d = obs()
+    if not d["enemies"][0]["intents"]:
+        d = bridge.wait_until(
+            lambda snapshot: bool(snapshot.get("enemies"))
+            and bool(snapshot["enemies"][0].get("intents")),
+            description="opening enemy intents",
+            on_obs=record,
+            after_rev=d["rev"],
+        )
+    en = d["enemies"][0]
     print("   ", en["model"], en["hp"], en["intents"])
     assert en["intents"], "no intents"
     assert en.get("title"), f"enemy {en['model']} has no readable title"
@@ -142,8 +161,11 @@ def drive(seed=None):
         d = obs()
         if d["phase"] == bridge.PHASE.CARD_REWARD:
             print("    card offer:", [c["model"] for c in d["cards"]])
+            pre = d["rev"]
             run("pick-card", "0")
-            time.sleep(1.5)
+            bridge.wait_after(
+                pre, description="reward card pick to apply",
+                on_obs=record)
             continue
         rewards = d.get(bridge.PHASE.REWARDS, [])
         if not rewards:
@@ -153,9 +175,10 @@ def drive(seed=None):
         # In-phase mutations must advance the revision so --since waiters
         # wake — gold/potion claims change no phase and ride no engine
         # event, so the accepted step itself has to bump.
-        d = obs()
+        d = bridge.wait_after(
+            pre, description="reward tile claim to apply",
+            on_obs=record)
         assert d["rev"] > pre, f"rev stuck at {pre} after pick-reward"
-        time.sleep(1.5)
     wait_phase(bridge.PHASE.REWARDS)
     run("proceed")
     wait_phase(bridge.PHASE.MAP)
@@ -175,8 +198,9 @@ def drive(seed=None):
     assert isinstance(preview["upgradedPreview"], str), \
         f"upgradedPreview wire type changed: {preview['upgradedPreview']!r}"
     assert "upgradedPlayCost" in preview and "upgradedStarCost" in preview, preview
+    d = obs()
     run("pick-card", "1")
-    confirm_if_selecting()
+    confirm_if_selecting(d["rev"])
     wait_phase(bridge.PHASE.REST_SITE)
     run("proceed")
     wait_phase(bridge.PHASE.MAP)
@@ -201,8 +225,9 @@ def drive(seed=None):
             assert removal["cost"] == removal["price"], removal
         run("buy", "card_removal", "--idx", "0")
         wait_phase(bridge.PHASE.CARD_SELECT)
+        d = obs()
         run("pick-card", "0")
-        confirm_if_selecting()
+        confirm_if_selecting(d["rev"])
         wait_phase(bridge.PHASE.SHOP)
         gold = obs()["gold"]
         assert gold == 925, f"expected 925 gold after removal, got {gold}"
@@ -250,36 +275,50 @@ def drive(seed=None):
     run("cheat", "goto", str(boss["col"]), str(boss["row"]), allow_fail=True)
     wait_phase(bridge.PHASE.COMBAT, timeout=30)
     bridge.kill_current_combat(on_obs=record)
-    wait_phase(bridge.PHASE.REWARDS)
+    d = wait_phase(bridge.PHASE.REWARDS)
+    before_proceed = d["rev"]
     run("proceed")
-    for _ in range(60):
-        d = obs()
-        if d["phase"] == bridge.PHASE.MAP and d.get("act") == 1:
-            break
-        time.sleep(1)
-    assert obs().get("act") == 1, "act transition did not reach act 1"
+    d = bridge.walk_world(
+        bridge.PHASE.MAP, after_rev=before_proceed, on_obs=record)
+    assert d.get("act") == 1, "act transition did not reach act 1"
     print("    act 1 reached")
 
     step("defeat → game_over")
     run("abandon")
     wait_phase(bridge.PHASE.MAIN_MENU)
-    time.sleep(3)
-    bridge.launch_run(
-        seed=seed, timeout=40, on_obs=record,
-        on_retry=lambda: print("    launch didn't land, retrying"))
+    bridge.launch_run(seed=seed, timeout=40, on_obs=record)
     run("proceed")
     wait_phase(bridge.PHASE.MAP)
     node = next(p for p in obs()["next"] if p["type"] == "monster")
     run("map-move", str(node["col"]), str(node["row"]))
-    wait_phase(bridge.PHASE.COMBAT)
+    d = wait_phase(bridge.PHASE.COMBAT)
     for _ in range(20):
-        d = obs()
         if d["phase"] == bridge.PHASE.GAME_OVER:
             break
         if d["phase"] == bridge.PHASE.COMBAT and d.get("side") == "player":
-            run("cheat", "hp", "1", allow_fail=True)
-            run("end-turn", allow_fail=True)
-        time.sleep(1.5)
+            before_hp = d["rev"]
+            run("cheat", "hp", "1")
+            d = bridge.wait_after(
+                before_hp, description="lethal hp cheat to apply", on_obs=record)
+            before_turn = d["rev"]
+            run("end-turn")
+            d = bridge.wait_until(
+                lambda snapshot: snapshot.get("phase") == bridge.PHASE.GAME_OVER
+                or (snapshot.get("phase") == bridge.PHASE.COMBAT
+                    and snapshot.get("side") == "player"),
+                description="defeat turn to resolve",
+                on_obs=record,
+                after_rev=before_turn,
+            )
+        else:
+            d = bridge.wait_until(
+                lambda snapshot: snapshot.get("phase") == bridge.PHASE.GAME_OVER
+                or (snapshot.get("phase") == bridge.PHASE.COMBAT
+                    and snapshot.get("side") == "player"),
+                description="defeat combat player turn",
+                on_obs=record,
+                after_rev=d["rev"],
+            )
     wait_phase(bridge.PHASE.GAME_OVER, timeout=30)
     d = obs()
     assert d.get("outcome") == "defeat", f"expected defeat, got {d.get('outcome')}"

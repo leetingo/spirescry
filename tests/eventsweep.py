@@ -5,7 +5,7 @@ Run against either boot (host is fastest). Not part of ./build.sh verify —
 it takes minutes and mutates a throwaway run heavily; use it after engine
 updates or event-related changes.
 """
-import re, sys, time
+import re, sys
 from collections import Counter
 
 import bridge
@@ -20,15 +20,18 @@ WORLD_CLAIMS = {
 }
 
 def fresh_run(seed=None):
-    run("abandon", allow_fail=True)
-    time.sleep(1)
+    d = obs()
+    if d.get("phase") != bridge.PHASE.MAIN_MENU:
+        run("abandon")
+        bridge.wait_phase(
+            bridge.PHASE.MAIN_MENU, after_rev=d["rev"])
     bridge.launch_run(
-        seed=seed, timeout=30, allow_first_failure=True)
-    run("proceed", allow_fail=True)
+        seed=seed, timeout=30)
+    run("proceed")
     if bridge.wait_phase(
             bridge.PHASE.MAP, timeout=20, raise_on_timeout=False) is None:
         sys.exit("could not reach map for a fresh run")
-    run("cheat", "gold", "500", allow_fail=True)
+    run("cheat", "gold", "500")
 
 def walk_or_stuck(*wanted, **walk_options):
     """Keep the sweep aggregating after one option wedges or times out."""
@@ -43,17 +46,20 @@ def force(ev):
     """Force one event from a settled map; return its snapshot or None."""
     # Do not let a combat/picker or a previously explored option leak hp,
     # deck, or one-shot state into the next forced event.
-    if obs().get("phase") != bridge.PHASE.MAP:
-        fresh_run()
-    if "_err" in run("cheat", bridge.PHASE.EVENT, ev, allow_fail=True):
-        return None
     d = obs()
-    for _ in range(10):  # engine boots mount the room over a few frames
-        if d.get("phase") != bridge.PHASE.MAP:
-            break
-        time.sleep(0.5)
+    if d.get("phase") != bridge.PHASE.MAP:
+        fresh_run()
         d = obs()
-    return d
+    before_rev = d["rev"]
+    forced = run("cheat", bridge.PHASE.EVENT, ev, allow_fail=True)
+    if "_err" in forced:
+        raise AssertionError(f"force event {ev}: {forced['_err']}")
+    mounted = bridge.wait_until(
+        lambda snapshot: snapshot.get("phase") != bridge.PHASE.MAP,
+        description=f"event {ev} to mount",
+        after_rev=before_rev,
+    )
+    return mounted
 
 
 def replay_event_path(ev, path):
@@ -198,7 +204,11 @@ def sweep(all_options=False):
                 locked_skipped += 1
                 continue
             before_rev = d.get("rev")
-            run("option", str(idx), "--follow", "4000", allow_fail=True)
+            result = run(
+                "option", str(idx), "--follow", "4000", allow_fail=True)
+            if "_err" in result:
+                raise AssertionError(
+                    f"event {ev} option {idx}: {result['_err']}")
             options_clicked += 1
             landed = walk_or_stuck(
                 bridge.PHASE.MAP, after_rev=before_rev)["phase"]

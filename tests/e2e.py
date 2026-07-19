@@ -166,14 +166,14 @@ def to_map(seed=None, character="IRONCLAD"):
 def into_combat(seed=None, character="IRONCLAD"):
     d = to_map(seed=seed, character=character)
     node = next(p for p in d["next"] if p["type"] == "monster")
+    before_rev = d["rev"]
     run("map-move", str(node["col"]), str(node["row"]))
-    d = bridge.wait_phase(PHASE.COMBAT)
-    for _ in range(10):  # intents/side settle over a tick or two
-        if d.get("side") == "player":
-            return d
-        time.sleep(1)
-        d = obs()
-    return d
+    return bridge.wait_until(
+        lambda snapshot: snapshot.get("phase") == PHASE.COMBAT
+        and snapshot.get("side") == "player",
+        description="combat player turn",
+        after_rev=before_rev,
+    )
 
 
 def alive_enemy(d):
@@ -581,13 +581,14 @@ def r2():
         run("proceed")
         d = bridge.wait_phase(PHASE.MAP)
         node = next(x for x in d["next"] if x["type"] == "monster")
+        before_rev = d["rev"]
         run("map-move", str(node["col"]), str(node["row"]))
-        d = bridge.wait_phase(PHASE.COMBAT)
-        for _ in range(10):
-            if d.get("side") == "player":
-                break
-            time.sleep(1)
-            d = obs()
+        d = bridge.wait_until(
+            lambda snapshot: snapshot.get("phase") == PHASE.COMBAT
+            and snapshot.get("side") == "player",
+            description=f"{c} opening player turn",
+            after_rev=before_rev,
+        )
         you = d["you"]
         assert isinstance(you.get("hp"), list) and isinstance(you.get("energy"), list), you
         assert "stars" in you, f"{c}: combat snapshot lost the stars field"
@@ -641,9 +642,14 @@ def c1():
     e0 = d["you"]["energy"][0]
 
     defend = next(c for c in d["hand"] if c["model"].startswith("DEFEND"))
+    before_rev = d["rev"]
     run("play", defend["model"])
-    time.sleep(1)
-    d = obs()
+    d = bridge.wait_until(
+        lambda snapshot: snapshot.get("phase") != PHASE.COMBAT
+        or snapshot.get("you", {}).get("block", 0) > 0,
+        description="Defend to grant block",
+        after_rev=before_rev,
+    )
     assert d["you"]["block"] > 0, "Defend raised no block"
     assert d["you"]["energy"][0] == e0 - defend["cost"], \
         f"energy {e0} - {defend['cost']} != {d['you']['energy'][0]}"
@@ -673,8 +679,16 @@ def c1():
         args = ["play", c["model"]]
         if c["target"] == "anyenemy":
             args += ["--target", str(alive_enemy(d)["id"])]
-        run(*args, allow_fail=True)
-        time.sleep(0.8)
+        before_rev = d["rev"]
+        copies = sum(card["model"] == c["model"] for card in d["hand"])
+        run(*args)
+        bridge.wait_until(
+            lambda snapshot: snapshot.get("phase") != PHASE.COMBAT
+            or sum(card["model"] == c["model"]
+                   for card in snapshot.get("hand", [])) < copies,
+            description=f"played {c['model']} to leave the hand",
+            after_rev=before_rev,
+        )
     else:
         raise AssertionError("never ran out of energy in 8 plays")
 
@@ -712,10 +726,15 @@ def c3():
     args = ["play", feral["model"]]
     if feral["target"] == "anyenemy":
         args += ["--target", str(alive_enemy(d)["id"])]
+    before_rev = d["rev"]
     run(*args)
-    time.sleep(1)
-
-    d = obs()
+    d = bridge.wait_until(
+        lambda snapshot: any(
+            power.get("id") == "FERAL_POWER"
+            for power in snapshot.get("you", {}).get("powers", [])),
+        description="Feral power to apply",
+        after_rev=before_rev,
+    )
     power = next(p for p in d["you"]["powers"] if p["id"] == "FERAL_POWER")
     description = power["description"]
     assert "{energyPrefix" not in description, description
@@ -742,8 +761,11 @@ def s1():
         assert stock and stock[0]["stocked"], f"no {kind} in stock: {stock}"
         cost = stock[0]["cost"]
         run("buy", kind, "--idx", "0")
-        time.sleep(0.8)
-        after = obs()
+        after = bridge.wait_until(
+            lambda snapshot: snapshot.get("gold") == before["gold"] - cost,
+            description=f"{kind} purchase to debit gold",
+            after_rev=before["rev"],
+        )
         assert after["gold"] == before["gold"] - cost, \
             f"{kind}: gold {before['gold']} - {cost} != {after['gold']}"
         return after
@@ -765,9 +787,15 @@ def s1():
     assert d["cardRemoval"] and not d["cardRemoval"]["used"], d.get("cardRemoval")
     run("buy", "card_removal", "--idx", "0")
     d = bridge.wait_phase(PHASE.CARD_SELECT)
+    before_rev = d["rev"]
     run("pick-card", "0")
-    time.sleep(1)
-    if obs()["phase"] == PHASE.CARD_SELECT:
+    d = bridge.wait_until(
+        lambda snapshot: snapshot.get("phase") != PHASE.CARD_SELECT
+        or snapshot.get("confirmable") is True,
+        description="card removal pick to apply",
+        after_rev=before_rev,
+    )
+    if d["phase"] == PHASE.CARD_SELECT:
         run("confirm")
     bridge.wait_phase(PHASE.SHOP)
     assert len(obs()["player"]["deck"]) == deck0 + 1, "removal did not shrink the deck"
@@ -849,11 +877,12 @@ def w1():
     run("pick-reward", str(card_tile["idx"]))
     d = bridge.wait_phase(PHASE.CARD_REWARD)
     assert d.get("cards"), "card reward offered nothing"
+    before_rev = d["rev"]
     run("skip")
-    time.sleep(1)
-    assert len(obs()["player"]["deck"]) == deck0, "skip still added a card"
-    bridge.wait_phase(PHASE.REWARDS, PHASE.MAP)
-    if obs()["phase"] == PHASE.REWARDS:
+    d = bridge.wait_phase(
+        PHASE.REWARDS, PHASE.MAP, after_rev=before_rev)
+    assert len(d["player"]["deck"]) == deck0, "skip still added a card"
+    if d["phase"] == PHASE.REWARDS:
         run("proceed")
         bridge.wait_phase(PHASE.MAP)
 
@@ -863,11 +892,14 @@ def w1():
     run("cheat", "goto", str(tre["col"]), str(tre["row"]))
     d = bridge.wait_phase(PHASE.TREASURE)
     assert d.get("chestOpened") is False and not d.get("relics"), d
+    before_rev = d["rev"]
     run("skip")  # opens the chest; observation stays read-only
-    assert obs().get("relics"), "opened treasure offered no relics"
-    run("skip")  # declines the visible offer
-    time.sleep(1)
-    after = obs()
+    d = bridge.wait_until(
+        lambda snapshot: bool(snapshot.get("relics")),
+        description="treasure chest to expose relics",
+        after_rev=before_rev,
+    )
+    after = bridge.follow("skip")  # declines the visible offer
     assert len(after["player"]["relics"]) == relics0, "skip still granted a relic"
     # The offer resolved but the chest does not close again: reading
     # chestOpened=false here would re-advertise the opening pick-relic.
@@ -1079,9 +1111,13 @@ def x1():
     assert d["cells"], "no cells in the crystal snapshot"
     before = d.get("tool")
     assert before, "no tool in the crystal snapshot"
+    before_rev = d["rev"]
     run("option", "0" if before == "big" else "1")  # the OTHER tool
-    time.sleep(0.5)
-    d = obs()
+    d = bridge.wait_until(
+        lambda snapshot: snapshot.get("tool") != before,
+        description="crystal sphere tool to change",
+        after_rev=before_rev,
+    )
     assert d["tool"] != before, f"tool verb changed nothing (still {d['tool']})"
     left = d["divinationsLeft"]
     for _ in range(left + 2):
@@ -1090,8 +1126,17 @@ def x1():
             break
         hidden = next((c for c in d["cells"] if c["hidden"]), None)
         assert hidden, "no hidden cells left but the minigame isn't finished"
+        hidden_count = sum(cell["hidden"] for cell in d["cells"])
+        before_rev = d["rev"]
         run("map-move", str(hidden["col"]), str(hidden["row"]))
-        time.sleep(0.8)
+        d = bridge.wait_until(
+            lambda snapshot: snapshot.get("phase") != PHASE.CRYSTAL_SPHERE
+            or snapshot.get("finished")
+            or sum(cell.get("hidden", False)
+                   for cell in snapshot.get("cells", [])) < hidden_count,
+            description="crystal sphere cell to reveal",
+            after_rev=before_rev,
+        )
     d = bridge.wait_phase(PHASE.REWARDS, PHASE.MAP, PHASE.EVENT, timeout=15)
     if d["phase"] == PHASE.REWARDS:
         run("proceed")
@@ -1113,9 +1158,13 @@ def x2():
     bundles = d.get("bundles")
     assert bundles and bundles[0]["cards"], f"empty bundle offer: {d}"
     picked = len(bundles[0]["cards"])
+    before_rev = d["rev"]
     run("pick-card", "0")
-    time.sleep(1)
-    d = obs()
+    d = bridge.wait_until(
+        lambda snapshot: snapshot.get("phase") != PHASE.BUNDLE_SELECT,
+        description="bundle pick to resolve",
+        after_rev=before_rev,
+    )
     assert d["phase"] != PHASE.BUNDLE_SELECT, "pick-card did not resolve the bundle"
     assert len(obs()["player"]["deck"]) == deck0 + picked, \
         f"deck did not grow by the pack ({picked})"
@@ -1273,9 +1322,18 @@ def c4():
             break
         run("cheat", "card", "STRIKE_DEFECT")
         run("cheat", "energy", "99")
+        before_rev = d["rev"]
+        alive_count = len(alive)
         run("play", "STRIKE_DEFECT", "--target", str(alive[0]["id"]))
-        time.sleep(0.5)
-        assert obs()["phase"] == PHASE.COMBAT, "fight ended before the orb-passive lethal"
+        d = bridge.wait_until(
+            lambda snapshot: snapshot.get("phase") != PHASE.COMBAT
+            or sum(enemy.get("alive", False)
+                   for enemy in snapshot.get("enemies", [])) < alive_count,
+            description="millipede segment to die",
+            after_rev=before_rev,
+        )
+        assert d["phase"] == PHASE.COMBAT, \
+            "fight ended before the orb-passive lethal"
 
     assert len(alive) == 1 and alive[0]["hp"][0] == 1, alive
     result = run("end-turn")
@@ -1344,9 +1402,9 @@ def c6():
     assert [c["model"] for c in still_first["cards"]] == [
         c["model"] for c in first["cards"]
     ], (first, still_first)
+    before_rev = still_first["rev"]
     run("pick-card", str(still_first["cards"][0]["idx"]))
-    time.sleep(0.5)
-    assert obs()["phase"] == PHASE.COMBAT, obs()
+    bridge.wait_phase(PHASE.COMBAT, after_rev=before_rev)
     to_menu()
 
 
@@ -1612,9 +1670,9 @@ def m5():
     run("end-turn")
     pick = bridge.wait_phase(PHASE.HAND_SELECT, timeout=25)
     assert pick.get("min") == 1 and pick.get("cards"), pick
+    before_rev = pick["rev"]
     run("pick-card", str(pick["cards"][0]["idx"]))
-    time.sleep(0.8)
-    assert obs()["phase"] == PHASE.COMBAT, obs()["phase"]
+    bridge.wait_phase(PHASE.COMBAT, after_rev=before_rev)
     to_menu()
 
 
@@ -1708,12 +1766,13 @@ def i5():
     assert first["model"] and first["description"] and first["stocked"], first
     assert first["price"] == first["cost"] and first["price"] > 0, first
     before_gold = d["player"]["gold"]
+    before_rev = d["rev"]
     run("buy", "relic", "--idx", "0")
-    for _ in range(20):
-        d = obs()
-        if not d["fakeMerchant"]["relics"][0]["stocked"]:
-            break
-        time.sleep(0.1)
+    d = bridge.wait_until(
+        lambda snapshot: not snapshot["fakeMerchant"]["relics"][0]["stocked"],
+        description="fake merchant relic to sell",
+        after_rev=before_rev,
+    )
     assert not d["fakeMerchant"]["relics"][0]["stocked"], d["fakeMerchant"]
     assert d["player"]["gold"] < before_gold, d["player"]
     assert first["model"] in d["player"]["relics"], d["player"]["relics"]
