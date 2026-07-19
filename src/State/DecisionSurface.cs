@@ -1,11 +1,20 @@
 using MegaCrit.Sts2.Core.Commands;
 using MegaCrit.Sts2.Core.Combat;
+using MegaCrit.Sts2.Core.Context;
+using MegaCrit.Sts2.Core.Entities.Cards;
+using MegaCrit.Sts2.Core.Entities.Creatures;
 using MegaCrit.Sts2.Core.Entities.Merchant;
+using MegaCrit.Sts2.Core.Entities.Players;
+using MegaCrit.Sts2.Core.Entities.Potions;
 using MegaCrit.Sts2.Core.Entities.RestSite;
 using MegaCrit.Sts2.Core.Entities.TreasureRelicPicking;
+using MegaCrit.Sts2.Core.GameActions;
 using MegaCrit.Sts2.Core.Localization;
 using MegaCrit.Sts2.Core.Map;
 using MegaCrit.Sts2.Core.Models;
+using MegaCrit.Sts2.Core.Models.Potions;
+using MegaCrit.Sts2.Core.Multiplayer;
+using MegaCrit.Sts2.Core.Multiplayer.Game;
 using MegaCrit.Sts2.Core.Nodes;
 using MegaCrit.Sts2.Core.Nodes.Combat;
 using MegaCrit.Sts2.Core.Nodes.GodotExtensions;
@@ -23,9 +32,8 @@ using CrystalScreen = MegaCrit.Sts2.Core.Nodes.Events.Custom.CrystalSphere.NCrys
 
 namespace Spirescry.State;
 
-// One boot-selected boundary for the local seat's current decision. The
-// bundle offer is the pilot: later migrations add other surfaces without
-// adding more boot checks at their call sites.
+// One boot-selected boundary for enumerating and acting on the local seat's
+// current decision without consulting the boot mode at each call site.
 internal interface IDecisionSurface
 {
     Phase? ActivePhase { get; }
@@ -66,6 +74,19 @@ internal interface IDecisionSurface
     DecisionSurfaceResult SkipRelicReward();
     DecisionSurfaceResult PickTreasureRelic(int idx);
     DecisionSurfaceResult SkipTreasure();
+    DecisionSurfaceResult StartNewRun(
+        CharacterModel character, string seed, int ascension);
+    DecisionSurfaceResult AbandonRun(LocalRunContext run);
+    DecisionSurfaceResult TravelTo(LocalRunContext run, MapPoint target);
+    DecisionSurfaceResult ClickCrystalCell(int col, int row);
+    bool MerchantPotionInteractionAvailable(PotionModel potion);
+    DecisionSurfaceResult UsePotion(PotionModel potion, Creature? target);
+    DecisionSurfaceResult DiscardPotion(
+        LocalRunContext run, uint slot, bool inCombat);
+    DecisionSurfaceResult PlayCard(
+        RunManager manager, CardModel card, Creature? target);
+    DecisionSurfaceResult EndTurn(
+        RunManager manager, Player player, int roundNumber);
     DecisionSurfaceResult ParkCombatRewards(CombatRoom room);
     void ResetRunChoices();
 
@@ -122,8 +143,11 @@ internal enum DecisionSurfaceError
     BadRequest,
     BadIndex,
     BadState,
+    BadTarget,
     Internal,
     NotReady,
+    ResolutionFailed,
+    ResolutionPartial,
 }
 
 internal readonly record struct DecisionSurfaceResult(
@@ -160,6 +184,120 @@ internal static class DecisionSurfaceActions
                 DecisionSurfaceError.BadRequest,
                 $"multiple alternatives — pass args.idx in [0,{count - 1}] (see obs.alternatives)")
             : DecisionSurfaceResult.Success();
+    }
+
+    public static DecisionSurfaceResult TravelTo(
+        LocalRunContext run, MapPoint target)
+    {
+        if (LocalQueueBlocked(run.Manager, run.Player))
+            return DecisionSurfaceResult.Reject(
+                DecisionSurfaceError.NotReady, "action queue is paused — retry");
+
+        // Read the source from the synchronizer itself: recomputing it races
+        // OnLocationChanged, and the engine silently drops a mismatched vote.
+        var synchronizer = run.Manager.MapSelectionSynchronizer;
+        var source = Reflect.FieldValue(
+            synchronizer, "_acceptingVotesFromSource") is MapLocation location
+                ? location
+                : new MapLocation(
+                    run.State.CurrentMapCoord, run.State.CurrentActIndex);
+        var destination = new MapVote
+        {
+            coord = target.coord,
+            mapGenerationCount = synchronizer.MapGenerationCount,
+        };
+        run.Manager.ActionQueueSet.EnqueueWithoutSynchronizing(
+            new VoteForMapCoordAction(run.Player, source, destination));
+        return DecisionSurfaceResult.Success();
+    }
+
+    public static bool MapAnimationBlocksTravel()
+    {
+        if (NMapScreen.Instance is not { } map) return false;
+        var introBlocked = Reflect.FieldValue(map, "_actAnimTween") is not null
+            && Reflect.FieldValue(map, "_canInterruptAnim") is not true;
+        var openFadeRunning = Reflect.FieldValue(map, "_tween") is Godot.Tween tween
+            && Godot.GodotObject.IsInstanceValid(tween) && tween.IsRunning();
+        return introBlocked || openFadeRunning
+            || Reflect.FieldValue(map, "_isInputDisabled") is true;
+    }
+
+    public static DecisionSurfaceResult ResolveInline(
+        string actionName, Action resolve)
+    {
+        var revisionBefore = Signals.Revision;
+        try
+        {
+            resolve();
+            ClearFaultedCompletedCombatExecutor();
+            return DecisionSurfaceResult.Success();
+        }
+        catch (Exception ex)
+        {
+            var fault = ResolutionGuards.ClassifyInlineFault(
+                ex,
+                actionName,
+                CombatManager.Instance is { IsInProgress: true },
+                Signals.Revision != revisionBefore);
+            if (fault is InlineFaultKind.VictorySettled)
+            {
+                ClearFaultedCompletedCombatExecutor();
+                SafeLog.Info(
+                    $"{actionName} settled by combat teardown ({ex.Message})");
+                return DecisionSurfaceResult.Success(
+                    $"{actionName} fully settled with victory cleanup");
+            }
+
+            Signals.Bump($"wedge:{actionName}");
+            SafeLog.Error($"{actionName} died mid-resolution", ex);
+            var partial = fault is InlineFaultKind.Partial;
+            return DecisionSurfaceResult.Reject(
+                partial
+                    ? DecisionSurfaceError.ResolutionPartial
+                    : DecisionSurfaceError.ResolutionFailed,
+                partial
+                    ? $"{actionName} changed the world before {ex.GetType().Name}: {ex.Message}"
+                    : $"{actionName} failed before an observable change: {ex.GetType().Name}: {ex.Message}",
+                status: 500);
+        }
+    }
+
+    private static bool LocalQueueBlocked(RunManager manager, Player player)
+    {
+        foreach (var queue in EngineQueues.All(manager))
+            if (queue.owner == player.NetId)
+                return queue.paused;
+        return false;
+    }
+
+    private static void ClearFaultedCompletedCombatExecutor()
+    {
+        if (LocalRunContext.Current is not { } run
+            || CombatManager.Instance is { IsInProgress: true }
+            || run.State.CurrentRoom is not CombatRoom { IsPreFinished: true })
+            return;
+
+        var executor = run.Manager.ActionExecutor;
+        if (executor?.CurrentlyRunningAction is not EndPlayerTurnAction
+            || Reflect.FieldValue(executor, "_queueTaskCompletionSource")
+                is not TaskCompletionSource<bool> completion
+            || !completion.Task.IsFaulted
+            || completion.Task.Exception is not { } completionError
+            || ResolutionGuards.ClassifyInlineFault(
+                completionError,
+                "EndPlayerTurnAction",
+                combatInProgress: false,
+                revisionChanged: false) is not InlineFaultKind.VictorySettled
+            || EngineQueues.All(run.Manager).Any(queue => queue.depth > 0))
+            return;
+
+        var completionCleared = Reflect.SetField(
+            executor, "_queueTaskCompletionSource", null);
+        var actionCleared = Reflect.SetPropertyOrBackingField(
+            executor, "CurrentlyRunningAction", null);
+        SafeLog.Info(completionCleared && actionCleared
+            ? "cleared faulted victory EndPlayerTurnAction executor state"
+            : "could not fully clear faulted victory EndPlayerTurnAction executor state");
     }
 
     // Relic-reward overlays are engine screens in both boots; unlike the
@@ -716,6 +854,90 @@ internal sealed class GuiDecisionSurface : IDecisionSurface
         return DecisionSurfaceResult.Success();
     }
 
+    public DecisionSurfaceResult StartNewRun(
+        CharacterModel character, string seed, int ascension)
+    {
+        if (NGame.Instance is not { } game
+            || game.MainMenu is not { } menu
+            || Reflect.FieldValue(menu, "_singleplayerButton")
+                is not NClickableControl { IsEnabled: true })
+            return NotReady("main menu not ready — retry");
+
+        DecisionSurfaceActions.Track(game.StartNewSingleplayerRun(
+            character,
+            shouldSave: true,
+            acts: ModelDb.Acts.ToList(),
+            modifiers: new List<ModifierModel>(),
+            seed: seed,
+            gameMode: GameMode.Standard,
+            ascensionLevel: ascension,
+            dailyTime: null), "new-run");
+        return DecisionSurfaceResult.Success();
+    }
+
+    public DecisionSurfaceResult AbandonRun(LocalRunContext run)
+    {
+        if (NGame.Instance is not { } game)
+            return NotReady("game shell not mounted — retry");
+        if (!run.Manager.IsAbandoned && !run.Manager.IsGameOver)
+            run.Manager.Abandon();
+        DecisionSurfaceActions.Track(
+            game.ReturnToMainMenuAfterRun(), "abandon");
+        return DecisionSurfaceResult.Success();
+    }
+
+    public DecisionSurfaceResult TravelTo(LocalRunContext run, MapPoint target) =>
+        DecisionSurfaceActions.MapAnimationBlocksTravel()
+            ? NotReady("map intro animation — retry")
+            : DecisionSurfaceActions.TravelTo(run, target);
+
+    public DecisionSurfaceResult ClickCrystalCell(int col, int row)
+    {
+        if (Screens.Crystal() is not { } screen)
+            return NotReady("crystal sphere screen not mounted");
+        var cell = FindCrystalCell(
+            Screens.CrystalCellContainer(screen), col, row);
+        if (cell is null)
+            return BadTarget($"no cell at {col},{row} (see obs.cells)");
+        if (Reflect.Invoke(screen, "OnCellClicked", cell) is Task task)
+            DecisionSurfaceActions.Track(task, "crystal-click");
+        return DecisionSurfaceResult.Success();
+    }
+
+    public bool MerchantPotionInteractionAvailable(PotionModel potion) =>
+        potion.PassesCustomUsabilityCheck;
+
+    public DecisionSurfaceResult UsePotion(
+        PotionModel potion, Creature? target)
+    {
+        potion.EnqueueManualUse(target!);
+        return DecisionSurfaceResult.Success();
+    }
+
+    public DecisionSurfaceResult DiscardPotion(
+        LocalRunContext run, uint slot, bool inCombat)
+    {
+        run.Manager.ActionQueueSynchronizer.RequestEnqueue(
+            new DiscardPotionGameAction(run.Player, slot, inCombat));
+        return DecisionSurfaceResult.Success();
+    }
+
+    public DecisionSurfaceResult PlayCard(
+        RunManager manager, CardModel card, Creature? target)
+    {
+        manager.ActionQueueSynchronizer.RequestEnqueue(
+            new PlayCardAction(card, target!));
+        return DecisionSurfaceResult.Success();
+    }
+
+    public DecisionSurfaceResult EndTurn(
+        RunManager manager, Player player, int roundNumber)
+    {
+        manager.ActionQueueSynchronizer.RequestEnqueue(
+            new EndPlayerTurnAction(player, roundNumber));
+        return DecisionSurfaceResult.Success();
+    }
+
     public void ResetRunChoices() { }
 
     public DecisionSurfaceResult ParkCombatRewards(CombatRoom room) =>
@@ -738,8 +960,27 @@ internal sealed class GuiDecisionSurface : IDecisionSurface
     private static DecisionSurfaceResult BadState(string message) =>
         DecisionSurfaceResult.Reject(DecisionSurfaceError.BadState, message);
 
+    private static DecisionSurfaceResult BadTarget(string message) =>
+        DecisionSurfaceResult.Reject(DecisionSurfaceError.BadTarget, message);
+
     private static DecisionSurfaceResult NotReady(string message) =>
         DecisionSurfaceResult.Reject(DecisionSurfaceError.NotReady, message);
+
+    private static object? FindCrystalCell(Godot.Node? node, int col, int row)
+    {
+        if (node is null) return null;
+        foreach (var child in node.GetChildren())
+        {
+            if (child.GetType().Name == "NCrystalSphereCell"
+                && Reflect.PropertyValue(child, "Entity") is { } entity
+                && Reflect.PropertyValue(entity, "X") is int x && x == col
+                && Reflect.PropertyValue(entity, "Y") is int y && y == row)
+                return child;
+            if (FindCrystalCell(child, col, row) is { } deeper)
+                return deeper;
+        }
+        return null;
+    }
 }
 
 internal sealed class HeadlessDecisionSurface : IDecisionSurface
@@ -1053,6 +1294,150 @@ internal sealed class HeadlessDecisionSurface : IDecisionSurface
         return ExitRoomToMap(run.Manager, run.State, "treasure proceed");
     }
 
+    public DecisionSurfaceResult StartNewRun(
+        CharacterModel character, string seed, int ascension)
+    {
+        try
+        {
+            var create = typeof(Player).GetMethods(
+                    System.Reflection.BindingFlags.Public
+                    | System.Reflection.BindingFlags.Static)
+                .First(method => method.Name == "CreateForNewRun"
+                    && method.IsGenericMethodDefinition
+                    && method.GetParameters().Length == 2)
+                .MakeGenericMethod(character.GetType());
+            var unlockAll = typeof(ModelDb).Assembly
+                .GetType("MegaCrit.Sts2.Core.Unlocks.UnlockState")!
+                .GetField("all")!.GetValue(null)!;
+            var player = (Player)create.Invoke(
+                null, new object[] { unlockAll, 1ul })!;
+
+            if (string.IsNullOrEmpty(seed))
+            {
+                var seedRng = new MegaCrit.Sts2.Core.Random.Rng(
+                    (uint)Random.Shared.Next(), 0);
+                seed = MegaCrit.Sts2.Core.Helpers.SeedHelper.GetRandomSeed(
+                    seedRng, 10);
+            }
+            var state = RunState.CreateForTest(
+                [player],
+                ModelDb.Acts.ToList(),
+                new List<ModifierModel>(),
+                GameMode.Standard,
+                ascension,
+                seed);
+
+            var manager = RunManager.Instance!;
+            var netService = new NetSingleplayerGameService();
+            manager.SetUpTest(state, netService, false, false);
+            LocalContext.NetId = netService.NetId;
+            Reflect.SetProperty(state.ExtraFields, "StartedWithNeow", true);
+            manager.GenerateRooms();
+            manager.Launch();
+            manager.EnterAct(0, false).GetAwaiter().GetResult();
+            return DecisionSurfaceResult.Success();
+        }
+        catch (Exception ex)
+        {
+            var root = ex.GetBaseException();
+            return DecisionSurfaceResult.Reject(
+                DecisionSurfaceError.Internal,
+                $"headless new-run failed: {root.GetType().Name}: {root.Message}");
+        }
+    }
+
+    public DecisionSurfaceResult AbandonRun(LocalRunContext run)
+    {
+        var manager = run.Manager;
+        if (!manager.IsAbandoned && !manager.IsGameOver)
+            TeardownAbandon(manager);
+
+        if (CombatManager.Instance is { } combat)
+        {
+            try { combat.Reset(graceful: true); }
+            catch (Exception ex)
+            {
+                SafeLog.Error("abandon combat reset", ex);
+            }
+        }
+        try { manager.ActionQueueSet?.Reset(); }
+        catch { }
+        Reflect.SetPropertyOrBackingField(manager, "State", null);
+        Reflect.SetPropertyOrBackingField(manager, "IsAbandoned", false);
+        ResetRunChoices();
+        return DecisionSurfaceResult.Success();
+    }
+
+    public DecisionSurfaceResult TravelTo(LocalRunContext run, MapPoint target) =>
+        DecisionSurfaceActions.TravelTo(run, target);
+
+    public DecisionSurfaceResult ClickCrystalCell(int col, int row)
+    {
+        if (HeadlessCrystal.Entity is not { } entity)
+            return BadState("no crystal sphere in progress");
+        var grid = entity.GridSize;
+        if (col < 0 || col >= grid.X || row < 0 || row >= grid.Y
+            || entity.cells[col, row] is not { } cell)
+            return BadTarget($"no cell at {col},{row} (see obs.cells)");
+        entity.CellClicked(cell).GetAwaiter().GetResult();
+        return DecisionSurfaceResult.Success();
+    }
+
+    public bool MerchantPotionInteractionAvailable(PotionModel potion) => true;
+
+    public DecisionSurfaceResult UsePotion(
+        PotionModel potion, Creature? target)
+    {
+        var result = DecisionSurfaceResult.Success();
+        HeadlessPicker.Around(() =>
+            result = DecisionSurfaceActions.ResolveInline(
+                potion.GetType().Name,
+                () => potion.EnqueueManualUse(target!)));
+        return result;
+    }
+
+    public DecisionSurfaceResult DiscardPotion(
+        LocalRunContext run, uint slot, bool inCombat) =>
+        DecisionSurfaceActions.ResolveInline(
+            nameof(DiscardPotionGameAction),
+            () => run.Manager.ActionQueueSet.EnqueueWithoutSynchronizing(
+                new DiscardPotionGameAction(run.Player, slot, inCombat)));
+
+    public DecisionSurfaceResult PlayCard(
+        RunManager manager, CardModel card, Creature? target)
+    {
+        var result = DecisionSurfaceResult.Success();
+        HeadlessPicker.Around(() =>
+            result = DecisionSurfaceActions.ResolveInline(
+                nameof(PlayCardAction),
+                () => manager.ActionQueueSet.EnqueueWithoutSynchronizing(
+                    new PlayCardAction(card, target!))));
+        return result;
+    }
+
+    public DecisionSurfaceResult EndTurn(
+        RunManager manager, Player player, int roundNumber) =>
+        DecisionSurfaceActions.ResolveInline(
+            nameof(EndPlayerTurnAction),
+            () => manager.ActionQueueSet.EnqueueWithoutSynchronizing(
+                new EndPlayerTurnAction(player, roundNumber)));
+
+    internal static void TeardownAbandon(RunManager manager)
+    {
+        try
+        {
+            Reflect.SetPropertyOrBackingField(manager, "IsAbandoned", true);
+            if (Reflect.Invoke(manager, "GuaranteeKillAllPlayers") is Task kill
+                && !kill.Wait(TimeSpan.FromSeconds(5)))
+                SafeLog.Info(
+                    "abandon: kill-players teardown still pending after 5s — resetting anyway");
+        }
+        catch (Exception ex)
+        {
+            SafeLog.Error("abandon (headless)", ex);
+        }
+    }
+
     public void ResetRunChoices()
     {
         _normalRewardsGrantedFor = null;
@@ -1158,6 +1543,9 @@ internal sealed class HeadlessDecisionSurface : IDecisionSurface
 
     private static DecisionSurfaceResult BadState(string message) =>
         DecisionSurfaceResult.Reject(DecisionSurfaceError.BadState, message);
+
+    private static DecisionSurfaceResult BadTarget(string message) =>
+        DecisionSurfaceResult.Reject(DecisionSurfaceError.BadTarget, message);
 
     private static DecisionSurfaceResult NotReady(string message) =>
         DecisionSurfaceResult.Reject(DecisionSurfaceError.NotReady, message);

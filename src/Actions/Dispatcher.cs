@@ -257,7 +257,8 @@ public static class Dispatcher
         if (target is null)
             return DispatchResult.Reject(RejectionCodes.BadTarget, $"no map node at {col},{row} (see obs.graph)");
 
-        return TravelTo(run.Manager, run.State, run.Player, target);
+        return FromDecisionSurface(
+            DecisionSurface.Current.TravelTo(run, target));
     }
 
     private static DispatchResult CheatGold(JsonElement args)
@@ -380,67 +381,8 @@ public static class Dispatcher
     {
         if (LocalRunContext.Current is not { } run)
             return DispatchResult.Reject(RejectionCodes.BadPhase, "no run to abandon");
-        var rm = run.Manager;
-        // The host installs an inert NGame dummy (display no-ops), so
-        // mode comes from RunMode, not from this instance's null-ness.
-        var game = RunMode.IsHeadless ? null : NGame.Instance;
-        if (!rm.IsAbandoned && !rm.IsGameOver)
-        {
-            if (game is null) HeadlessAbandonTeardown(rm);
-            else rm.Abandon();
-        }
-        if (game is { })
-        {
-            Fire(game.ReturnToMainMenuAfterRun(), "abandon");
-            return DispatchResult.Success();
-        }
-
-        // Headless: no NGame to run the menu transition. The post-state it
-        // would leave is just State == null and IsAbandoned == false; wipe
-        // both so PhaseDetector reads main_menu, and drop any parked
-        // headless stand-ins referencing the dead run.
-        //
-        // CombatManager is a static singleton, so a mid-combat abandon
-        // must go through the engine's own Reset: the forced player kills
-        // mint a _pendingLoss that references the DEAD run's state, and
-        // anything short of Reset leaves it (plus the queue synchronizer's
-        // in-combat state) on the instance — the next run's first combat
-        // then "ends" the moment it sets up, parking the room transition
-        // with a paused queue and phase unknown.
-        if (CombatManager.Instance is { } combat)
-        {
-            try { combat.Reset(graceful: true); }
-            catch (Exception ex) { SafeLog.Error("abandon combat reset", ex); }
-        }
-        // Stale queued actions must not leak into the next run.
-        try { rm.ActionQueueSet?.Reset(); } catch { }
-        Reflect.SetPropertyOrBackingField(rm, "State", null);
-        Reflect.SetPropertyOrBackingField(rm, "IsAbandoned", false);
-        DecisionSurface.Current.ResetRunChoices();
-        return DispatchResult.Success();
-    }
-
-    // The engine's Abandon() is UI-first and fire-and-forget: AbandonInternal
-    // closes screens (null headless — the engine catches the NRE but logs
-    // an error line) and then kills the players ASYNCHRONOUSLY (per
-    // player: forced kill + a scaled wait). Calling it and wiping state
-    // right after raced that teardown — its parked continuations fired
-    // into the NEXT run's combat, ending it the moment it loaded (instant
-    // combat_ended, transition queue left paused, phase parked at
-    // unknown). Replicate the meaningful half here, synchronously: same
-    // forced-kill pipeline, no UI closes, bounded wait so the wipe below
-    // always runs against a quiescent engine. Internal: the host boot's
-    // Trial double-down reroute runs the same screen-free abandon.
-    internal static void HeadlessAbandonTeardown(RunManager rm)
-    {
-        try
-        {
-            Reflect.SetPropertyOrBackingField(rm, "IsAbandoned", true);
-            if (Reflect.Invoke(rm, "GuaranteeKillAllPlayers") is Task kill
-                && !kill.Wait(TimeSpan.FromSeconds(5)))
-                SafeLog.Info("abandon: kill-players teardown still pending after 5s — resetting anyway");
-        }
-        catch (Exception ex) { SafeLog.Error("abandon (headless)", ex); }
+        return FromDecisionSurface(
+            DecisionSurface.Current.AbandonRun(run));
     }
 
     private static DispatchResult? RequirePhase(Phase need)
@@ -497,173 +439,10 @@ public static class Dispatcher
                 : DispatchResult.Reject(RejectionCodes.BadState, stateMessage);
     }
 
-    // Shared travel tail — the gates every travel verb must pass, then the
-    // engine's own vote enqueue.
     private static DispatchResult TravelTo(
-        RunManager rm, RunState rs, Player player, MapPoint target)
-    {
-        if (LocalQueueBlocked(rm, player))
-            return DispatchResult.Reject(RejectionCodes.NotReady, "action queue is paused — retry");
-        if (MapIntroBlocksTravel())
-            return DispatchResult.Reject(RejectionCodes.NotReady, "map intro animation — retry");
-        EnqueueMapVote(rm, rs, player, target.coord);
-        return DispatchResult.Success();
-    }
-
-    // The engine's own travel entry: a vote whose source is read from the
-    // synchronizer itself (recomputing it races OnLocationChanged and the
-    // mismatch is dropped with a silent Warn). Direct MoveToMapCoordAction
-    // is NOT equivalent — TravelToMapCoord's split-vote animation reads
-    // the vote display state and parks without it.
-    private static void EnqueueMapVote(
-        RunManager rm, RunState rs, Player player, MapCoord coord)
-    {
-        var sync = rm.MapSelectionSynchronizer;
-        var source = Reflect.FieldValue(sync, "_acceptingVotesFromSource") is MapLocation loc
-            ? loc
-            : new MapLocation(rs.CurrentMapCoord, rs.CurrentActIndex);
-        var dest = new MapVote { coord = coord, mapGenerationCount = sync.MapGenerationCount };
-        rm.ActionQueueSet.EnqueueWithoutSynchronizing(
-            new VoteForMapCoordAction(player, source, dest));
-    }
-
-    // Traveling while the act-intro animation is still uninterruptable
-    // parks MoveToMapCoordAction inside NMapScreen.TravelToMapCoord
-    // forever (executor shows Executing, nothing progresses). This is the
-    // engine's own CanScroll predicate: safe once the intro tween is gone
-    // or past its interruptable point, and input isn't briefly disabled.
-    private static bool MapIntroBlocksTravel()
-    {
-        if (NMapScreen.Instance is not { } map) return false;
-        var introBlocked = Reflect.FieldValue(map, "_actAnimTween") is not null
-            && Reflect.FieldValue(map, "_canInterruptAnim") is not true;
-        // A travel started while the map's open fade is still running
-        // parks inside TravelToMapCoord's animation awaits and wedges the
-        // serial executor permanently. Gate on the fade tween itself —
-        // the engine state, not a wall clock.
-        var openFadeRunning = Reflect.FieldValue(map, "_tween") is Godot.Tween t
-            && Godot.GodotObject.IsInstanceValid(t) && t.IsRunning();
-        return introBlocked || openFadeRunning
-            || Reflect.FieldValue(map, "_isInputDisabled") is true;
-    }
-
-    // The engine parks paused player queues (event choices, screen
-    // transitions); an action enqueued into one sits invisibly until an
-    // unpause that may be frames away. Surface that as not_ready so the
-    // agent retries deterministically instead of waiting on silence.
-    private static bool LocalQueueBlocked(RunManager rm, Player player)
-    {
-        foreach (var q in EngineQueues.All(rm))
-            if (q.owner == player.NetId)
-                return q.paused;
-        return false;
-    }
-
-    // Single owner of the enqueue-mode swap: GUI rides the synchronizer
-    // (the queue drains on frames), headless enqueues directly and the
-    // queue drains inline before this returns.
-    //
-    // Returns a success note when the action's own resolution ended the combat out
-    // from under its queue bookkeeping: victory teardown clears the
-    // queues, so the engine's pop of the finished action finds nothing
-    // and throws even though every effect already settled. Any other
-    // mid-drain throw aborts the rest of the resolution chain with no
-    // executor left running — a shape the stuck-executor watchdog can
-    // never see — so announce the wedge here before rethrowing.
-    private static DispatchResult Enqueue(RunManager rm, GameAction action)
-    {
-        if (!RunMode.IsHeadless)
-        {
-            rm.ActionQueueSynchronizer.RequestEnqueue(action);
-            return DispatchResult.Success();
-        }
-        return ResolveInline(action.GetType().Name,
-            () => rm.ActionQueueSet.EnqueueWithoutSynchronizing(action));
-    }
-
-    // Headless engine entry points drain synchronously. Victory teardown
-    // can therefore clear the queue before the just-finished action pops
-    // itself; that exact exception means the effect completed, while any
-    // other exception is a genuine abandoned-resolution wedge.
-    private static DispatchResult ResolveInline(string actionName, Action resolve)
-    {
-        var revisionBefore = Signals.Revision;
-        try
-        {
-            resolve();
-            ClearFaultedCompletedCombatExecutor();
-            return DispatchResult.Success();
-        }
-        catch (Exception ex)
-        {
-            var fault = ResolutionGuards.ClassifyInlineFault(
-                ex,
-                actionName,
-                CombatManager.Instance is { IsInProgress: true },
-                Signals.Revision != revisionBefore);
-            if (fault is InlineFaultKind.VictorySettled)
-            {
-                // Victory teardown clears the queues before the completed
-                // action pops itself. The executor then retains its faulted
-                // completion task even though combat and its effects finished;
-                // StartCombatInternal observes that same task in the next
-                // room and faults before the new fight can start. Normalize
-                // the already-empty bookkeeping at this exact known-success
-                // boundary. Other inline faults still become wedges below.
-                ClearFaultedCompletedCombatExecutor();
-                SafeLog.Info($"{actionName} settled by combat teardown ({ex.Message})");
-                return DispatchResult.Success(
-                    $"{actionName} fully settled with victory cleanup");
-            }
-
-            Signals.Bump($"wedge:{actionName}");
-            SafeLog.Error($"{actionName} died mid-resolution", ex);
-            var partial = fault is InlineFaultKind.Partial;
-            return DispatchResult.Reject(
-                partial ? RejectionCodes.ResolutionPartial : RejectionCodes.ResolutionFailed,
-                partial
-                    ? $"{actionName} changed the world before {ex.GetType().Name}: {ex.Message}"
-                    : $"{actionName} failed before an observable change: {ex.GetType().Name}: {ex.Message}",
-                status: 500);
-        }
-    }
-
-    private static void ClearFaultedCompletedCombatExecutor()
-    {
-        if (LocalRunContext.Current is not { } run
-            || CombatManager.Instance is { IsInProgress: true }
-            || run.State.CurrentRoom is not CombatRoom { IsPreFinished: true })
-            return;
-        var rm = run.Manager;
-
-        var executor = rm.ActionExecutor;
-        if (executor?.CurrentlyRunningAction is not EndPlayerTurnAction
-            || Reflect.FieldValue(executor, "_queueTaskCompletionSource")
-                is not TaskCompletionSource<bool> completion
-            || !completion.Task.IsFaulted
-            || completion.Task.Exception is not { } completionError
-            || ResolutionGuards.ClassifyInlineFault(
-                completionError,
-                "EndPlayerTurnAction",
-                combatInProgress: false,
-                revisionChanged: false) is not InlineFaultKind.VictorySettled
-            || EngineQueues.All(rm).Any(queue => queue.depth > 0))
-            return;
-
-        // ActionExecutor stores its last run in this completion source.
-        // The engine logs the stale-pop exception via RunSafely, but leaves
-        // the faulted task here; the next StartCombatInternal awaits it and
-        // faults before registering the new fight. Clear only this completed,
-        // faulted EndPlayerTurnAction state. ActionQueueSet.Reset is not safe
-        // between rooms because it also deletes every player queue.
-        var completionCleared = Reflect.SetField(
-            executor, "_queueTaskCompletionSource", null);
-        var actionCleared = Reflect.SetPropertyOrBackingField(
-            executor, "CurrentlyRunningAction", null);
-        SafeLog.Info(completionCleared && actionCleared
-            ? "cleared faulted victory EndPlayerTurnAction executor state"
-            : "could not fully clear faulted victory EndPlayerTurnAction executor state");
-    }
+        LocalRunContext run, MapPoint target) =>
+        FromDecisionSurface(
+            DecisionSurface.Current.TravelTo(run, target));
 
     // Engine calls that return Tasks must not block the main thread —
     // fire them and surface failures in the log.
@@ -737,79 +516,9 @@ public static class Dispatcher
             return DispatchResult.Reject(RejectionCodes.BadRequest,
                 "args.ascension must be a non-negative 32-bit integer");
 
-        var game = RunMode.IsHeadless ? null : NGame.Instance;
-        if (game is null) return NewRunHeadless(character, seed, ascension);
-
-        // The same gate a human click passes: the menu enables its
-        // singleplayer button only once boot preloads settle. A launch
-        // fired earlier parks StartRun inside asset loading forever.
-        if (game.MainMenu is not { } menu
-            || Reflect.FieldValue(menu, "_singleplayerButton")
-                is not NClickableControl { IsEnabled: true })
-            return DispatchResult.Reject(RejectionCodes.NotReady, "main menu not ready — retry");
-
-        Fire(game.StartNewSingleplayerRun(
-            character,
-            shouldSave: true,
-            acts: ModelDb.Acts.ToList(),
-            modifiers: new List<ModifierModel>(),
-            seed: seed,
-            gameMode: GameMode.Standard,
-            ascensionLevel: ascension,
-            dailyTime: null), "new-run");
-        return DispatchResult.Success();
-    }
-
-    // Headless run launch through the engine's own test entry points
-    // (RunState.CreateForTest / RunManager.SetUpTest) — the same path
-    // sts2's tests use, which never touches NGame, scenes, or Steam.
-    private static DispatchResult NewRunHeadless(CharacterModel character, string seed, int ascension)
-    {
-        try
-        {
-            var asm = typeof(ModelDb).Assembly;
-
-            // Player.CreateForNewRun<TChar>(UnlockState, seed) is generic in
-            // the concrete character subtype — character.GetType() is it.
-            var create = typeof(Player).GetMethods(
-                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)
-                .First(m => m.Name == "CreateForNewRun"
-                    && m.IsGenericMethodDefinition && m.GetParameters().Length == 2)
-                .MakeGenericMethod(character.GetType());
-            var unlockAll = asm.GetType("MegaCrit.Sts2.Core.Unlocks.UnlockState")!
-                .GetField("all")!.GetValue(null)!;
-            var player = (Player)create.Invoke(null, new object[] { unlockAll, 1ul })!;
-
-            if (string.IsNullOrEmpty(seed))
-            {
-                var seedRng = new MegaCrit.Sts2.Core.Random.Rng((uint)Random.Shared.Next(), 0);
-                seed = MegaCrit.Sts2.Core.Helpers.SeedHelper.GetRandomSeed(seedRng, 10);
-            }
-            var runState = RunState.CreateForTest(
-                new[] { player }, ModelDb.Acts.ToList(), new List<ModifierModel>(),
-                GameMode.Standard, ascension, seed);
-
-            var rm = RunManager.Instance!;
-            var netSvc = new MegaCrit.Sts2.Core.Multiplayer.NetSingleplayerGameService();
-            rm.SetUpTest(runState, netSvc, false, false);
-            LocalContext.NetId = netSvc.NetId;
-
-            // Without StartedWithNeow the run skips the Neow event and
-            // drops straight onto the act-1 map — GUI runs start at Neow,
-            // so keep the modes identical.
-            Reflect.SetProperty(runState.ExtraFields, "StartedWithNeow", true);
-
-            rm.GenerateRooms();
-            rm.Launch();
-            rm.EnterAct(0, false).GetAwaiter().GetResult();
-            return DispatchResult.Success();
-        }
-        catch (Exception ex)
-        {
-            var root = ex.GetBaseException();
-            return DispatchResult.Reject(RejectionCodes.Internal,
-                $"headless new-run failed: {root.GetType().Name}: {root.Message}");
-        }
+        return FromDecisionSurface(
+            DecisionSurface.Current.StartNewRun(
+                character, seed, ascension));
     }
 
     // ---- event / rest site ----------------------------------------------
@@ -831,45 +540,8 @@ public static class Dispatcher
     // ---- crystal sphere ---------------------------------------------------
 
     private static DispatchResult CrystalClick(int col, int row)
-    {
-        // Host: no screen — click the minigame model itself; its own
-        // completion fires on the last divination.
-        if (RunMode.IsHeadless)
-        {
-            if (HeadlessCrystal.Entity is not { } entity)
-                return DispatchResult.Reject(RejectionCodes.BadState,
-                    "no crystal sphere in progress");
-            var grid = entity.GridSize;
-            if (col < 0 || col >= grid.X || row < 0 || row >= grid.Y
-                || entity.cells[col, row] is not { } cell)
-                return DispatchResult.Reject(RejectionCodes.BadTarget, $"no cell at {col},{row} (see obs.cells)");
-            entity.CellClicked(cell).GetAwaiter().GetResult();
-            return DispatchResult.Success();
-        }
-
-        if (Screens.Crystal() is not { } screen)
-            return DispatchResult.Reject(RejectionCodes.NotReady, "crystal sphere screen not mounted");
-        var uiCell = FindCrystalCell(Screens.CrystalCellContainer(screen), col, row);
-        if (uiCell is null)
-            return DispatchResult.Reject(RejectionCodes.BadTarget, $"no cell at {col},{row} (see obs.cells)");
-        if (Reflect.Invoke(screen, "OnCellClicked", uiCell) is Task cellTask) Fire(cellTask, "crystal-click");
-        return DispatchResult.Success();
-    }
-
-    private static object? FindCrystalCell(Godot.Node? node, int col, int row)
-    {
-        if (node is null) return null;
-        foreach (var child in node.GetChildren())
-        {
-            if (child.GetType().Name == "NCrystalSphereCell"
-                && Reflect.PropertyValue(child, "Entity") is { } entity
-                && Reflect.PropertyValue(entity, "X") is int x && x == col
-                && Reflect.PropertyValue(entity, "Y") is int y && y == row)
-                return child;
-            if (FindCrystalCell(child, col, row) is { } deeper) return deeper;
-        }
-        return null;
-    }
+        => FromDecisionSurface(
+            DecisionSurface.Current.ClickCrystalCell(col, row));
 
     private static DispatchResult CrystalTool(int idx)
     {
@@ -1053,8 +725,13 @@ public static class Dispatcher
             DecisionSurfaceError.BadRequest => RejectionCodes.BadRequest,
             DecisionSurfaceError.BadIndex => RejectionCodes.BadIndex,
             DecisionSurfaceError.BadState => RejectionCodes.BadState,
+            DecisionSurfaceError.BadTarget => RejectionCodes.BadTarget,
             DecisionSurfaceError.Internal => RejectionCodes.Internal,
             DecisionSurfaceError.NotReady => RejectionCodes.NotReady,
+            DecisionSurfaceError.ResolutionFailed =>
+                RejectionCodes.ResolutionFailed,
+            DecisionSurfaceError.ResolutionPartial =>
+                RejectionCodes.ResolutionPartial,
             _ => RejectionCodes.Internal,
         };
         return DispatchResult.Reject(
@@ -1183,7 +860,7 @@ public static class Dispatcher
                 $"node {col},{row} not reachable; reachable col,row: [{legal}]");
         }
 
-        return TravelTo(run.Manager, run.State, run.Player, target);
+        return TravelTo(run, target);
     }
 
     // ---- combat ----------------------------------------------------------
@@ -1253,15 +930,13 @@ public static class Dispatcher
             && potion.Usage == PotionUsage.AnyTime
             && player.Creature is { IsDead: false }
             && player.CanUseOrRemovePotions
-            && (potion.PassesCustomUsabilityCheck || RunMode.IsHeadless);
+            && DecisionSurface.Current
+                .MerchantPotionInteractionAvailable(potion);
         if (!usable)
             return DispatchResult.Reject(RejectionCodes.NotPlayable,
                 $"{potion.Id.Entry} has no available merchant interaction in this shop");
-        if (RunMode.IsHeadless)
-            return ResolveInline(potion.GetType().Name,
-                () => potion.EnqueueManualUse(null!));
-        potion.EnqueueManualUse(null!);
-        return DispatchResult.Success();
+        return FromDecisionSurface(
+            DecisionSurface.Current.UsePotion(potion, target: null));
     }
 
     private static DispatchResult PotionUse(
@@ -1278,17 +953,10 @@ public static class Dispatcher
 
         var (target, err) = ResolveTarget(potion.TargetType, args, state, player);
         if (err is not null) return err.Value;
-        // Some potions (Attack Potion, …) open a card pick mid-effect.
-        var result = DispatchResult.Success();
-        HeadlessPicker.Around(() =>
-        {
-            if (RunMode.IsHeadless)
-                result = ResolveInline(potion.GetType().Name,
-                    () => potion.EnqueueManualUse(target!));
-            else
-                potion.EnqueueManualUse(target!);
-        });
-        return result;
+        // Some potions (Attack Potion, …) open a card pick mid-effect;
+        // completion ownership belongs to the boot-selected adapter.
+        return FromDecisionSurface(
+            DecisionSurface.Current.UsePotion(potion, target));
     }
 
     // Discarding is legal anywhere a run is active (clears a slot for a
@@ -1310,8 +978,11 @@ public static class Dispatcher
         if (slot < 0 || slot >= slots.Count || slots[slot] is null)
             return DispatchResult.Reject(RejectionCodes.BadIndex, $"no potion in slot {slot}");
 
-        return Enqueue(run.Manager, new DiscardPotionGameAction(
-            player, (uint)slot, CombatManager.Instance is { IsInProgress: true }));
+        return FromDecisionSurface(
+            DecisionSurface.Current.DiscardPotion(
+                run,
+                (uint)slot,
+                CombatManager.Instance is { IsInProgress: true }));
     }
 
     private static DispatchResult Play(JsonElement args, CombatState state, Player player)
@@ -1350,19 +1021,16 @@ public static class Dispatcher
         var (target, err) = ResolveTarget(card.TargetType, args, state, player);
         if (err is not null) return err.Value;
 
-        // Headless: cards that ask for a hand/pile pick mid-resolution
-        // await the deferred picker; the play action stays pending (phase
-        // flips to hand_select) until pick-card resolves it.
-        var result = DispatchResult.Success();
-        HeadlessPicker.Around(() =>
-            result = Enqueue(RunManager.Instance!, new PlayCardAction(card, target!)));
-        return result;
+        return FromDecisionSurface(
+            DecisionSurface.Current.PlayCard(
+                RunManager.Instance!, card, target));
     }
 
     private static DispatchResult EndTurn(CombatState state, Player player)
     {
-        return Enqueue(RunManager.Instance!,
-            new EndPlayerTurnAction(player, state.RoundNumber));
+        return FromDecisionSurface(
+            DecisionSurface.Current.EndTurn(
+                RunManager.Instance!, player, state.RoundNumber));
     }
 
     private static (Creature? target, DispatchResult? err) ResolveTarget(

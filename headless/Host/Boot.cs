@@ -730,12 +730,12 @@ internal static class HeadlessBoot
     {
         // The popup's accepted action is RunManager.Abandon(), but engine
         // AbandonInternal opens with screen closes that NRE headless and
-        // log an error line — use the dispatcher's screen-free teardown
+        // log an error line — use the headless adapter's screen-free teardown
         // (same IsAbandoned + forced-kill pipeline, no UI).
         try
         {
             if (RunManager.Instance is { } rm)
-                Spirescry.Actions.Dispatcher.HeadlessAbandonTeardown(rm);
+                HeadlessDecisionSurface.TeardownAbandon(rm);
         }
         catch (Exception ex) { HostLog.Error("trial double-down abandon", ex); }
         __result = Task.CompletedTask;
