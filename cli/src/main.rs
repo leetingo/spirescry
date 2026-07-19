@@ -651,7 +651,7 @@ fn state_fingerprint(value: &Value) -> String {
 }
 
 // Keep this shape aligned with SnapshotContract.ConsumerProjection. It is a
-// deliberately small replay/settlement contract, not a hash of arbitrary
+// deliberate semantic replay/settlement contract, not a hash of arbitrary
 // presentation extensions in /obs.
 fn consumer_projection(value: &Value) -> Value {
     let mut result = Map::new();
@@ -662,6 +662,15 @@ fn consumer_projection(value: &Value) -> Value {
             .and_then(Value::as_str)
             .map_or(Value::Null, |phase| Value::String(phase.into())),
     );
+    copy_string(value, &mut result, "id", "id");
+    copy_number(value, &mut result, "act");
+    copy_int_array(value, &mut result, "current");
+    copy_number(value, &mut result, "turn");
+    copy_string(value, &mut result, "outcome", "outcome");
+    copy_int_array(value, &mut result, "hp");
+    copy_number(value, &mut result, "gold");
+    copy_string_array(value, &mut result, "semanticState");
+    copy_string_array(value, &mut result, "selected");
     copy_string(value, &mut result, "side", "side");
     for field in [
         "actionsDisabled",
@@ -692,8 +701,21 @@ fn consumer_projection(value: &Value) -> Value {
     ] {
         result.insert(field.into(), item_array(value.get(field)));
     }
+    if let Some(you) = value.get("you").filter(|you| you.is_object()) {
+        let mut projected = Map::new();
+        projected.insert("hp".into(), int_array(you.get("hp")));
+        copy_number(you, &mut projected, "block");
+        projected.insert("energy".into(), int_array(you.get("energy")));
+        copy_number(you, &mut projected, "stars");
+        copy_string_array(you, &mut projected, "semanticState");
+        result.insert("you".into(), Value::Object(projected));
+    }
+    result.insert("enemies".into(), enemy_array(value.get("enemies")));
     if let Some(player) = value.get("player").filter(|player| player.is_object()) {
         let mut projected = Map::new();
+        copy_int_array(player, &mut projected, "hp");
+        copy_number(player, &mut projected, "gold");
+        copy_string_array(player, &mut projected, "semanticState");
         projected.insert("potions".into(), item_array(player.get("potions")));
         result.insert("player".into(), Value::Object(projected));
     }
@@ -732,7 +754,17 @@ fn item_projection(value: &Value) -> Value {
     if let Some(index) = value.get("idx").and_then(Value::as_i64) {
         result.insert("index".into(), Value::Number(index.into()));
     }
+    copy_string(value, &mut result, "id", "id");
+    copy_string(value, &mut result, "model", "model");
+    copy_string(value, &mut result, "selector", "selector");
+    copy_number(value, &mut result, "slot");
+    copy_string(value, &mut result, "target", "target");
+    copy_number(value, &mut result, "col");
+    copy_number(value, &mut result, "row");
+    copy_string(value, &mut result, "type", "type");
+    copy_string_array(value, &mut result, "semanticState");
     for field in [
+        "selected",
         "playable",
         "locked",
         "chosen",
@@ -744,6 +776,66 @@ fn item_projection(value: &Value) -> Value {
     }
     result.insert("cards".into(), item_array(value.get("cards")));
     Value::Object(result)
+}
+
+fn enemy_array(value: Option<&Value>) -> Value {
+    Value::Array(
+        value
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|enemy| enemy.is_object())
+            .map(|enemy| {
+                let mut result = Map::new();
+                copy_number(enemy, &mut result, "id");
+                copy_string(enemy, &mut result, "model", "model");
+                result.insert("hp".into(), int_array(enemy.get("hp")));
+                copy_number(enemy, &mut result, "block");
+                copy_bool(enemy, &mut result, "alive", "alive");
+                copy_string_array(enemy, &mut result, "semanticState");
+                Value::Object(result)
+            })
+            .collect(),
+    )
+}
+
+fn int_array(value: Option<&Value>) -> Value {
+    Value::Array(
+        value
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|item| item.is_number())
+            .cloned()
+            .collect(),
+    )
+}
+
+fn copy_int_array(source: &Value, target: &mut Map<String, Value>, key: &str) {
+    if source.get(key).is_some_and(Value::is_array) {
+        target.insert(key.into(), int_array(source.get(key)));
+    }
+}
+
+fn copy_string_array(source: &Value, target: &mut Map<String, Value>, key: &str) {
+    if let Some(values) = source.get(key).and_then(Value::as_array) {
+        target.insert(
+            key.into(),
+            Value::Array(
+                values
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(|value| Value::String(value.into()))
+                    .collect(),
+            ),
+        );
+    }
+}
+
+fn copy_number(source: &Value, target: &mut Map<String, Value>, key: &str) {
+    if let Some(value) = source.get(key).filter(|value| value.is_number()) {
+        target.insert(key.into(), value.clone());
+    }
 }
 
 fn copy_string(source: &Value, target: &mut Map<String, Value>, source_key: &str, key: &str) {
@@ -1311,6 +1403,11 @@ mod tests {
         });
         let extension_changed = json!({
             "phase":"combat", "rev":900, "runId":"replay", "decorativeFrame":"b",
+            "side":"player", "hand":[{"idx":0, "model":"STRIKE_R", "playable":true}],
+            "legal":["play", "end-turn"]
+        });
+        let card_changed = json!({
+            "phase":"combat", "rev":1, "runId":"source", "decorativeFrame":"a",
             "side":"player", "hand":[{"idx":0, "model":"BASH", "playable":true}],
             "legal":["play", "end-turn"]
         });
@@ -1325,7 +1422,173 @@ mod tests {
             state_fingerprint(&a),
             state_fingerprint(&typed_state_changed)
         );
-        assert_eq!(state_fingerprint(&a), "8f0945d175edb49c");
+        assert_ne!(state_fingerprint(&a), state_fingerprint(&card_changed));
+    }
+
+    #[test]
+    fn replay_fingerprint_tracks_target_identities_and_coordinates() {
+        let original = json!({
+            "phase":"combat", "act":1, "current":[2,3],
+            "next":[{"idx":0,"id":"PATH_A","col":3,"row":4,"type":"monster"}],
+            "hand":[{"idx":0,"model":"STRIKE_R","playable":true}],
+            "relics":[{"idx":0,"model":"VAJRA"}],
+            "enemies":[{"id":7,"model":"CULTIST","hp":[30,40],"block":0,"alive":true}],
+            "legal":["play","end-turn"]
+        });
+        let mut changed = original.clone();
+
+        changed["next"][0]["col"] = json!(4);
+        assert_ne!(state_fingerprint(&original), state_fingerprint(&changed));
+        changed = original.clone();
+        changed["hand"][0]["model"] = json!("BASH");
+        assert_ne!(state_fingerprint(&original), state_fingerprint(&changed));
+        changed = original.clone();
+        changed["relics"][0]["model"] = json!("ANCHOR");
+        assert_ne!(state_fingerprint(&original), state_fingerprint(&changed));
+        changed = original.clone();
+        changed["enemies"][0]["id"] = json!(8);
+        assert_ne!(state_fingerprint(&original), state_fingerprint(&changed));
+    }
+
+    #[test]
+    fn replay_fingerprint_tracks_hp_gold_and_combat_resources() {
+        let original = json!({
+            "phase":"combat", "gold":100,
+            "you":{"hp":[60,80],"block":5,"energy":[2,3],"stars":1},
+            "player":{"hp":[60,80],"gold":100,"potions":[]},
+            "enemies":[{"id":7,"model":"CULTIST","hp":[30,40],"block":0,"alive":true}],
+            "legal":["play","end-turn"]
+        });
+        let mut changed = original.clone();
+
+        changed["you"]["hp"][0] = json!(59);
+        assert_ne!(state_fingerprint(&original), state_fingerprint(&changed));
+        changed = original.clone();
+        changed["you"]["energy"][0] = json!(1);
+        assert_ne!(state_fingerprint(&original), state_fingerprint(&changed));
+        changed = original.clone();
+        changed["player"]["gold"] = json!(99);
+        assert_ne!(state_fingerprint(&original), state_fingerprint(&changed));
+        changed = original.clone();
+        changed["enemies"][0]["hp"][0] = json!(29);
+        assert_ne!(state_fingerprint(&original), state_fingerprint(&changed));
+    }
+
+    #[test]
+    fn replay_fingerprint_matches_the_typed_host_fixture() {
+        let snapshot = json!({
+            "phase":"combat", "act":1, "current":[2,3], "gold":100,
+            "semanticState":["pile:draw:STRIKE_R"],
+            "selected":["STRIKE_R"], "side":"player",
+            "next":[{"idx":0,"id":"PATH_A","col":3,"row":4,"type":"monster"}],
+            "hand":[{
+                "idx":0,"model":"STRIKE_R","playable":true,"selected":false,
+                "semanticState":["cost:1"]
+            }],
+            "relics":[{"idx":0,"model":"VAJRA"}],
+            "you":{
+                "hp":[60,80],"block":5,"energy":[2,3],"stars":1,
+                "semanticState":["power:STRENGTH:1"]
+            },
+            "enemies":[{
+                "id":7,"model":"CULTIST","hp":[30,40],"block":0,"alive":true,
+                "semanticState":["intent:attack:6:1"]
+            }],
+            "player":{
+                "hp":[60,80],"gold":100,"potions":[],
+                "semanticState":["deck:STRIKE_R"]
+            },
+            "legal":["play","end-turn"]
+        });
+
+        assert_eq!(state_fingerprint(&snapshot), "d4c312db8769179e");
+    }
+
+    #[test]
+    fn replay_fingerprint_tracks_action_target_grammar() {
+        let original = json!({
+            "phase":"combat", "id":"BIG_FISH", "turn":2,
+            "hand":[{
+                "idx":0,"model":"BASH","selector":"BASH+","slot":1,
+                "target":"anyenemy"
+            }],
+            "legal":["play","end-turn"]
+        });
+        let mut changed = original.clone();
+
+        changed["turn"] = json!(3);
+        assert_ne!(state_fingerprint(&original), state_fingerprint(&changed));
+        changed = original.clone();
+        changed["id"] = json!("SCRAP_OOZE");
+        assert_ne!(state_fingerprint(&original), state_fingerprint(&changed));
+        changed = original.clone();
+        changed["hand"][0]["selector"] = json!("BASH");
+        assert_ne!(state_fingerprint(&original), state_fingerprint(&changed));
+        changed = original.clone();
+        changed["hand"][0]["slot"] = json!(2);
+        assert_ne!(state_fingerprint(&original), state_fingerprint(&changed));
+        changed = original.clone();
+        changed["hand"][0]["target"] = json!("self");
+        assert_ne!(state_fingerprint(&original), state_fingerprint(&changed));
+    }
+
+    #[test]
+    fn replay_game_over_fingerprint_matches_the_typed_host_fixture() {
+        let snapshot = json!({
+            "phase":"game_over", "outcome":"victory", "hp":[20,80],
+            "gold":100
+        });
+
+        assert_eq!(state_fingerprint(&snapshot), "c02643081d2c619c");
+    }
+
+    #[test]
+    fn replay_fingerprint_tracks_typed_semantic_state() {
+        let original = json!({
+            "phase":"combat", "semanticState":["pile:draw:BASH+"],
+            "selected":["BASH+"],
+            "hand":[{
+                "idx":0, "model":"BASH", "selector":"BASH+",
+                "selected":false, "semanticState":["cost:2"]
+            }],
+            "player":{
+                "hp":[60,80], "gold":100, "potions":[],
+                "semanticState":["deck:BASH+"]
+            },
+            "you":{
+                "hp":[60,80], "energy":[2,3],
+                "semanticState":["power:STRENGTH:1"]
+            },
+            "enemies":[{
+                "id":7, "model":"CULTIST", "hp":[30,40],
+                "semanticState":["intent:attack:6:1"]
+            }],
+            "legal":["play","end-turn"]
+        });
+        let mut presentation_changed = original.clone();
+        presentation_changed["decorativeFrame"] = json!("plain");
+        presentation_changed["hand"][0]["title"] = json!("localized title");
+        presentation_changed["player"]["deckDescription"] = json!("localized deck");
+        presentation_changed["you"]["powerDescription"] = json!("localized power");
+        presentation_changed["enemies"][0]["title"] = json!("localized enemy");
+
+        assert_eq!(
+            state_fingerprint(&original),
+            state_fingerprint(&presentation_changed)
+        );
+
+        for (pointer, value) in [
+            ("/semanticState/0", json!("pile:draw:STRIKE_R")),
+            ("/hand/0/semanticState/0", json!("cost:1")),
+            ("/player/semanticState/0", json!("deck:STRIKE_R")),
+            ("/you/semanticState/0", json!("power:WEAK:1")),
+            ("/enemies/0/semanticState/0", json!("intent:attack:12:1")),
+            ("/hand/0/selected", json!(true)),
+        ] {
+            let mut changed = original.clone();
+            *changed.pointer_mut(pointer).unwrap() = value;
+            assert_ne!(state_fingerprint(&original), state_fingerprint(&changed));
+        }
     }
 
     #[test]

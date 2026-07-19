@@ -25,6 +25,7 @@ using MegaCrit.Sts2.Core.Nodes.Screens.Overlays;
 using MegaCrit.Sts2.Core.Rewards;
 using MegaCrit.Sts2.Core.Rooms;
 using MegaCrit.Sts2.Core.Runs;
+using System.Text.Json;
 using CrystalItem = MegaCrit.Sts2.Core.Events.Custom.CrystalSphereEvent.CrystalSphereItem;
 using CrystalMinigame = MegaCrit.Sts2.Core.Events.Custom.CrystalSphereEvent.CrystalSphereMinigame;
 
@@ -88,11 +89,72 @@ internal static class Snapshotter
         return snapshot;
     }
 
-    private static SnapshotItemContract Item(object extensions, int? index = null)
+    private static SnapshotItemContract Item(
+        object extensions,
+        int? index = null,
+        string? id = null,
+        string? model = null,
+        string? selector = null,
+        int? slot = null,
+        string? target = null,
+        int? col = null,
+        int? row = null,
+        string? type = null,
+        string[]? semanticState = null,
+        bool? selected = null)
     {
-        var item = new SnapshotItemContract { Index = index };
+        var item = new SnapshotItemContract
+        {
+            Index = index,
+            Id = id,
+            Model = model,
+            Selector = selector,
+            Slot = slot,
+            Target = target,
+            Col = col,
+            Row = row,
+            Type = type,
+            SemanticState = semanticState,
+            Selected = selected,
+        };
         item.AddExtensions(extensions);
         return item;
+    }
+
+    // Rich/localized wire fields remain available to agents. These compact,
+    // locale-free tokens are their typed semantic mirror for settlement and
+    // replay; callers sort collections whose domain order is irrelevant.
+    private static string SemanticToken(string kind, params object?[] values) =>
+        $"{kind}:{JsonSerializer.Serialize(values)}";
+
+    private static string CardStateToken(CardModel card, bool liveCost = false)
+    {
+        var variables = CardSpecifier.DynamicVars(card)?
+            .OrderBy(pair => pair.Key, StringComparer.Ordinal)
+            .Select(pair => new object[] { pair.Key, pair.Value })
+            .ToArray() ?? [];
+        return SemanticToken(
+            "card",
+            CardSpecifier.From(card),
+            liveCost ? card.EnergyCost.GetAmountToSpend() : card.EnergyCost.Canonical,
+            CardSpecifier.StarCost(card),
+            card.Keywords.Contains(CardKeyword.Unplayable),
+            variables);
+    }
+
+    private static string RelicStateToken(RelicModel relic) =>
+        SemanticToken("relic", relic.Id.Entry, RelicCounter(relic), relic.IsUsedUp);
+
+    private static string[] PowerState(Creature creature)
+    {
+        try
+        {
+            return creature.Powers
+                .Select(power => SemanticToken("power", power.Id.Entry, power.Amount))
+                .OrderBy(token => token, StringComparer.Ordinal)
+                .ToArray();
+        }
+        catch { return []; }
     }
 
     // Bundle offers: pick one pack of cards (Neow's Scroll Boxes, …).
@@ -113,8 +175,15 @@ internal static class Snapshotter
                 {
                     Index = bundleIndex,
                     Cards = bundle.Select((card, cardIndex) =>
-                        Item(RewardCardView(card), cardIndex)).ToArray(),
+                        Item(RewardCardView(card), cardIndex,
+                            model: card.Id.Entry,
+                            selector: CardSpecifier.From(card),
+                            type: card.Type.ToString().ToLowerInvariant(),
+                            semanticState: [CardStateToken(card)])).ToArray(),
                 };
+                item.SemanticState = item.Cards
+                    .SelectMany(card => card.SemanticState ?? [])
+                    .ToArray();
                 return item;
             }).ToArray(),
         };
@@ -158,11 +227,31 @@ internal static class Snapshotter
                 }
                 var cellView = Item(new
                 {
-                    col = cell.X,
-                    row = cell.Y,
                     hasItem = cell.Item is not null && !cell.IsHidden,
                     item,
-                });
+                }, col: cell.X, row: cell.Y,
+                    semanticState:
+                    [
+                        SemanticToken(
+                            "cell",
+                            cell.IsHidden,
+                            cell.Item is not null && !cell.IsHidden,
+                            !cell.IsHidden && cell.Item is { } stateItem
+                                ? CrystalItemType(stateItem)
+                                : null,
+                            !cell.IsHidden && cell.Item is { } positioned
+                                ? positioned.Position.X
+                                : null,
+                            !cell.IsHidden && cell.Item is { } positionedY
+                                ? positionedY.Position.Y
+                                : null,
+                            !cell.IsHidden && cell.Item is { } sized
+                                ? sized.Size.X
+                                : null,
+                            !cell.IsHidden && cell.Item is { } sizedY
+                                ? sizedY.Size.Y
+                                : null)
+                    ]);
                 cellView.Hidden = cell.IsHidden;
                 cells.Add(cellView);
             }
@@ -170,6 +259,17 @@ internal static class Snapshotter
         {
             Player = FooterView(),
             Cells = cells.ToArray(),
+            SemanticState =
+            [
+                SemanticToken(
+                    "crystal",
+                    grid.X,
+                    grid.Y,
+                    entity.DivinationCount,
+                    entity.CrystalSphereTool.ToString().ToLowerInvariant(),
+                    entity.IsFinished,
+                    hiddenCells)
+            ],
         };
         snapshot.AddExtensions(new
         {
@@ -200,17 +300,36 @@ internal static class Snapshotter
         var rs = run.State;
         var player = LocalRunContext.LocalPlayer(rs);
         var creature = player?.Creature;
-        return Snapshot(phase, new
+        var snapshot = new SnapshotContract(phase)
         {
-            // WinTime is only stamped on a won run; abandon wins the tie
-            // so a mid-run bail never reads as a defeat.
-            outcome = rm.IsAbandoned ? "abandoned" : rm.WinTime > 0 ? "victory" : "defeat",
+            Act = rs.CurrentActIndex,
+            Outcome = rm.IsAbandoned
+                ? "abandoned"
+                : rm.WinTime > 0 ? "victory" : "defeat",
+            Hp = creature is null ? null : [creature.CurrentHp, creature.MaxHp],
+            Gold = player?.Gold,
+            SemanticState =
+            [
+                SemanticToken(
+                    "gameOver",
+                    rs.TotalFloor,
+                    rs.ActFloor,
+                    rs.CurrentMapCoord?.col,
+                    rs.CurrentMapCoord?.row,
+                    rs.CurrentRoom is CombatRoom semanticRoom
+                        ? semanticRoom.Encounter.Id.Entry
+                        : null,
+                    rs.AscensionLevel,
+                    rs.Rng?.StringSeed ?? "")
+            ],
+        };
+        snapshot.AddExtensions(new
+        {
             // Compat pair: floor is the run-cumulative TotalFloor, act the
             // zero-based CurrentActIndex. actNumber/actFloor/mapCoord say
             // the same position in the 1-based, act-local terms a run
             // report wants.
             floor = rs.TotalFloor,
-            act = rs.CurrentActIndex,
             actNumber = rs.CurrentActIndex + 1,
             actFloor = rs.ActFloor,
             mapCoord = rs.CurrentMapCoord is { } c ? new { c.col, c.row } : null,
@@ -225,9 +344,8 @@ internal static class Snapshotter
                 : null,
             ascension = rs.AscensionLevel,
             seed = rs.Rng?.StringSeed ?? "",
-            hp = creature is null ? null : new[] { creature.CurrentHp, creature.MaxHp },
-            gold = player?.Gold,
         });
+        return snapshot;
     }
 
     // Out-of-combat decisions need run context: HEAL vs SMITH reads hp,
@@ -237,12 +355,12 @@ internal static class Snapshotter
         var player = LocalRunContext.Current?.Player;
         if (player is null) return null;
         var creature = player.Creature;
-        var footer = new SnapshotPlayerContract();
-        footer.AddExtensions(new
+        var footer = new SnapshotPlayerContract
         {
-            hp = creature is null ? null : new[] { creature.CurrentHp, creature.MaxHp },
-            gold = player.Gold,
-        });
+            Hp = creature is null ? null : [creature.CurrentHp, creature.MaxHp],
+            Gold = player.Gold,
+            SemanticState = PlayerSemanticState(player),
+        };
         footer.Potions = PotionViews(player);
         footer.AddExtensions(new
         {
@@ -253,6 +371,18 @@ internal static class Snapshotter
             deck = DeckView(player),
         });
         return footer;
+    }
+
+    private static string[] PlayerSemanticState(Player player)
+    {
+        var deck = (player.Deck?.Cards ?? Enumerable.Empty<CardModel>())
+            .Where(card => card is not null)
+            .Select(card => SemanticToken("deck", CardStateToken(card)))
+            .OrderBy(token => token, StringComparer.Ordinal);
+        var relics = player.Relics
+            .Select(relic => SemanticToken("owned", RelicStateToken(relic)))
+            .OrderBy(token => token, StringComparer.Ordinal);
+        return deck.Concat(relics).ToArray();
     }
 
     // Compact: counts by model, "+" marking upgraded copies — a 30-card
@@ -307,11 +437,9 @@ internal static class Snapshotter
             if (slots[i] is not { } p || p.IsQueued || p.HasBeenRemovedFromState) continue;
             result.Add(Item(new
             {
-                slot = i,
-                model = p.Id.Entry,
-                target = p.TargetType.ToString().ToLowerInvariant(),
                 description = SafeText(p.DynamicDescription),
-            }));
+            }, model: p.Id.Entry, slot: i,
+                target: p.TargetType.ToString().ToLowerInvariant()));
         }
         return result.ToArray();
     }
@@ -336,6 +464,20 @@ internal static class Snapshotter
                     evoke = o.EvokeVal,
                 }).ToArray(),
         };
+    }
+
+    private static string[] OrbState(PlayerCombatState pcs)
+    {
+        var queue = pcs.OrbQueue
+            ?? throw new InvalidOperationException("player orb queue is unavailable");
+        return
+        [
+            SemanticToken("orbSlots", queue.Capacity),
+            .. queue.Orbs
+                .Where(orb => orb is not null)
+                .Select((orb, index) => SemanticToken(
+                    "orb", index, orb.Id.Entry, orb.PassiveVal, orb.EvokeVal)),
+        ];
     }
 
     private static object[] PowerViews(Creature c)
@@ -415,6 +557,17 @@ internal static class Snapshotter
         return new { count = cards.Length, cards = (object)cards };
     }
 
+    private static string[] PileState(string name, CardPile? pile, bool sorted = false)
+    {
+        var cards = (pile?.Cards ?? Enumerable.Empty<CardModel>())
+            .Where(card => card is not null)
+            .Select(card => CardStateToken(card));
+        if (sorted) cards = cards.OrderBy(card => card, StringComparer.Ordinal);
+        return cards.Select((card, index) => SemanticToken("pile", name, index, card))
+            .Prepend(SemanticToken("pileCount", name, cards.Count()))
+            .ToArray();
+    }
+
     private static SnapshotContract ShopSnapshot(Phase phase)
     {
         if (LocalRunContext.Current is not { } run)
@@ -435,7 +588,6 @@ internal static class Snapshotter
             var showText = card is not null && ShouldShowCardText(card);
             var entry = Item(new
             {
-                model = card?.Id.Entry,
                 title = card?.Title,
                 textKey = card is null ? null : CardSpecifier.TextKey(card),
                 description = showText ? CardSpecifier.Description(card!) : null,
@@ -445,7 +597,17 @@ internal static class Snapshotter
                 starCost = card is null ? null : CardSpecifier.StarCost(card),
                 stocked = e.IsStocked,
                 affordable = e.EnoughGold,
-            }, i);
+            }, i, model: card?.Id.Entry,
+                selector: card is null ? null : CardSpecifier.From(card),
+                semanticState:
+                [
+                    SemanticToken(
+                        "shopCard",
+                        e.Cost,
+                        e.IsStocked,
+                        e.EnoughGold,
+                        card is null ? null : CardStateToken(card))
+                ]);
             entry.Purchasable = e.IsStocked && e.EnoughGold;
             return entry;
         }
@@ -459,13 +621,21 @@ internal static class Snapshotter
                 || player?.HasOpenPotionSlots == true;
             var entry = Item(new
             {
-                model,
                 title = SafeText(title),
                 cost = e.Cost,
                 price = e.Cost,
                 stocked = e.IsStocked,
                 affordable = e.EnoughGold,
-            }, i);
+            }, i, model: model,
+                semanticState:
+                [
+                    SemanticToken(
+                        "shopStock",
+                        e.Cost,
+                        e.IsStocked,
+                        e.EnoughGold,
+                        potionHasRoom)
+                ]);
             entry.Purchasable = e.IsStocked && e.EnoughGold && potionHasRoom;
             return entry;
         }
@@ -476,7 +646,14 @@ internal static class Snapshotter
                 price = cr.Cost,
                 used = cr.Used,
                 affordable = cr.EnoughGold,
-            })
+            }, semanticState:
+            [
+                SemanticToken(
+                    "cardRemoval",
+                    cr.Cost,
+                    cr.Used,
+                    cr.EnoughGold)
+            ])
             : null;
         if (removal is not null)
             removal.Purchasable = !inv.CardRemovalEntry!.Used
@@ -491,8 +668,8 @@ internal static class Snapshotter
             Potions = inv.PotionEntries
                 .Select((e, i) => StockEntry(e.Model?.Id.Entry, e.Model?.Title, e, i)).ToArray(),
             CardRemoval = removal,
+            Gold = player?.Gold ?? 0,
         };
-        snapshot.AddExtensions(new { gold = player?.Gold ?? 0 });
         return snapshot;
     }
 
@@ -508,10 +685,9 @@ internal static class Snapshotter
             {
                 var option = Item(new
                 {
-                    id = o.OptionId.ToString(),
                     title = SafeText(o.Title),
                     description = SafeText(o.Description),
-                }, i);
+                }, i, id: o.OptionId.ToString());
                 option.Enabled = o.IsEnabled;
                 return option;
             }).ToArray(),
@@ -535,7 +711,8 @@ internal static class Snapshotter
             ProceedAvailable = decision.ProceedAvailable,
             Player = FooterView(),
             Relics = decision.Relics
-                .Select((relic, i) => Item(RelicView(relic), i)).ToArray(),
+                .Select((relic, i) => Item(
+                    RelicView(relic), i, model: relic.Id.Entry)).ToArray(),
         };
     }
 
@@ -548,13 +725,14 @@ internal static class Snapshotter
         return new SnapshotContract(phase)
         {
             Player = FooterView(),
-            Relics = holders.Select((h, i) => Item(RelicView(h.Relic.Model), i)).ToArray(),
+            Relics = holders.Select((h, i) => Item(
+                RelicView(h.Relic.Model), i,
+                model: h.Relic.Model.Id.Entry)).ToArray(),
         };
     }
 
     private static object RelicView(RelicModel r) => new
     {
-        model = r.Id.Entry,
         title = SafeText(r.Title),
         rarity = r.Rarity.ToString().ToLowerInvariant(),
         description = SafeText(r.DynamicDescription),
@@ -571,7 +749,16 @@ internal static class Snapshotter
         {
             Player = FooterView(),
             Rewards = decision.Rewards
-                .Select(slot => Item(RewardView(slot.Reward), slot.Index)).ToArray(),
+                .Select(slot => Item(
+                    RewardView(slot.Reward), slot.Index,
+                    type: RewardType(slot.Reward),
+                    semanticState:
+                    [
+                        SemanticToken(
+                            "reward",
+                            slot.Reward.GetType().FullName,
+                            slot.Reward is GoldReward gold ? gold.Amount : null)
+                    ])).ToArray(),
         };
     }
 
@@ -579,7 +766,6 @@ internal static class Snapshotter
     // boots build their snapshots through one shape.
     private static object RewardView(Reward r) => new
     {
-        type = RewardType(r),
         amount = r is GoldReward g ? g.Amount : (int?)null,
         description = SafeText(r.Description),
     };
@@ -602,13 +788,25 @@ internal static class Snapshotter
         {
             Player = FooterView(),
             Cards = decision.Cards
-                .Select((card, i) => Item(RewardCardView(card), i)).ToArray(),
+                .Select((card, i) => Item(
+                    RewardCardView(card), i,
+                    model: card.Id.Entry,
+                    selector: CardSpecifier.From(card),
+                    type: card.Type.ToString().ToLowerInvariant(),
+                    semanticState: [CardStateToken(card)])).ToArray(),
             // Non-card choices (skip, trade offers, …) — target of `skip`.
             Alternatives = decision.AlternativeTitles
                 .Select((title, i) => Item(new
                 {
                     title = SafeText(title),
-                }, i)).ToArray(),
+                }, i,
+                    semanticState:
+                    [
+                        SemanticToken(
+                            "alternative",
+                            title?.LocTable,
+                            title?.LocEntryKey)
+                    ])).ToArray(),
         };
     }
 
@@ -633,31 +831,27 @@ internal static class Snapshotter
         var showText = ShouldShowCardText(c);
         return new
         {
-            model = c.Id.Entry,
             title = c.Title,
             cost = c.EnergyCost.Canonical,
             starCost = CardSpecifier.StarCost(c),
-            type = c.Type.ToString().ToLowerInvariant(),
             rarity = c.Rarity.ToString().ToLowerInvariant(),
             textKey = CardSpecifier.TextKey(c),
             description = showText ? CardSpecifier.Description(c) : null,
         };
     }
 
-    private static object SelectCardView(CardModel c, bool selected)
+    private static object SelectCardView(CardModel c)
     {
         var showText = ShouldShowCardText(c);
         var preview = CardSpecifier.UpgradePreview(c);
         return new
         {
-            model = c.Id.Entry,
             title = c.Title,
             cost = c.EnergyCost.Canonical,
             starCost = CardSpecifier.StarCost(c),
             upgraded = c.IsUpgraded,
             enchant = c.Enchantment?.Id.Entry,
             affliction = c.Affliction?.Id.Entry,
-            selected,
             textKey = CardSpecifier.TextKey(c),
             description = showText ? CardSpecifier.Description(c) : null,
             // Preserve upgradedPreview's string/null wire type; numeric
@@ -674,7 +868,6 @@ internal static class Snapshotter
             && ShouldShowCardText(card, compactElides: true);
         return new
         {
-            model = card?.Id.Entry,
             cost = card?.EnergyCost.GetAmountToSpend(),
             starCost = card is null ? null : CardSpecifier.StarCost(card),
             upgraded = card?.IsUpgraded ?? false,
@@ -693,14 +886,23 @@ internal static class Snapshotter
         var rs = run.State;
 
         var points = rs.Map is { } map ? AllMapPoints(map) : [];
-        var snapshot = new SnapshotContract(phase) { Player = FooterView() };
+        var snapshot = new SnapshotContract(phase)
+        {
+            Player = FooterView(),
+            Act = rs.CurrentActIndex,
+            Current = rs.CurrentMapCoord is { } current
+                ? [current.col, current.row]
+                : null,
+            SemanticState = points
+                .Select(MapPointState)
+                .OrderBy(token => token, StringComparer.Ordinal)
+                .ToArray(),
+        };
         snapshot.Next = NextPoints(rs)
-            .Select(point => Item(MapPointView(point))).ToArray();
+            .Select(MapPointItem).ToArray();
         snapshot.AddExtensions(new
         {
-            act = rs.CurrentActIndex,
             seed = rs.Rng?.StringSeed ?? "",
-            current = rs.CurrentMapCoord is { } c ? new[] { c.col, c.row } : null,
             // The act graph is the biggest repeat in the protocol — compact
             // callers keep `next` and re-request the full view when routing.
             graph = _compact ? null : points.Select(MapPointView).ToArray(),
@@ -736,6 +938,40 @@ internal static class Snapshotter
         if (markers.Length > 0) view["markers"] = markers;
         return view;
     }
+
+    private static SnapshotItemContract MapPointItem(
+        MegaCrit.Sts2.Core.Map.MapPoint point)
+    {
+        var extension = new Dictionary<string, object?>
+        {
+            ["next"] = point.Children
+                .Where(child => child != null)
+                .Select(child => new[] { child.coord.col, child.coord.row })
+                .ToArray(),
+        };
+        var markers = MapMarkers(point);
+        if (markers.Length > 0) extension["markers"] = markers;
+        return Item(
+            extension,
+            col: point.coord.col,
+            row: point.coord.row,
+            type: point.PointType.ToString().ToLowerInvariant(),
+            semanticState: [MapPointState(point)]);
+    }
+
+    private static string MapPointState(MegaCrit.Sts2.Core.Map.MapPoint point) =>
+        SemanticToken(
+            "mapPoint",
+            point.coord.col,
+            point.coord.row,
+            point.PointType.ToString().ToLowerInvariant(),
+            point.Children
+                .Where(child => child is not null)
+                .Select(child => new[] { child.coord.col, child.coord.row })
+                .OrderBy(coord => coord[1])
+                .ThenBy(coord => coord[0])
+                .ToArray(),
+            MapMarkers(point));
 
     private static string[] MapMarkers(MegaCrit.Sts2.Core.Map.MapPoint point)
     {
@@ -796,9 +1032,18 @@ internal static class Snapshotter
         // advertised choice and the effect that the click later executes.
         var snapshot = new SnapshotContract(phase)
         {
+            Id = ev.Id.Entry,
             Player = FooterView(),
+            SemanticState =
+            [
+                SemanticToken("event", ev.GetType().FullName, ev.IsFinished),
+                .. (ev is FakeMerchant semanticMerchant
+                    ? FakeMerchantState(semanticMerchant)
+                    : []),
+            ],
             Options = (ev.CurrentOptions ?? []).Select((o, i) =>
             {
+                var lethal = OptionLethal(o, owner);
                 var option = Item(new
                 {
                     title = SafeText(o.Title, ev.DynamicVars.AddTo),
@@ -806,7 +1051,7 @@ internal static class Snapshotter
                     proceed = o.IsProceed,
                     // The GUI marks choices that kill this player with a red
                     // pulse. Null means the option has no lethal predicate.
-                    lethal = OptionLethal(o, owner),
+                    lethal,
                     // GUI hover cards/tooltips are decision state, not
                     // decoration: event choices often name a relic, curse, or
                     // enchantment without explaining its effect in the body.
@@ -817,7 +1062,21 @@ internal static class Snapshotter
                         title = SafeText(r.Title),
                         description = SafeText(r.DynamicDescription),
                     } : null,
-                }, i);
+                }, i,
+                    semanticState:
+                    [
+                        SemanticToken(
+                            "eventOption",
+                            o.GetType().FullName,
+                            o.Title?.LocTable,
+                            o.Title?.LocEntryKey,
+                            o.Description?.LocTable,
+                            o.Description?.LocEntryKey,
+                            o.IsProceed,
+                            lethal,
+                            o.Relic?.Id.Entry,
+                            EventHintState(o))
+                    ]);
                 option.Locked = o.IsLocked;
                 option.Chosen = o.WasChosen;
                 return option;
@@ -825,7 +1084,6 @@ internal static class Snapshotter
         };
         snapshot.AddExtensions(new
         {
-            id = ev.Id.Entry,
             title = SafeText(ev.Title),
             description = SafeText(ev.Description, local =>
             {
@@ -838,6 +1096,27 @@ internal static class Snapshotter
             fakeMerchant = ev is FakeMerchant fake ? FakeMerchantView(fake) : null,
         });
         return snapshot;
+    }
+
+    private static string[] FakeMerchantState(FakeMerchant fake)
+    {
+        var inventory = fake.Inventory;
+        return
+        [
+            SemanticToken(
+                "fakeMerchant",
+                inventory is not null,
+                fake.Owner?.PotionSlots.Any(
+                    potion => potion?.Id.Entry == "FOUL_POTION") == true),
+            .. (inventory?.RelicEntries ?? [])
+                .Select((entry, index) => SemanticToken(
+                    "fakeMerchantRelic",
+                    index,
+                    entry.Model?.Id.Entry,
+                    entry.Cost,
+                    entry.IsStocked,
+                    entry.EnoughGold)),
+        ];
     }
 
     private static object FakeMerchantView(FakeMerchant fake)
@@ -876,6 +1155,14 @@ internal static class Snapshotter
 
     private static object[] EventHints(EventOption option) =>
         (option.HoverTips ?? []).Select(EventHintView).ToArray();
+
+    private static object[] EventHintState(EventOption option) =>
+        (option.HoverTips ?? []).Select(hint => (object)new
+        {
+            kind = hint.GetType().FullName,
+            model = hint.CanonicalModel?.Id.Entry,
+            upgraded = hint is CardHoverTip card && card.Card.IsUpgraded,
+        }).ToArray();
 
     private static object EventHintView(IHoverTip hint)
     {
@@ -951,49 +1238,83 @@ internal static class Snapshotter
             return new SnapshotContract(phase) { Available = false };
         var facing = FacingOf(creature);
 
-        var snapshot = new SnapshotContract(phase);
-        snapshot.AddExtensions(new { turn = state.RoundNumber });
+        var you = new SnapshotCombatantContract
+        {
+            Hp = [creature.CurrentHp, creature.MaxHp],
+            Block = creature.Block,
+            Energy = [pcs.Energy, pcs.MaxEnergy],
+            Stars = pcs.Stars,
+            SemanticState =
+            [
+                .. OrbState(pcs),
+                .. PowerState(creature),
+                .. player!.Relics
+                    .Select(relic => SemanticToken("combatRelic", RelicStateToken(relic)))
+                    .OrderBy(token => token, StringComparer.Ordinal),
+                SemanticToken("facing", facing),
+            ],
+        };
+        you.AddExtensions(new
+        {
+            orbs = OrbViews(pcs),
+            powers = PowerViews(creature),
+            // Counters tick mid-combat (every-N relics); the full
+            // relic story lives in the out-of-combat footer.
+            relics = player!.Relics
+                .Select(r => (object)new { model = r.Id.Entry, counter = RelicCounter(r) })
+                .ToArray(),
+            facing,
+        });
+        var enemies = state.Enemies
+            .Where(c => c != null)
+            .Select(c =>
+            {
+                var enemy = new SnapshotEnemyContract
+                {
+                    Id = c.CombatId ?? 0u,
+                    Model = c.Monster?.Id.Entry,
+                    Hp = [c.CurrentHp, c.MaxHp],
+                    Block = c.Block,
+                    Alive = c.IsAlive,
+                    SemanticState =
+                    [
+                        .. PowerState(c),
+                        .. IntentState(state, c),
+                        SemanticToken("side", SideOf(c), IsBehind(c, facing)),
+                    ],
+                };
+                enemy.AddExtensions(new
+                {
+                    title = SafeText(c.Monster?.Title),
+                    side = SideOf(c),
+                    isBehind = IsBehind(c, facing),
+                    powers = PowerViews(c),
+                    intents = IntentViews(state, c),
+                });
+                return enemy;
+            }).ToArray();
+        var snapshot = new SnapshotContract(phase)
+        {
+            Turn = state.RoundNumber,
+            You = you,
+            Enemies = enemies,
+            SemanticState =
+            [
+                .. PileState("draw", pcs.DrawPile, sorted: true),
+                .. PileState("discard", pcs.DiscardPile),
+                .. PileState("exhaust", pcs.ExhaustPile),
+            ],
+        };
         snapshot.Side = state.CurrentSide.ToString().ToLowerInvariant();
         snapshot.ActionsDisabled = combat.PlayerActionsDisabled;
         snapshot.AddExtensions(new
         {
-            you = new
-            {
-                hp = new[] { creature.CurrentHp, creature.MaxHp },
-                block = creature.Block,
-                energy = new[] { pcs.Energy, pcs.MaxEnergy },
-                stars = pcs.Stars,
-                orbs = OrbViews(pcs),
-                powers = PowerViews(creature),
-                // Counters tick mid-combat (every-N relics); the full
-                // relic story lives in the out-of-combat footer.
-                relics = player!.Relics
-                    .Select(r => (object)new { model = r.Id.Entry, counter = RelicCounter(r) })
-                    .ToArray(),
-                facing,
-            },
             piles = new
             {
                 draw = PileView(pcs.DrawPile, sorted: true),
                 discard = PileView(pcs.DiscardPile),
                 exhaust = PileView(pcs.ExhaustPile),
             },
-            enemies = state.Enemies
-                .Where(c => c != null)
-                .Select(c => new
-                {
-                    id = c.CombatId ?? 0u,
-                    model = c.Monster?.Id.Entry,
-                    title = SafeText(c.Monster?.Title),
-                    hp = new[] { c.CurrentHp, c.MaxHp },
-                    block = c.Block,
-                    alive = c.IsAlive,
-                    side = SideOf(c),
-                    isBehind = IsBehind(c, facing),
-                    powers = PowerViews(c),
-                    intents = IntentViews(state, c),
-                })
-                .ToArray(),
         });
         snapshot.Potions = PotionViews(player!);
         snapshot.Hand = pcs.Hand.Cards
@@ -1004,13 +1325,11 @@ internal static class Snapshotter
                 // the refresh still runs so vars carry modified values.
                 if (_compact) CardSpecifier.RefreshPreview(c);
                 var showText = ShouldShowCardText(c, compactElides: true);
+                var selector = CardSpecifier.From(c);
                 var card = Item(new
                 {
-                    model = c.Id.Entry,
-                    selector = CardSpecifier.From(c),
                     cost = c.EnergyCost.GetAmountToSpend(),
                     starCost = CardSpecifier.StarCost(c),
-                    target = c.TargetType.ToString().ToLowerInvariant(),
                     upgraded = c.IsUpgraded,
                     enchant = c.Enchantment?.Id.Entry,
                     affliction = c.Affliction?.Id.Entry,
@@ -1018,7 +1337,9 @@ internal static class Snapshotter
                     textKey = CardSpecifier.TextKey(c),
                     description = showText ? CardSpecifier.Text(c, PileType.Hand) : null,
                     vars = CardSpecifier.DynamicVars(c),
-                });
+                }, model: c.Id.Entry, selector: selector,
+                    target: c.TargetType.ToString().ToLowerInvariant(),
+                    semanticState: [CardStateToken(c, liveCost: true)]);
                 card.Playable = CanPlayCard(c);
                 return card;
             })
@@ -1076,6 +1397,27 @@ internal static class Snapshotter
         catch { return []; }
     }
 
+    private static string[] IntentState(CombatState state, Creature enemy)
+    {
+        try
+        {
+            return (enemy.Monster?.NextMove.Intents ?? [])
+                .Select((intent, index) => SemanticToken(
+                    "intent",
+                    index,
+                    intent.IntentType.ToString().ToLowerInvariant(),
+                    intent is AttackIntent attack
+                        ? attack.GetSingleDamage(state.Allies, enemy)
+                        : null,
+                    intent is AttackIntent raw && raw.DamageCalc is { } calc
+                        ? (int?)(int)calc()
+                        : null,
+                    intent is AttackIntent repeated ? repeated.Repeats : null))
+                .ToArray();
+        }
+        catch { return []; }
+    }
+
     private static string? IntentTip(AbstractIntent i, CombatState state, Creature enemy)
     {
         if (_compact) return null;
@@ -1100,7 +1442,16 @@ internal static class Snapshotter
             Cancelable = decision.Cancelable,
             Confirmable = decision.Confirmable,
             Cards = decision.Cards.Select((card, i) => Item(
-                SelectCardView(card, decision.Selected.Contains(card)), i)).ToArray(),
+                SelectCardView(card), i,
+                model: card.Id.Entry,
+                selector: CardSpecifier.From(card),
+                semanticState: [CardStateToken(card)],
+                selected: decision.Selected.Contains(card))).ToArray(),
+            Selected = decision.Selected.Select(CardSpecifier.From).ToArray(),
+            SemanticState =
+            [
+                SemanticToken("selectionBounds", decision.MinSelect, decision.MaxSelect)
+            ],
         };
         snapshot.AddExtensions(new
         {
@@ -1121,7 +1472,17 @@ internal static class Snapshotter
         var snapshot = new SnapshotContract(phase)
         {
             Confirmable = decision.Confirmable,
-            Cards = decision.Cards.Select((card, i) => Item(HandCardView(card), i)).ToArray(),
+            Cards = decision.Cards.Select((card, i) => Item(
+                HandCardView(card), i,
+                model: card?.Id.Entry,
+                selector: card is null ? null : CardSpecifier.From(card),
+                semanticState: card is null ? [SemanticToken("card", (object?)null)]
+                    : [CardStateToken(card, liveCost: true)])).ToArray(),
+            Selected = decision.Selected.Select(CardSpecifier.From).ToArray(),
+            SemanticState =
+            [
+                SemanticToken("selectionBounds", decision.MinSelect, decision.MaxSelect)
+            ],
         };
         if (decision.IncludePlayer) snapshot.Player = FooterView();
         snapshot.AddExtensions(new
@@ -1129,7 +1490,6 @@ internal static class Snapshotter
             prompt = SafeText(decision.Prompt),
             min = decision.MinSelect,
             max = decision.MaxSelect,
-            selected = decision.Selected.Select(c => c.Id.Entry).ToArray(),
         });
         return snapshot;
     }

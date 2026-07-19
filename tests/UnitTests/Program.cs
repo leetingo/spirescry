@@ -608,11 +608,10 @@ internal static class Tests
         var card = new SnapshotItemContract
         {
             Index = 0,
+            Model = "STRIKE_R",
             Playable = true,
         };
-        card.AddExtensions(new { model = "STRIKE_R" });
-        var player = new SnapshotPlayerContract { Potions = [] };
-        player.AddExtensions(new { hp = new[] { 40, 80 } });
+        var player = new SnapshotPlayerContract { Hp = [40, 80], Potions = [] };
         var snapshot = new SnapshotContract(Phase.Combat)
         {
             Side = "player",
@@ -653,16 +652,16 @@ internal static class Tests
         Equal("run-7", wire["runId"]!.GetValue<string>());
     }
 
-    public static void SnapshotConsumerProjectionTracksTypedStateOnly()
+    public static void SnapshotConsumerFingerprintTracksCardIdentityNotExtensions()
     {
-        SnapshotContract Build(string model, bool playable)
+        SnapshotContract Build(string model, string decorativeFrame)
         {
             var card = new SnapshotItemContract
             {
                 Index = 0,
-                Playable = playable,
+                Model = model,
+                Playable = true,
             };
-            card.AddExtensions(new { model });
             var snapshot = new SnapshotContract(Phase.Combat)
             {
                 Revision = 7,
@@ -671,19 +670,388 @@ internal static class Tests
                 Hand = [card],
                 Legal = ["play", "end-turn"],
             };
-            snapshot.AddExtensions(new { decorativeFrame = model });
+            snapshot.AddExtensions(new { decorativeFrame });
             return snapshot;
         }
 
-        var original = Build("STRIKE_R", playable: true);
-        var extensionChanged = Build("BASH", playable: true);
-        var typedStateChanged = Build("STRIKE_R", playable: false);
+        var original = Build("STRIKE_R", "ornate");
+        var extensionChanged = Build("STRIKE_R", "plain");
+        var cardChanged = Build("BASH", "ornate");
 
         Equal(original.ConsumerStateKey(), extensionChanged.ConsumerStateKey());
-        False(original.ConsumerStateKey() == typedStateChanged.ConsumerStateKey());
-        Equal("8f0945d175edb49c", original.ConsumerFingerprint());
+        False(original.ConsumerFingerprint() == cardChanged.ConsumerFingerprint());
         False(original.ConsumerProjection().ContainsKey("decorativeFrame"));
-        False(original.ConsumerProjection()["hand"]![0]!.AsObject().ContainsKey("model"));
+        Equal("STRIKE_R", original.ConsumerProjection()["hand"]![0]!["model"]!.GetValue<string>());
+    }
+
+    public static void SnapshotConsumerFingerprintTracksMapTargetCoordinates()
+    {
+        SnapshotContract Build(int col, int row, string type) => new(Phase.Map)
+        {
+            Next =
+            [
+                new SnapshotItemContract
+                {
+                    Index = 0,
+                    Col = col,
+                    Row = row,
+                    Type = type,
+                },
+            ],
+            Legal = ["map-move", "abandon"],
+        };
+
+        var original = Build(2, 3, "monster");
+
+        False(original.ConsumerFingerprint() == Build(3, 3, "monster").ConsumerFingerprint());
+        False(original.ConsumerFingerprint() == Build(2, 4, "monster").ConsumerFingerprint());
+        False(original.ConsumerFingerprint() == Build(2, 3, "elite").ConsumerFingerprint());
+    }
+
+    public static void SnapshotConsumerFingerprintTracksEnemyIdentityAndHp()
+    {
+        SnapshotContract Build(uint id, string model, int hp) => new(Phase.Combat)
+        {
+            Enemies =
+            [
+                new SnapshotEnemyContract
+                {
+                    Id = id,
+                    Model = model,
+                    Hp = [hp, 40],
+                    Alive = true,
+                },
+            ],
+            Legal = ["play", "end-turn"],
+        };
+
+        var original = Build(7, "CULTIST", 30);
+
+        False(original.ConsumerFingerprint() == Build(8, "CULTIST", 30).ConsumerFingerprint());
+        False(original.ConsumerFingerprint() == Build(7, "LOUSE", 30).ConsumerFingerprint());
+        False(original.ConsumerFingerprint() == Build(7, "CULTIST", 29).ConsumerFingerprint());
+    }
+
+    public static void SnapshotConsumerFingerprintTracksPlayerHpAndGold()
+    {
+        SnapshotContract Build(int hp, int gold)
+        {
+            var player = new SnapshotPlayerContract
+            {
+                Hp = [hp, 80],
+                Gold = gold,
+                Potions = [],
+            };
+            player.AddExtensions(new { description = $"{hp}/{gold}" });
+            return new SnapshotContract(Phase.Map)
+            {
+                Player = player,
+                Legal = ["map-move", "abandon"],
+            };
+        }
+
+        var original = Build(60, 100);
+
+        False(original.ConsumerFingerprint() == Build(59, 100).ConsumerFingerprint());
+        False(original.ConsumerFingerprint() == Build(60, 101).ConsumerFingerprint());
+    }
+
+    public static void SnapshotConsumerFingerprintTracksCombatResources()
+    {
+        SnapshotContract Build(int hp, int block, int energy, int stars) =>
+            new(Phase.Combat)
+            {
+                You = new SnapshotCombatantContract
+                {
+                    Hp = [hp, 80],
+                    Block = block,
+                    Energy = [energy, 3],
+                    Stars = stars,
+                },
+                Legal = ["play", "end-turn"],
+            };
+
+        var original = Build(60, 5, 2, 1);
+
+        False(original.ConsumerFingerprint() == Build(59, 5, 2, 1).ConsumerFingerprint());
+        False(original.ConsumerFingerprint() == Build(60, 6, 2, 1).ConsumerFingerprint());
+        False(original.ConsumerFingerprint() == Build(60, 5, 1, 1).ConsumerFingerprint());
+        False(original.ConsumerFingerprint() == Build(60, 5, 2, 2).ConsumerFingerprint());
+    }
+
+    public static void SnapshotConsumerFingerprintTracksCurrentMapPosition()
+    {
+        SnapshotContract Build(int act, int col, int row) => new(Phase.Map)
+        {
+            Act = act,
+            Current = [col, row],
+            Legal = ["map-move", "abandon"],
+        };
+
+        var original = Build(0, 2, 3);
+
+        False(original.ConsumerFingerprint() == Build(1, 2, 3).ConsumerFingerprint());
+        False(original.ConsumerFingerprint() == Build(0, 3, 3).ConsumerFingerprint());
+        False(original.ConsumerFingerprint() == Build(0, 2, 4).ConsumerFingerprint());
+    }
+
+    public static void SnapshotConsumerFingerprintTracksTopLevelShopGold()
+    {
+        SnapshotContract Build(int gold) => new(Phase.Shop)
+        {
+            Gold = gold,
+            Legal = ["buy", "leave", "abandon"],
+        };
+
+        False(Build(100).ConsumerFingerprint() == Build(99).ConsumerFingerprint());
+    }
+
+    public static void SnapshotConsumerFingerprintTracksRelicIdentity()
+    {
+        SnapshotContract Build(string model) => new(Phase.RelicReward)
+        {
+            Relics = [new SnapshotItemContract { Index = 0, Model = model }],
+            Legal = ["pick-relic", "skip", "abandon"],
+        };
+
+        False(Build("VAJRA").ConsumerFingerprint()
+            == Build("ANCHOR").ConsumerFingerprint());
+    }
+
+    public static void SnapshotConsumerFingerprintHasCrossLanguageFixture()
+    {
+        var snapshot = new SnapshotContract(Phase.Combat)
+        {
+            Act = 1,
+            Current = [2, 3],
+            Gold = 100,
+            SemanticState = ["pile:draw:STRIKE_R"],
+            Selected = ["STRIKE_R"],
+            Side = "player",
+            Next =
+            [
+                new SnapshotItemContract
+                {
+                    Index = 0, Id = "PATH_A", Col = 3, Row = 4,
+                    Type = "monster",
+                },
+            ],
+            Hand =
+            [
+                new SnapshotItemContract
+                {
+                    Index = 0, Model = "STRIKE_R", Playable = true,
+                    Selected = false, SemanticState = ["cost:1"],
+                },
+            ],
+            Relics = [new SnapshotItemContract { Index = 0, Model = "VAJRA" }],
+            You = new SnapshotCombatantContract
+            {
+                Hp = [60, 80], Block = 5, Energy = [2, 3], Stars = 1,
+                SemanticState = ["power:STRENGTH:1"],
+            },
+            Enemies =
+            [
+                new SnapshotEnemyContract
+                {
+                    Id = 7, Model = "CULTIST", Hp = [30, 40], Block = 0,
+                    Alive = true, SemanticState = ["intent:attack:6:1"],
+                },
+            ],
+            Player = new SnapshotPlayerContract
+            {
+                Hp = [60, 80], Gold = 100, Potions = [],
+                SemanticState = ["deck:STRIKE_R"],
+            },
+            Legal = ["play", "end-turn"],
+        };
+
+        Equal("d4c312db8769179e", snapshot.ConsumerFingerprint());
+    }
+
+    public static void SnapshotConsumerFingerprintTracksActionTargetGrammar()
+    {
+        SnapshotContract Build(
+            int turn, string eventId, string selector, int slot, string target) =>
+            new(Phase.Combat)
+            {
+                Turn = turn,
+                Id = eventId,
+                Hand =
+                [
+                    new SnapshotItemContract
+                    {
+                        Index = 0,
+                        Model = "BASH",
+                        Selector = selector,
+                        Slot = slot,
+                        Target = target,
+                    },
+                ],
+                Legal = ["play", "end-turn"],
+            };
+
+        var original = Build(2, "BIG_FISH", "BASH+", 1, "anyenemy");
+
+        False(original.ConsumerFingerprint()
+            == Build(3, "BIG_FISH", "BASH+", 1, "anyenemy").ConsumerFingerprint());
+        False(original.ConsumerFingerprint()
+            == Build(2, "SCRAP_OOZE", "BASH+", 1, "anyenemy").ConsumerFingerprint());
+        False(original.ConsumerFingerprint()
+            == Build(2, "BIG_FISH", "BASH", 1, "anyenemy").ConsumerFingerprint());
+        False(original.ConsumerFingerprint()
+            == Build(2, "BIG_FISH", "BASH+", 2, "anyenemy").ConsumerFingerprint());
+        False(original.ConsumerFingerprint()
+            == Build(2, "BIG_FISH", "BASH+", 1, "self").ConsumerFingerprint());
+    }
+
+    public static void SnapshotConsumerFingerprintTracksGameOverOutcomeAndHp()
+    {
+        SnapshotContract Build(string outcome, int hp) => new(Phase.GameOver)
+        {
+            Outcome = outcome,
+            Hp = [hp, 80],
+            Gold = 100,
+        };
+
+        var original = Build("victory", 20);
+
+        False(original.ConsumerFingerprint() == Build("defeat", 20).ConsumerFingerprint());
+        False(original.ConsumerFingerprint() == Build("victory", 0).ConsumerFingerprint());
+        Equal("c02643081d2c619c", original.ConsumerFingerprint());
+    }
+
+    public static void SnapshotConsumerFingerprintTracksTypedSemanticState()
+    {
+        SnapshotContract Build(string top, string item, string player,
+            string you, string enemy, bool selected) => new(Phase.Combat)
+        {
+            SemanticState = [top],
+            Selected = ["BASH+"],
+            Hand =
+            [
+                new SnapshotItemContract
+                {
+                    Index = 0,
+                    Model = "BASH",
+                    Selector = "BASH+",
+                    Selected = selected,
+                    SemanticState = [item],
+                },
+            ],
+            Player = new SnapshotPlayerContract
+            {
+                Hp = [60, 80],
+                Gold = 100,
+                Potions = [],
+                SemanticState = [player],
+            },
+            You = new SnapshotCombatantContract
+            {
+                Hp = [60, 80],
+                Energy = [2, 3],
+                SemanticState = [you],
+            },
+            Enemies =
+            [
+                new SnapshotEnemyContract
+                {
+                    Id = 7,
+                    Model = "CULTIST",
+                    Hp = [30, 40],
+                    SemanticState = [enemy],
+                },
+            ],
+            Legal = ["play", "end-turn"],
+        };
+
+        var original = Build("pile:draw:BASH+", "cost:2", "deck:BASH+",
+            "power:STRENGTH:1", "intent:attack:6:1", selected: false);
+
+        False(original.ConsumerFingerprint() == Build("pile:draw:STRIKE_R",
+            "cost:2", "deck:BASH+", "power:STRENGTH:1",
+            "intent:attack:6:1", selected: false).ConsumerFingerprint());
+        False(original.ConsumerFingerprint() == Build("pile:draw:BASH+",
+            "cost:1", "deck:BASH+", "power:STRENGTH:1",
+            "intent:attack:6:1", selected: false).ConsumerFingerprint());
+        False(original.ConsumerFingerprint() == Build("pile:draw:BASH+",
+            "cost:2", "deck:STRIKE_R", "power:STRENGTH:1",
+            "intent:attack:6:1", selected: false).ConsumerFingerprint());
+        False(original.ConsumerFingerprint() == Build("pile:draw:BASH+",
+            "cost:2", "deck:BASH+", "power:WEAK:1",
+            "intent:attack:6:1", selected: false).ConsumerFingerprint());
+        False(original.ConsumerFingerprint() == Build("pile:draw:BASH+",
+            "cost:2", "deck:BASH+", "power:STRENGTH:1",
+            "intent:attack:12:1", selected: false).ConsumerFingerprint());
+        False(original.ConsumerFingerprint() == Build("pile:draw:BASH+",
+            "cost:2", "deck:BASH+", "power:STRENGTH:1",
+            "intent:attack:6:1", selected: true).ConsumerFingerprint());
+        False(original.ConsumerStateKey() == Build("pile:draw:STRIKE_R",
+            "cost:2", "deck:BASH+", "power:STRENGTH:1",
+            "intent:attack:6:1", selected: false).ConsumerStateKey());
+    }
+
+    public static void SnapshotPlayerHpPreservesNullWireShape()
+    {
+        var player = new SnapshotPlayerContract
+        {
+            Hp = null,
+            Gold = 100,
+            Potions = [],
+        };
+
+        var wire = player.ToJsonObject();
+
+        True(wire.ContainsKey("hp"));
+        True(wire["hp"] is null);
+    }
+
+    public static void SnapshotConsumerFingerprintIgnoresPresentationAtEveryTypedLayer()
+    {
+        SnapshotContract Build(string presentation)
+        {
+            var item = new SnapshotItemContract
+            {
+                Model = "BASH",
+                SemanticState = ["cost:2"],
+            };
+            item.AddExtensions(new { title = presentation });
+            var player = new SnapshotPlayerContract
+            {
+                Hp = [60, 80],
+                Potions = [],
+                SemanticState = ["deck:BASH"],
+            };
+            player.AddExtensions(new { deckDescription = presentation });
+            var you = new SnapshotCombatantContract
+            {
+                Hp = [60, 80],
+                Energy = [2, 3],
+                SemanticState = ["power:STRENGTH:1"],
+            };
+            you.AddExtensions(new { powerDescription = presentation });
+            var enemy = new SnapshotEnemyContract
+            {
+                Id = 7,
+                Model = "CULTIST",
+                Hp = [30, 40],
+                SemanticState = ["intent:attack:6:1"],
+            };
+            enemy.AddExtensions(new { title = presentation });
+            var snapshot = new SnapshotContract(Phase.Combat)
+            {
+                Hand = [item],
+                Player = player,
+                You = you,
+                Enemies = [enemy],
+                SemanticState = ["pile:draw:BASH"],
+            };
+            snapshot.AddExtensions(new { decorativeFrame = presentation });
+            return snapshot;
+        }
+
+        Equal(Build("ornate").ConsumerFingerprint(),
+            Build("plain").ConsumerFingerprint());
     }
 
     private static SettlementRequest Request(

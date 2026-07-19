@@ -182,9 +182,13 @@ one `runId`. A recipe is complete only when every verb used follow, reached
 `main_menu` (`runId: none`), `spirescry replay run.json` re-drives that recipe
 with CAS guards and follow settlement, checking every recorded state
 fingerprint and stopping at the first divergence. Fingerprints cover the
-typed decision/settlement projection (phase, gates, target indices, and legal
-verbs); descriptive snapshot extensions are intentionally outside that
-compatibility contract.
+typed decision/settlement projection: phase and gates, action-target identity
+and selectors, map position, HP/gold/resources, selection state, and stable
+semantic tokens for deck/relic inventory, combat piles/powers/intents, event
+pages, and reward/shop economics. Snapshot producers set those fields through
+`SnapshotContract`; C# and Rust share exact fingerprint fixtures so a consumer
+drift fails tests. Localized prose and other descriptive snapshot extensions
+are intentionally outside that compatibility contract.
 This is a debugging aid, not authoritative replay recording: the output is
 explicitly a new reconstruction with its own `runId`, and its final state
 must never be attributed to the source run.

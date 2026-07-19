@@ -24,10 +24,12 @@ internal sealed class SnapshotContract
     };
     private static readonly HashSet<string> ConsumedKeys = new(StringComparer.Ordinal)
     {
-        "phase", "rev", "runId", "side", "actionsDisabled", "available",
+        "phase", "rev", "runId", "id", "act", "current", "turn", "outcome", "hp", "gold",
+        "semanticState", "selected",
+        "side", "actionsDisabled", "available",
         "proceedAvailable", "chestOpened", "confirmable", "cancelable",
         "next", "hand", "potions", "options", "cards", "colorless",
-        "relics", "rewards", "alternatives", "bundles", "cells", "player",
+        "relics", "rewards", "alternatives", "bundles", "cells", "you", "enemies", "player",
         "cardRemoval", "legal",
     };
     private readonly JsonObject _wire;
@@ -55,6 +57,68 @@ internal sealed class SnapshotContract
     {
         get => String("runId");
         set => SetString("runId", value);
+    }
+
+    public string? Id
+    {
+        get => String("id");
+        set => SetString("id", value);
+    }
+
+    public int? Act
+    {
+        get => Scalar<int>("act");
+        set => SetScalar("act", value);
+    }
+
+    public int[]? Current
+    {
+        get => _wire["current"] is JsonArray ? IntArray("current") : null;
+        set
+        {
+            if (value is null) _wire["current"] = null;
+            else SetIntArray("current", value);
+        }
+    }
+
+    public int? Gold
+    {
+        get => Scalar<int>("gold");
+        set => SetScalar("gold", value);
+    }
+
+    public string[]? SemanticState
+    {
+        get => StringArrayOrNull("semanticState");
+        set => SetStringArrayOrNull("semanticState", value);
+    }
+
+    public string[]? Selected
+    {
+        get => StringArrayOrNull("selected");
+        set => SetStringArrayOrNull("selected", value);
+    }
+
+    public int? Turn
+    {
+        get => Scalar<int>("turn");
+        set => SetScalar("turn", value);
+    }
+
+    public string? Outcome
+    {
+        get => String("outcome");
+        set => SetString("outcome", value);
+    }
+
+    public int[]? Hp
+    {
+        get => _wire["hp"] is JsonArray ? IntArray("hp") : null;
+        set
+        {
+            if (value is null) _wire["hp"] = null;
+            else SetIntArray("hp", value);
+        }
     }
 
     public string? Side
@@ -167,6 +231,24 @@ internal sealed class SnapshotContract
         set => SetItems("cells", value);
     }
 
+    public SnapshotEnemyContract[] Enemies
+    {
+        get => _wire["enemies"] is JsonArray enemies
+            ? enemies.OfType<JsonObject>()
+                .Select(enemy => new SnapshotEnemyContract(enemy)).ToArray()
+            : [];
+        set => _wire["enemies"] = new JsonArray(
+            value.Select(enemy => (JsonNode)enemy.ToJsonObject()).ToArray());
+    }
+
+    public SnapshotCombatantContract? You
+    {
+        get => _wire["you"] is JsonObject combatant
+            ? new SnapshotCombatantContract(combatant)
+            : null;
+        set => _wire["you"] = value?.ToJsonObject();
+    }
+
     public SnapshotPlayerContract? Player
     {
         get => _wire["player"] is JsonObject player
@@ -223,6 +305,15 @@ internal sealed class SnapshotContract
     internal JsonObject ConsumerProjection() =>
         JsonSerializer.SerializeToNode(new SnapshotConsumerProjection(
             PhaseName,
+            Id,
+            Act,
+            Current,
+            Turn,
+            Outcome,
+            Hp,
+            Gold,
+            SemanticState,
+            Selected,
             Side,
             ActionsDisabled,
             Available,
@@ -242,6 +333,8 @@ internal sealed class SnapshotContract
             Alternatives.Select(item => item.ConsumerProjection()).ToArray(),
             Bundles.Select(item => item.ConsumerProjection()).ToArray(),
             Cells.Select(item => item.ConsumerProjection()).ToArray(),
+            You?.ConsumerProjection(),
+            Enemies.Select(enemy => enemy.ConsumerProjection()).ToArray(),
             Player?.ConsumerProjection(),
             CardRemoval?.ConsumerProjection(),
             Legal), ProjectionJson)!.AsObject();
@@ -289,6 +382,19 @@ internal sealed class SnapshotContract
             ? result
             : null;
 
+    private int[] IntArray(string property) =>
+        _wire[property] is JsonArray values
+            ? values.Select(value => value?.GetValue<int>() ?? 0).ToArray()
+            : [];
+
+    private string[]? StringArrayOrNull(string property) =>
+        _wire[property] is JsonArray values
+            ? values.Select(value => value?.GetValue<string>())
+                .Where(value => value is not null)
+                .Cast<string>()
+                .ToArray()
+            : null;
+
     private void SetString(string property, string? value)
     {
         if (value is null) _wire.Remove(property);
@@ -299,6 +405,17 @@ internal sealed class SnapshotContract
     {
         if (value is null) _wire.Remove(property);
         else _wire[property] = JsonValue.Create(value.Value);
+    }
+
+    private void SetIntArray(string property, IEnumerable<int> values) =>
+        _wire[property] = new JsonArray(
+            values.Select(value => (JsonNode)value).ToArray());
+
+    private void SetStringArrayOrNull(string property, IEnumerable<string>? values)
+    {
+        if (values is null) _wire.Remove(property);
+        else _wire[property] = new JsonArray(
+            values.Select(value => (JsonNode)value).ToArray());
     }
 
     private SnapshotItemContract[] Items(string property) =>
@@ -313,6 +430,15 @@ internal sealed class SnapshotContract
 
 internal sealed record SnapshotConsumerProjection(
     string Phase,
+    string? Id,
+    int? Act,
+    int[]? Current,
+    int? Turn,
+    string? Outcome,
+    int[]? Hp,
+    int? Gold,
+    string[]? SemanticState,
+    string[]? Selected,
     string? Side,
     bool? ActionsDisabled,
     bool? Available,
@@ -332,12 +458,24 @@ internal sealed record SnapshotConsumerProjection(
     SnapshotItemConsumerProjection[] Alternatives,
     SnapshotItemConsumerProjection[] Bundles,
     SnapshotItemConsumerProjection[] Cells,
+    SnapshotCombatantConsumerProjection? You,
+    SnapshotEnemyConsumerProjection[] Enemies,
     SnapshotPlayerConsumerProjection? Player,
     SnapshotItemConsumerProjection? CardRemoval,
     string[] Legal);
 
 internal sealed record SnapshotItemConsumerProjection(
     int? Index,
+    string? Id,
+    string? Model,
+    string? Selector,
+    int? Slot,
+    string? Target,
+    int? Col,
+    int? Row,
+    string? Type,
+    string[]? SemanticState,
+    bool? Selected,
     bool? Playable,
     bool? Locked,
     bool? Chosen,
@@ -347,13 +485,247 @@ internal sealed record SnapshotItemConsumerProjection(
     SnapshotItemConsumerProjection[] Cards);
 
 internal sealed record SnapshotPlayerConsumerProjection(
+    int[]? Hp,
+    int? Gold,
+    string[]? SemanticState,
     SnapshotItemConsumerProjection[] Potions);
+
+internal sealed record SnapshotEnemyConsumerProjection(
+    uint? Id,
+    string? Model,
+    int[] Hp,
+    int? Block,
+    bool? Alive,
+    string[]? SemanticState);
+
+internal sealed record SnapshotCombatantConsumerProjection(
+    int[] Hp,
+    int? Block,
+    int[] Energy,
+    int? Stars,
+    string[]? SemanticState);
+
+internal sealed class SnapshotCombatantContract
+{
+    private static readonly HashSet<string> ConsumedKeys = new(StringComparer.Ordinal)
+    {
+        "hp", "block", "energy", "stars", "semanticState",
+    };
+    private readonly JsonObject _wire;
+
+    public SnapshotCombatantContract()
+        : this(new JsonObject())
+    {
+    }
+
+    internal SnapshotCombatantContract(JsonObject wire)
+    {
+        _wire = wire;
+    }
+
+    public int[] Hp
+    {
+        get => IntArray("hp");
+        set => SetIntArray("hp", value);
+    }
+
+    public int? Block
+    {
+        get => Scalar<int>("block");
+        set => SetScalar("block", value);
+    }
+
+    public int[] Energy
+    {
+        get => IntArray("energy");
+        set => SetIntArray("energy", value);
+    }
+
+    public int? Stars
+    {
+        get => Scalar<int>("stars");
+        set => SetScalar("stars", value);
+    }
+
+    public string[]? SemanticState
+    {
+        get => StringArrayOrNull("semanticState");
+        set => SetStringArrayOrNull("semanticState", value);
+    }
+
+    internal void AddExtensions(object extension)
+    {
+        var fields = JsonSerializer.SerializeToNode(extension)?.AsObject()
+            ?? throw new InvalidOperationException("snapshot combatant extension returned null");
+        foreach (var (property, value) in fields)
+        {
+            if (ConsumedKeys.Contains(property))
+                throw new InvalidOperationException(
+                    $"snapshot producer must set consumed combatant '{property}' through SnapshotCombatantContract");
+            _wire[property] = value?.DeepClone();
+        }
+    }
+
+    internal JsonObject ToJsonObject() => (JsonObject)_wire.DeepClone();
+
+    internal SnapshotCombatantConsumerProjection ConsumerProjection() =>
+        new(Hp, Block, Energy, Stars, SemanticState);
+
+    private int[] IntArray(string property) =>
+        _wire[property] is JsonArray values
+            ? values.Select(value => value?.GetValue<int>() ?? 0).ToArray()
+            : [];
+
+    private T? Scalar<T>(string property) where T : struct =>
+        _wire[property] is JsonValue value && value.TryGetValue<T>(out var result)
+            ? result
+            : null;
+
+    private string[]? StringArrayOrNull(string property) =>
+        _wire[property] is JsonArray values
+            ? values.Select(value => value?.GetValue<string>())
+                .Where(value => value is not null)
+                .Cast<string>()
+                .ToArray()
+            : null;
+
+    private void SetIntArray(string property, IEnumerable<int> values) =>
+        _wire[property] = new JsonArray(
+            values.Select(value => (JsonNode)value).ToArray());
+
+    private void SetStringArrayOrNull(string property, IEnumerable<string>? values)
+    {
+        if (values is null) _wire.Remove(property);
+        else _wire[property] = new JsonArray(
+            values.Select(value => (JsonNode)value).ToArray());
+    }
+
+    private void SetScalar<T>(string property, T? value) where T : struct
+    {
+        if (value is null) _wire.Remove(property);
+        else _wire[property] = JsonValue.Create(value.Value);
+    }
+}
+
+internal sealed class SnapshotEnemyContract
+{
+    private static readonly HashSet<string> ConsumedKeys = new(StringComparer.Ordinal)
+    {
+        "id", "model", "hp", "block", "alive", "semanticState",
+    };
+    private readonly JsonObject _wire;
+
+    public SnapshotEnemyContract()
+        : this(new JsonObject())
+    {
+    }
+
+    internal SnapshotEnemyContract(JsonObject wire)
+    {
+        _wire = wire;
+    }
+
+    public uint? Id
+    {
+        get => Scalar<uint>("id");
+        set => SetScalar("id", value);
+    }
+
+    public string? Model
+    {
+        get => String("model");
+        set => SetString("model", value);
+    }
+
+    public int[] Hp
+    {
+        get => _wire["hp"] is JsonArray hp
+            ? hp.Select(value => value?.GetValue<int>() ?? 0).ToArray()
+            : [];
+        set => _wire["hp"] = new JsonArray(
+            value.Select(item => (JsonNode)item).ToArray());
+    }
+
+    public bool? Alive
+    {
+        get => Scalar<bool>("alive");
+        set => SetScalar("alive", value);
+    }
+
+    public int? Block
+    {
+        get => Scalar<int>("block");
+        set => SetScalar("block", value);
+    }
+
+    public string[]? SemanticState
+    {
+        get => StringArrayOrNull("semanticState");
+        set => SetStringArrayOrNull("semanticState", value);
+    }
+
+    internal void AddExtensions(object extension)
+    {
+        var fields = JsonSerializer.SerializeToNode(extension)?.AsObject()
+            ?? throw new InvalidOperationException("snapshot enemy extension returned null");
+        foreach (var (property, value) in fields)
+        {
+            if (ConsumedKeys.Contains(property))
+                throw new InvalidOperationException(
+                    $"snapshot producer must set consumed enemy '{property}' through SnapshotEnemyContract");
+            _wire[property] = value?.DeepClone();
+        }
+    }
+
+    internal JsonObject ToJsonObject() => (JsonObject)_wire.DeepClone();
+
+    internal SnapshotEnemyConsumerProjection ConsumerProjection() =>
+        new(Id, Model, Hp, Block, Alive, SemanticState);
+
+    private string? String(string property) =>
+        _wire[property] is JsonValue value && value.TryGetValue<string>(out var result)
+            ? result
+            : null;
+
+    private T? Scalar<T>(string property) where T : struct =>
+        _wire[property] is JsonValue value && value.TryGetValue<T>(out var result)
+            ? result
+            : null;
+
+    private string[]? StringArrayOrNull(string property) =>
+        _wire[property] is JsonArray values
+            ? values.Select(value => value?.GetValue<string>())
+                .Where(value => value is not null)
+                .Cast<string>()
+                .ToArray()
+            : null;
+
+    private void SetString(string property, string? value)
+    {
+        if (value is null) _wire.Remove(property);
+        else _wire[property] = value;
+    }
+
+    private void SetStringArrayOrNull(string property, IEnumerable<string>? values)
+    {
+        if (values is null) _wire.Remove(property);
+        else _wire[property] = new JsonArray(
+            values.Select(value => (JsonNode)value).ToArray());
+    }
+
+    private void SetScalar<T>(string property, T? value) where T : struct
+    {
+        if (value is null) _wire.Remove(property);
+        else _wire[property] = JsonValue.Create(value.Value);
+    }
+}
 
 internal sealed class SnapshotItemContract
 {
     private static readonly HashSet<string> ConsumedKeys = new(StringComparer.Ordinal)
     {
-        "idx", "playable", "locked", "chosen", "enabled", "purchasable", "hidden",
+        "idx", "id", "model", "selector", "slot", "target", "col", "row", "type",
+        "semanticState", "selected", "playable", "locked", "chosen", "enabled", "purchasable", "hidden",
         "cards",
     };
     private readonly JsonObject _wire;
@@ -385,6 +757,66 @@ internal sealed class SnapshotItemContract
     {
         get => Scalar<int>("idx");
         set => SetScalar("idx", value);
+    }
+
+    public string? Id
+    {
+        get => String("id");
+        set => SetString("id", value);
+    }
+
+    public string? Model
+    {
+        get => String("model");
+        set => SetString("model", value);
+    }
+
+    public string? Selector
+    {
+        get => String("selector");
+        set => SetString("selector", value);
+    }
+
+    public int? Slot
+    {
+        get => Scalar<int>("slot");
+        set => SetScalar("slot", value);
+    }
+
+    public string? Target
+    {
+        get => String("target");
+        set => SetString("target", value);
+    }
+
+    public int? Col
+    {
+        get => Scalar<int>("col");
+        set => SetScalar("col", value);
+    }
+
+    public int? Row
+    {
+        get => Scalar<int>("row");
+        set => SetScalar("row", value);
+    }
+
+    public string? Type
+    {
+        get => String("type");
+        set => SetString("type", value);
+    }
+
+    public string[]? SemanticState
+    {
+        get => StringArrayOrNull("semanticState");
+        set => SetStringArrayOrNull("semanticState", value);
+    }
+
+    public bool? Selected
+    {
+        get => Scalar<bool>("selected");
+        set => SetScalar("selected", value);
     }
 
     public bool? Playable
@@ -436,18 +868,46 @@ internal sealed class SnapshotItemContract
     internal JsonObject ToJsonObject() => (JsonObject)_wire.DeepClone();
 
     internal SnapshotItemConsumerProjection ConsumerProjection() => new(
-        Index, Playable, Locked, Chosen, Enabled, Purchasable, Hidden,
+        Index, Id, Model, Selector, Slot, Target, Col, Row, Type,
+        SemanticState, Selected,
+        Playable, Locked, Chosen, Enabled, Purchasable, Hidden,
         Cards.Select(item => item.ConsumerProjection()).ToArray());
+
+    private string? String(string property) =>
+        _wire[property] is JsonValue value && value.TryGetValue<string>(out var result)
+            ? result
+            : null;
 
     private T? Scalar<T>(string property) where T : struct =>
         _wire[property] is JsonValue value && value.TryGetValue<T>(out var result)
             ? result
             : null;
 
+    private string[]? StringArrayOrNull(string property) =>
+        _wire[property] is JsonArray values
+            ? values.Select(value => value?.GetValue<string>())
+                .Where(value => value is not null)
+                .Cast<string>()
+                .ToArray()
+            : null;
+
     private void SetScalar<T>(string property, T? value) where T : struct
     {
         if (value is null) _wire.Remove(property);
         else _wire[property] = JsonValue.Create(value.Value);
+    }
+
+    private void SetString(string property, string? value)
+    {
+        if (value is null) _wire.Remove(property);
+        else _wire[property] = value;
+    }
+
+    private void SetStringArrayOrNull(string property, IEnumerable<string>? values)
+    {
+        if (values is null) _wire.Remove(property);
+        else _wire[property] = new JsonArray(
+            values.Select(value => (JsonNode)value).ToArray());
     }
 }
 
@@ -471,11 +931,33 @@ internal sealed class SnapshotPlayerContract
             ?? throw new InvalidOperationException("snapshot player extension returned null");
         foreach (var (property, value) in fields)
         {
-            if (property == "potions")
+            if (property is "hp" or "gold" or "potions" or "semanticState")
                 throw new InvalidOperationException(
-                    "snapshot producer must set consumed player 'potions' through SnapshotPlayerContract");
+                    $"snapshot producer must set consumed player '{property}' through SnapshotPlayerContract");
             _wire[property] = value?.DeepClone();
         }
+    }
+
+    public int[]? Hp
+    {
+        get => _wire["hp"] is JsonArray hp
+            ? hp.Select(value => value?.GetValue<int>() ?? 0).ToArray()
+            : null;
+        set => _wire["hp"] = value is null
+            ? null
+            : new JsonArray(value.Select(item => (JsonNode)item).ToArray());
+    }
+
+    public int? Gold
+    {
+        get => Scalar<int>("gold");
+        set => SetScalar("gold", value);
+    }
+
+    public string[]? SemanticState
+    {
+        get => StringArrayOrNull("semanticState");
+        set => SetStringArrayOrNull("semanticState", value);
     }
 
     public SnapshotItemContract[] Potions
@@ -491,5 +973,34 @@ internal sealed class SnapshotPlayerContract
     internal JsonObject ToJsonObject() => (JsonObject)_wire.DeepClone();
 
     internal SnapshotPlayerConsumerProjection ConsumerProjection() => new(
+        Hp,
+        Gold,
+        SemanticState,
         Potions.Select(item => item.ConsumerProjection()).ToArray());
+
+    private T? Scalar<T>(string property) where T : struct =>
+        _wire[property] is JsonValue value && value.TryGetValue<T>(out var result)
+            ? result
+            : null;
+
+    private string[]? StringArrayOrNull(string property) =>
+        _wire[property] is JsonArray values
+            ? values.Select(value => value?.GetValue<string>())
+                .Where(value => value is not null)
+                .Cast<string>()
+                .ToArray()
+            : null;
+
+    private void SetScalar<T>(string property, T? value) where T : struct
+    {
+        if (value is null) _wire.Remove(property);
+        else _wire[property] = JsonValue.Create(value.Value);
+    }
+
+    private void SetStringArrayOrNull(string property, IEnumerable<string>? values)
+    {
+        if (values is null) _wire.Remove(property);
+        else _wire[property] = new JsonArray(
+            values.Select(value => (JsonNode)value).ToArray());
+    }
 }
