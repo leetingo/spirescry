@@ -403,6 +403,9 @@ def p10():
     assert launched["runId"] == launched["obs"]["runId"], launched
     assert launched["obs"]["phase"] == "event", launched["obs"]
     assert launched["obs"].get("legal"), launched["obs"]
+    # The engine-fault channel is part of the follow contract: present,
+    # and empty on a clean action.
+    assert launched["errors"] == [], launched["errors"]
 
     for bad_follow in ("5000", -1, 60001):
         status, d = http("POST", "/step", {
@@ -509,6 +512,14 @@ def p12():
     assert changed.get("changed") is True, changed
     assert fault_events, changed.get("events")
     assert took < 1.5, f"fault event did not wake parked obs ({took:.2f}s)"
+
+    # A followed verb whose async work faults must say so in `errors` —
+    # "settled" alone is engine quiescence, not proof of a clean effect.
+    followed = run("cheat", "async-fault", "--follow", "5000")
+    assert any(
+        error.startswith("async_fault:forced-async-fault:")
+        for error in followed["errors"]
+    ), followed["errors"]
 
 
 # ---------- R: run lifecycle ----------
@@ -825,7 +836,11 @@ def w1():
     assert obs().get("relics"), "opened treasure offered no relics"
     run("skip")  # declines the visible offer
     time.sleep(1)
-    assert len(obs()["player"]["relics"]) == relics0, "skip still granted a relic"
+    after = obs()
+    assert len(after["player"]["relics"]) == relics0, "skip still granted a relic"
+    # The offer resolved but the chest does not close again: reading
+    # chestOpened=false here would re-advertise the opening pick-relic.
+    assert after["chestOpened"] is True, after
     to_menu()
 
 
@@ -868,12 +883,21 @@ def w3():
     assert first["player"]["gold"] == second["player"]["gold"], \
         "observing the closed chest changed gold"
 
+    # The closed chest must advertise its opening verb: an agent that
+    # only fires legal verbs otherwise walks past every treasure room.
+    closed = run("obs", "--decision")
+    assert "pick-relic" in closed["legal"], closed["legal"]
+
     relics0 = len(first["player"]["relics"])
     run("pick-relic", "0")  # first verb opens the headless chest
     opened = obs()
     assert opened["chestOpened"] is True and opened["relics"], opened
     run("pick-relic", "0")  # second selects from the now-visible offer
     assert len(obs()["player"]["relics"]) == relics0 + 1
+    # Resolved offer: chest stays open, pick-relic is no longer legal.
+    resolved = run("obs", "--decision")
+    assert resolved["chestOpened"] is True, resolved
+    assert "pick-relic" not in resolved["legal"], resolved["legal"]
     run("proceed")
     bridge.wait_phase("map")
     to_menu()

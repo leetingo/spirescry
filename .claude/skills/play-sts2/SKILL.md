@@ -105,6 +105,51 @@ spirescry health               # booted when it prints {"ok": true, …}
   command logs every bridge request — turn it on before filing a bridge
   fault, and pair it with `spirescry --verbose` on the CLI side.
 
+### Host identity check
+
+A healthy bridge is not yet a trustworthy one: `health` proves protocol
+compatibility, not that the running host was built from this checkout. A
+stale host (old patches, or built before the Steam game updated) passes
+every liveness probe and silently skews the rules. After boot's `health`,
+run this once with the pre-flight's command word as `$1`:
+
+```sh
+spirescry_host_check() {
+    local cmd expected reported
+    cmd="${1:-spirescry}"
+    expected="$(git rev-parse --short HEAD 2>/dev/null)" || {
+        echo "host check: not inside the spirescry repository; stop" >&2
+        return 1
+    }
+    if [ -n "$(git status --porcelain --untracked-files=all 2>/dev/null)" ]; then
+        expected="$expected-dirty"
+    fi
+    reported="$("$cmd" health 2>/dev/null \
+        | sed -n 's/.*"buildHash": *"\([^"]*\)".*/\1/p')"
+    if [ -z "$reported" ]; then
+        echo "host check: health has no buildHash — host too old to identify; rebuild and restart it" >&2
+        return 1
+    fi
+    if [ "$reported" != "$expected" ]; then
+        echo "host check: host build '$reported' != checkout '$expected' — stale host; stop" >&2
+        return 1
+    fi
+    case "$reported" in
+        *-dirty) echo "host check: $reported is a dirty build — the hash matches but edits since the build are invisible; note this in the run report" >&2 ;;
+    esac
+    printf 'SPIRESCRY_EXPECT_BUILD=%s\n' "$reported"
+}
+```
+
+On failure: `./build.sh stop`, then `./build.sh headless-setup host`, then
+rerun the check — do not play against an unidentified host. On success it
+prints one `SPIRESCRY_EXPECT_BUILD=<stamp>` line: prepend that assignment
+to **every** later verb, the same way the pre-flight's command word is
+reused across fresh shells (`SPIRESCRY_EXPECT_BUILD=<stamp> spirescry …`).
+The CLI then hard-fails any verb answered by a host built from a different
+revision — including a host restarted behind your back mid-session. Rerun
+the check whenever you rebuild or restart the host.
+
 Host quirks: runs never save (each boot starts clean), and card pickers
 auto-confirm at max picks — `confirm` accepts a partial pick.
 
@@ -131,6 +176,12 @@ auto-confirm at max picks — `confirm` accepts a partial pick.
    `next_decision` means an effect parked on a picker/dialogue that now
    needs one verb; `timeout` means the verb was accepted but has not
    resolved — do not fire another verb, rescry and inspect `health`.
+   Then inspect `errors`: it lists engine exceptions logged between
+   acceptance and settlement (`engine_error:…` / `async_fault:…`). The
+   engine logs-and-swallows faults inside its own task chains, so a verb
+   whose effect **half-executed** still reads `settled` — non-empty
+   `errors` (the CLI also warns on stderr) is an impossible observation:
+   save `runlog` first, then follow that protocol before the next verb.
 5. Repeat 2–4 until `game_over`; report outcome, where it ended
    (`actNumber` / `actFloor` / `encounter.title`), and the seed, then
    `abandon` to return to the menu.
@@ -207,8 +258,10 @@ this as a `wedge:DeadBoard` event after ~8 s; older hosts stay silent
 (the stuck-executor watchdog can't time an executor that's already
 gone). Either way, more verbs only pollute the evidence. Instead:
 
-1. Capture `obs`, `health`, the last verb you fired, and the exception
-   from the host log.
+1. Save `spirescry runlog > run-<seed>-fault.json` — the fingerprinted
+   verb trail dies with the run, so capture it before anything else —
+   then capture `obs`, `health`, the last verb you fired, and the
+   exception from the host log.
 2. Report a **technical abort**, distinct from a game loss — the
    outcome is "host fault", not "died to X".
 3. `abandon`; if even that rejects, restart the host.
@@ -218,11 +271,15 @@ gone). Either way, more verbs only pollute the evidence. Instead:
 First rule out takeover: compare `runId`, and look for a `run:<id>` event
 you did not cause. A changed run is no longer yours.
 
-Resources moving at a frozen `rev`, a claim that never lands, or an effect
-whose promise disagrees with a `settled` board is a bridge fault, not a
-puzzle to poll at. One rescry → `spirescry health` → use a currently
-`legal` escape verb if one exists → **mark the run polluted**. Keep playing
-only if the bridge still returns settled decisions; disclose the fault and
+Resources moving at a frozen `rev`, a claim that never lands, an effect
+whose promise disagrees with a `settled` board, or a follow response with
+non-empty `errors` is a bridge fault, not a puzzle to poll at. The order
+is fixed, and forensics come first: one rescry → **save
+`spirescry runlog > run-<seed>-fault.json` before any further verb,
+abandon included** (the fingerprint trail is run-scoped; abandon or a
+host restart destroys it) → `spirescry health` → use a currently `legal`
+escape verb if one exists → **mark the run polluted**. Keep playing only
+if the bridge still returns settled decisions; disclose the fault and
 treat conclusions drawn from the polluted state as suspect.
 
 A host restart ends the run, full stop. Rebuilding the same seed and
@@ -247,7 +304,8 @@ it.
 | `event` | `options[]` (idx/title/description/locked) | `option <idx>` — some options only mark `chosen`: rescry after each, and when nothing new is pickable, `proceed`. `proceed` also pages dialogue and leaves once `finished`. |
 | `rest_site` | `options[]` | `option <idx>` (upgrade opens a deck picker); `options` empty → `proceed` → map |
 | `shop` | goods with idx + prices | `buy <kind> --idx <n>` (kind: `card`/`colorless`/`relic`/`potion`/`card_removal`), `leave` |
-| `treasure`, `relic_reward` | relics on offer | `pick-relic <idx>`, `skip` |
+| `treasure` | `chestOpened`, `relics` | Closed chest (`chestOpened:false`, `relics:[]` — unopened, not empty): `pick-relic 0` **opens** it; rescry, then choose from the now-visible offer. Open chest: `pick-relic <idx>` takes, `skip` declines. `proceed` leaves — in headless even with the chest unopened, so don't read `legal:[…,proceed]` as "nothing here". `chestOpened:true` with `relics:[]` is a resolved offer. |
+| `relic_reward` | relics on offer | `pick-relic <idx>`, `skip` |
 | `rewards` | reward tiles | `pick-reward <idx>`; `proceed` leaves, skipping the rest |
 | `card_reward` | cards on offer | `pick-card <idx>`, `skip` |
 | `card_select` | picker cards with `cost` and `upgradedPreview` | `pick-card <idx>` (toggles), `confirm` when enough are selected, `skip` only when `cancelable` |

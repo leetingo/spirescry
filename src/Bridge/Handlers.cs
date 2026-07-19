@@ -294,8 +294,13 @@ public static class Handlers
         FollowProbe probe,
         long? logEntryId)
     {
+        // Engine-side faults between acceptance and settlement: an outcome
+        // of "settled" only says tracked work went quiet, and the engine
+        // logs-and-swallows exceptions inside its own task chains — a verb
+        // whose effect half-executed would otherwise read as clean.
+        var errors = Signals.ErrorsSince(startedRev);
         if (logEntryId is { } id)
-            RunLog.RecordOutcome(id, outcome, probe.Observation);
+            RunLog.RecordOutcome(id, outcome, probe.Observation, errors);
         var node = new JsonObject
         {
             ["ok"] = true,
@@ -306,6 +311,7 @@ public static class Handlers
             ["runId"] = probe.RunId,
             ["settled"] = outcome != "timeout",
             ["outcome"] = outcome,
+            ["errors"] = JsonSerializer.SerializeToNode(errors),
             ["events"] = JsonSerializer.SerializeToNode(Signals.EventsSince(startedRev)),
             ["obs"] = probe.Observation,
         };

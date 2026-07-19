@@ -30,6 +30,7 @@ public static class Signals
     private static bool _wedgeAnnounced;
     private static DateTime? _deadBoardSinceUtc;
     private static bool _deadBoardAnnounced;
+    private static bool _logHooked;
 
     // Milliseconds the executor has been stuck on the SAME action. The
     // serial executor never recovers from a parked action on its own —
@@ -67,10 +68,31 @@ public static class Signals
     {
         if (task.Exception is not { } aggregate) return $"async:{label}";
         var cause = aggregate.Flatten().InnerExceptions.FirstOrDefault() ?? aggregate;
-        var message = string.Join(' ', cause.Message.Split(
-            (char[]?)null, StringSplitOptions.RemoveEmptyEntries));
-        if (message.Length > 160) message = message[..160];
-        return $"async_fault:{label}:{cause.GetType().Name}:{message}";
+        return ErrorEvents.FromAsyncFault(label, cause.GetType().Name, cause.Message);
+    }
+
+    // The engine catches exceptions from fire-and-forget task chains
+    // (TaskHelper.RunSafely and friends) and only logs them — the fault
+    // never reaches a task the mod tracks, so a half-executed effect
+    // still settles quietly. Every Logger chains its callback to this
+    // global event, so folding Error-level lines into the revision
+    // stream makes those swallowed failures visible to follow/obs.
+    private static void OnEngineLog(
+        MegaCrit.Sts2.Core.Logging.LogLevel level, string text, int _)
+    {
+        if (level != MegaCrit.Sts2.Core.Logging.LogLevel.Error) return;
+        Bump(ErrorEvents.FromLogLine(text));
+    }
+
+    // Error events accepted-to-settlement: the follow response surfaces
+    // them so a verb whose effects half-executed cannot read as a clean
+    // "settled". Prefix-scoped to the two fault streams.
+    public static string[] ErrorsSince(long since)
+    {
+        lock (Gate)
+            return Log.Where(e => e.rev > since && ErrorEvents.IsError(e.type))
+                .Select(e => e.type)
+                .ToArray();
     }
 
     // Call from a main-thread pump job immediately before reading state or
@@ -269,6 +291,12 @@ public static class Signals
     // reference compares keep the subscriptions on the live instances.
     private static void EnsureSubscribed()
     {
+        if (!_logHooked)
+        {
+            _logHooked = true;
+            MegaCrit.Sts2.Core.Logging.Log.LogCallback += OnEngineLog;
+        }
+
         var exec = RunManager.Instance?.ActionExecutor;
         if (!ReferenceEquals(exec, _exec))
         {

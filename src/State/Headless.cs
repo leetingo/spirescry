@@ -19,12 +19,20 @@ public static class HeadlessTreasure
 
     public static bool CanBeginRelicPicking => _openDepth > 0;
 
+    // The room whose chest a verb already opened. GUI mode reads the chest
+    // node's own flag; headless has no node, so this reference is the
+    // chest state — the snapshot's chestOpened must stay true after the
+    // offer resolves (picked relics empty the offer, not the chest).
+    public static MegaCrit.Sts2.Core.Rooms.TreasureRoom? OpenedRoom { get; set; }
+
     public static void Open(Action beginRelicPicking)
     {
         _openDepth++;
         try { beginRelicPicking(); }
         finally { _openDepth--; }
     }
+
+    public static void Clear() => OpenedRoom = null;
 }
 
 // The real GUI/headless boundary is completion ownership: every pending
@@ -210,6 +218,7 @@ public static class HeadlessState
         HeadlessPicker.CancelIfActive();
         HeadlessBundle.CancelIfActive();
         HeadlessCrystal.Clear();
+        HeadlessTreasure.Clear();
     }
 }
 

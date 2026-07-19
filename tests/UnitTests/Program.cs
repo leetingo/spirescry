@@ -235,6 +235,95 @@ internal static class Tests
         Equal("pick-card,skip,abandon", string.Join(',', legal));
     }
 
+    public static void ErrorEventsCondenseLogLinesIntoBoundedTokens()
+    {
+        // Multi-line exception dumps become one whitespace-collapsed token.
+        Equal("engine_error:TestException: kaboom at Some.Frame()",
+            ErrorEvents.FromLogLine("TestException: kaboom\n   at Some.Frame()"));
+        Equal("async_fault:option:NullReferenceException:object was null",
+            ErrorEvents.FromAsyncFault(
+                "option", "NullReferenceException", "object  was\nnull"));
+
+        // Ring-buffer entries stay bounded no matter how long the dump is.
+        var flooded = ErrorEvents.FromLogLine(new string('x', 500));
+        Equal("engine_error:".Length + 160, flooded.Length);
+    }
+
+    public static void ErrorEventsRecognizeExactlyTheTwoFaultStreams()
+    {
+        True(ErrorEvents.IsError("engine_error:TestException: kaboom"));
+        True(ErrorEvents.IsError("async_fault:option:TestException:kaboom"));
+        False(ErrorEvents.IsError("async:option"));
+        False(ErrorEvents.IsError("phase:map->combat"));
+        False(ErrorEvents.IsError("wedge:DeadBoard"));
+    }
+
+    public static void DecisionClosedChestAdvertisesTheOpeningPickRelic()
+    {
+        // Headless closed chest: relics empty, proceed always available.
+        // pick-relic is the verb that opens the chest — omitting it left
+        // "proceed" as the only advertised action and a legal-verbs-only
+        // agent had to walk past every treasure room.
+        var headless = System.Text.Json.Nodes.JsonNode.Parse("""
+            {
+              "phase":"treasure",
+              "chestOpened":false,
+              "proceedAvailable":true,
+              "relics":[],
+              "player":{"potions":[]}
+            }
+            """)!.AsObject();
+
+        Equal("pick-relic,proceed,abandon", string.Join(',',
+            DecisionProjection.LegalVerbs(headless, runActive: true)));
+
+        // GUI closed chest: the proceed button hides until the chest is
+        // resolved, so opening is the only advertised move.
+        var gui = System.Text.Json.Nodes.JsonNode.Parse("""
+            {
+              "phase":"treasure",
+              "chestOpened":false,
+              "proceedAvailable":false,
+              "relics":[],
+              "player":{"potions":[]}
+            }
+            """)!.AsObject();
+
+        Equal("pick-relic,abandon", string.Join(',',
+            DecisionProjection.LegalVerbs(gui, runActive: true)));
+    }
+
+    public static void DecisionOpenChestOffersPickAndSkipThenOnlyProceed()
+    {
+        var offering = System.Text.Json.Nodes.JsonNode.Parse("""
+            {
+              "phase":"treasure",
+              "chestOpened":true,
+              "proceedAvailable":true,
+              "relics":[{"idx":0}],
+              "player":{"potions":[]}
+            }
+            """)!.AsObject();
+
+        Equal("pick-relic,skip,proceed,abandon", string.Join(',',
+            DecisionProjection.LegalVerbs(offering, runActive: true)));
+
+        // Resolved offer: the chest stays open and empty — pick-relic must
+        // not be advertised again (the dispatcher would reject it).
+        var resolved = System.Text.Json.Nodes.JsonNode.Parse("""
+            {
+              "phase":"treasure",
+              "chestOpened":true,
+              "proceedAvailable":true,
+              "relics":[],
+              "player":{"potions":[]}
+            }
+            """)!.AsObject();
+
+        Equal("proceed,abandon", string.Join(',',
+            DecisionProjection.LegalVerbs(resolved, runActive: true)));
+    }
+
     public static void DecisionUnavailableTransitionsDoNotAdvertiseActions()
     {
         foreach (var phase in new[] { "event", "rewards" })

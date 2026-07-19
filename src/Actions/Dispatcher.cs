@@ -420,7 +420,6 @@ public static class Dispatcher
         Reflect.SetPropertyOrBackingField(rm, "State", null);
         Reflect.SetPropertyOrBackingField(rm, "IsAbandoned", false);
         HeadlessState.ResetAll();
-        _openedHeadlessTreasure = null;
         _normalRewardsGrantedFor = null;
         return DispatchResult.Success();
     }
@@ -1159,8 +1158,9 @@ public static class Dispatcher
     // DoNormalRewards grants gold as well as creating the relic offer, so
     // guard it by room identity. Observation is deliberately read-only;
     // the first headless pick-relic/skip opens the chest and asks the agent
-    // to rescry before making the actual selection.
-    private static TreasureRoom? _openedHeadlessTreasure;
+    // to rescry before making the actual selection. The opened-room
+    // reference lives on HeadlessTreasure so the snapshot can report
+    // chestOpened after the offer resolves.
     private static TreasureRoom? _normalRewardsGrantedFor;
 
     private static DispatchResult? OpenHeadlessTreasureIfNeeded(
@@ -1170,7 +1170,7 @@ public static class Dispatcher
         if (RunManager.Instance?.DebugOnlyGetState()?.CurrentRoom is not TreasureRoom room)
             return DispatchResult.Reject(
                 RejectionCodes.NotReady, "treasure room not available");
-        if (ReferenceEquals(_openedHeadlessTreasure, room))
+        if (ReferenceEquals(HeadlessTreasure.OpenedRoom, room))
             return sync.CurrentRelics is { Count: > 0 }
                 ? null
                 : DispatchResult.Reject(
@@ -1186,7 +1186,7 @@ public static class Dispatcher
                 _normalRewardsGrantedFor = room;
             }
             room.DoExtraRewardsIfNeeded().GetAwaiter().GetResult();
-            _openedHeadlessTreasure = room;
+            HeadlessTreasure.OpenedRoom = room;
             return DispatchResult.Success("chest opened — rescry, then pick-relic / skip");
         }
         catch (Exception ex)
@@ -1563,7 +1563,7 @@ public static class Dispatcher
                     if (RunManager.Instance?.DebugOnlyGetState()?.CurrentRoom is not TreasureRoom room)
                         return DispatchResult.Reject(
                             RejectionCodes.NotReady, "treasure room not available");
-                    if (!ReferenceEquals(_openedHeadlessTreasure, room)
+                    if (!ReferenceEquals(HeadlessTreasure.OpenedRoom, room)
                         && OpenHeadlessTreasureIfNeeded(sync) is { } headlessOpen)
                         return headlessOpen;
                 }
