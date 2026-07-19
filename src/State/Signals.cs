@@ -14,9 +14,13 @@ namespace Spirescry.State;
 public static class Signals
 {
     private const int LogCap = 64;
+    // Errors are rarer and heavier than events; a run that produces more
+    // than this is already unplayable, so dropping the oldest is fine.
+    private const int ErrorCap = 256;
 
     private static readonly object Gate = new();
     private static readonly List<(long rev, string type)> Log = new();
+    private static readonly List<(long rev, string type)> Errors = new();
     private static readonly List<TaskCompletionSource<bool>> Waiters = new();
     private static readonly List<TaskCompletionSource<bool>> TickWaiters = new();
     private static readonly HashSet<Task> PendingAsync = new();
@@ -81,16 +85,26 @@ public static class Signals
         MegaCrit.Sts2.Core.Logging.LogLevel level, string text, int _)
     {
         if (level != MegaCrit.Sts2.Core.Logging.LogLevel.Error) return;
-        Bump(ErrorEvents.FromLogLine(text));
+        // Benign-line triage needs to know whether combat is live; the
+        // callback can fire on any thread, so read defensively and let
+        // an unreadable state count as in-combat — unknown context must
+        // degrade toward reporting an error, never toward hiding one.
+        bool combatInProgress;
+        try { combatInProgress = CombatManager.Instance is { IsInProgress: true }; }
+        catch { combatInProgress = true; }
+        Bump(ErrorEvents.FromLogLine(text, combatInProgress));
     }
 
     // Error events accepted-to-settlement: the follow response surfaces
     // them so a verb whose effects half-executed cannot read as a clean
-    // "settled". Prefix-scoped to the two fault streams.
+    // "settled". Kept in their own journal: the shared event ring holds
+    // LogCap entries and one busy resolution can push more than that
+    // between acceptance and settlement — an error evicted from the ring
+    // must still reach the follow response and the runlog.
     public static string[] ErrorsSince(long since)
     {
         lock (Gate)
-            return Log.Where(e => e.rev > since && ErrorEvents.IsError(e.type))
+            return Errors.Where(e => e.rev > since)
                 .Select(e => e.type)
                 .ToArray();
     }
@@ -122,6 +136,11 @@ public static class Signals
             _revision++;
             Log.Add((_revision, type));
             if (Log.Count > LogCap) Log.RemoveAt(0);
+            if (ErrorEvents.IsError(type))
+            {
+                Errors.Add((_revision, type));
+                if (Errors.Count > ErrorCap) Errors.RemoveAt(0);
+            }
             if (Waiters.Count > 0)
             {
                 wake = new List<TaskCompletionSource<bool>>(Waiters);

@@ -112,10 +112,12 @@ compatibility, not that the running host was built from this checkout. A
 stale host (old patches, post-build source edits, or a build predating a
 Steam game update) passes every liveness probe and silently skews the
 rules. The build stamp is content-based — a git ref plus a hash of every
-source file **and** `lib/sts2.dll` (`./build.sh stamp` prints what this
-checkout would produce) — so both edits-after-build and a changed game
-dll surface as a mismatch, dirty checkout or not. After boot's `health`,
-run this once with the pre-flight's command word as `$1`:
+source file **and** every dll under `lib/` (`./build.sh stamp` prints
+what this checkout would produce; third-party dlls under
+`headless/build/lib` are outside the stamp and refreshed by the same
+`headless-setup` pass) — so edits-after-build and a changed game dll
+both surface as a mismatch, dirty checkout or not. After boot's
+`health`, run this once with the pre-flight's command word as `$1`:
 
 ```sh
 spirescry_host_check() {

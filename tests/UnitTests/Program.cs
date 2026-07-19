@@ -239,13 +239,14 @@ internal static class Tests
     {
         // Multi-line exception dumps become one whitespace-collapsed token.
         Equal("engine_error:TestException: kaboom at Some.Frame()",
-            ErrorEvents.FromLogLine("TestException: kaboom\n   at Some.Frame()"));
+            ErrorEvents.FromLogLine(
+                "TestException: kaboom\n   at Some.Frame()", combatInProgress: false));
         Equal("async_fault:option:NullReferenceException:object was null",
             ErrorEvents.FromAsyncFault(
                 "option", "NullReferenceException", "object  was\nnull"));
 
-        // Ring-buffer entries stay bounded no matter how long the dump is.
-        var flooded = ErrorEvents.FromLogLine(new string('x', 500));
+        // Journal entries stay bounded no matter how long the dump is.
+        var flooded = ErrorEvents.FromLogLine(new string('x', 500), combatInProgress: false);
         Equal("engine_error:".Length + 160, flooded.Length);
     }
 
@@ -268,18 +269,25 @@ internal static class Tests
             "System.InvalidOperationException: Tried to pop action "
             + "EndPlayerTurnAction, but we didn't find it in any queue!\n"
             + "   at MegaCrit.Sts2.Core.GameActions.ActionQueue.Pop()";
-        var evt = ErrorEvents.FromLogLine(victoryLine);
+        var evt = ErrorEvents.FromLogLine(victoryLine, combatInProgress: false);
         True(evt.StartsWith("engine_note:", StringComparison.Ordinal));
         False(ErrorEvents.IsError(evt));
+
+        // The identical text mid-combat is queue corruption, not victory
+        // cleanup — same context requirement as VictorySettled.
+        True(ErrorEvents.IsError(
+            ErrorEvents.FromLogLine(victoryLine, combatInProgress: true)));
 
         // A different action or exception type merely mentioning queues
         // stays a real error.
         True(ErrorEvents.IsError(ErrorEvents.FromLogLine(
             "System.InvalidOperationException: Tried to pop action "
-            + "PlayCardAction, but we didn't find it in any queue!")));
+            + "PlayCardAction, but we didn't find it in any queue!",
+            combatInProgress: false)));
         True(ErrorEvents.IsError(ErrorEvents.FromLogLine(
             "System.NullReferenceException: Tried to pop action "
-            + "EndPlayerTurnAction, but we didn't find it in any queue!")));
+            + "EndPlayerTurnAction, but we didn't find it in any queue!",
+            combatInProgress: false)));
     }
 
     public static void DecisionClosedChestAdvertisesTheOpeningPickRelic()

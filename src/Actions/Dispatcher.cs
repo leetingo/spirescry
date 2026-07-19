@@ -438,15 +438,17 @@ public static class Dispatcher
     }
 
     // The engine's Abandon() is UI-first and fire-and-forget: AbandonInternal
-    // closes screens (null headless — the engine swallows the NRE) and then
-    // kills the players ASYNCHRONOUSLY (per player: forced kill + a scaled
-    // wait). Calling it and wiping state right after raced that teardown —
-    // its parked continuations fired into the NEXT run's combat, ending it
-    // the moment it loaded (instant combat_ended, transition queue left
-    // paused, phase parked at unknown). Replicate the meaningful half here,
-    // synchronously: same forced-kill pipeline, no UI closes, bounded wait
-    // so the wipe below always runs against a quiescent engine.
-    private static void HeadlessAbandonTeardown(RunManager rm)
+    // closes screens (null headless — the engine catches the NRE but logs
+    // an error line) and then kills the players ASYNCHRONOUSLY (per
+    // player: forced kill + a scaled wait). Calling it and wiping state
+    // right after raced that teardown — its parked continuations fired
+    // into the NEXT run's combat, ending it the moment it loaded (instant
+    // combat_ended, transition queue left paused, phase parked at
+    // unknown). Replicate the meaningful half here, synchronously: same
+    // forced-kill pipeline, no UI closes, bounded wait so the wipe below
+    // always runs against a quiescent engine. Internal: the host boot's
+    // Trial double-down reroute runs the same screen-free abandon.
+    internal static void HeadlessAbandonTeardown(RunManager rm)
     {
         try
         {

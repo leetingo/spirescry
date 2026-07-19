@@ -681,20 +681,43 @@ internal static class HeadlessBoot
                 _harmony!.Patch(getLayout, prefix: Local(nameof(EventLayoutPrefix)));
         }
 
-        // Two Trial helpers are pure presentation and fault headless:
-        // AddVfxAnchoredToPortrait NREs on Cache.GetScene(path)
-        // .Instantiate (portrait garnish), and DoubleDown's only body is
-        // NModalContainer.Instance.Add(confirm popup) — a modal that
-        // cannot exist here (see the NModalContainer note above), so the
-        // double-down option becomes an inert click instead of a crash.
+        // Two Trial helpers fault headless. AddVfxAnchoredToPortrait is
+        // pure presentation (NREs on Cache.GetScene(path).Instantiate) —
+        // swallowed. DoubleDown is gameplay: its body opens the
+        // abandon-run confirm popup whose accepted action is
+        // RunManager.Abandon(); the popup cannot exist here (see the
+        // NModalContainer note above), so the prefix runs that accepted
+        // action directly — the agent's option click is the confirmation
+        // (obs already marks the option lethal).
         var trial = typeof(AbstractModelSubtypes).Assembly.GetType(
             "MegaCrit.Sts2.Core.Models.Events.Trial");
         if (trial is not null)
+        {
             PatchMethodsAndSwallow(
                 [trial],
                 BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.DeclaredOnly,
-                m => m.Name is "AddVfxAnchoredToPortrait" or "DoubleDown",
-                completeFaultedTasks: true);
+                m => m.Name == "AddVfxAnchoredToPortrait");
+            var doubleDown = trial.GetMethod(
+                "DoubleDown", BindingFlags.NonPublic | BindingFlags.Instance);
+            if (doubleDown is not null)
+                _harmony!.Patch(doubleDown, prefix: Local(nameof(TrialDoubleDownPrefix)));
+        }
+    }
+
+    private static bool TrialDoubleDownPrefix(ref Task __result)
+    {
+        // The popup's accepted action is RunManager.Abandon(), but engine
+        // AbandonInternal opens with screen closes that NRE headless and
+        // log an error line — use the dispatcher's screen-free teardown
+        // (same IsAbandoned + forced-kill pipeline, no UI).
+        try
+        {
+            if (RunManager.Instance is { } rm)
+                Spirescry.Actions.Dispatcher.HeadlessAbandonTeardown(rm);
+        }
+        catch (Exception ex) { HostLog.Error("trial double-down abandon", ex); }
+        __result = Task.CompletedTask;
+        return false;
     }
 
     private static object? _eventRoomDummy;
