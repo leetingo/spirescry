@@ -67,7 +67,10 @@ public static class ProtocolVocabulary
         Converters = { new JsonStringEnumConverter(JsonNamingPolicy.CamelCase) },
     };
 
-    public const int ProtocolVersion = 2;
+    // v3 adds the typed semanticState replay fingerprint projection. A v2
+    // CLI hashes the same settled observation differently, so this must be
+    // a protocol break rather than a late replay divergence.
+    public const int ProtocolVersion = 3;
 
     public static string CreateArtifactJson() =>
         JsonSerializer.Serialize(new ArtifactDocument(

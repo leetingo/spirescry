@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Public B1 contract for stamped host identity."""
 
+import os
 import subprocess
+import tempfile
 import unittest
 from unittest import mock
 
@@ -59,6 +61,39 @@ class BuildIdentityTests(unittest.TestCase):
             "94c7e57.a1b2c3d4e5f6",
             checkout_stamp="94c7e57.0123456789ab",
         )
+
+    def test_self_boot_uses_checkout_cli_instead_of_stale_path_binary(self):
+        with tempfile.TemporaryDirectory(prefix="spirescry-cli-selection-") as repo:
+            checkout_cli = os.path.join(repo, "cli", "target", "release", "spirescry")
+            os.makedirs(os.path.dirname(checkout_cli))
+            with open(checkout_cli, "w", encoding="utf-8") as handle:
+                handle.write("checkout cli")
+            os.chmod(checkout_cli, 0o755)
+
+            with mock.patch.dict(e2e.os.environ, {}, clear=True), \
+                    mock.patch.object(e2e, "REPO", repo), \
+                    mock.patch.object(e2e.bridge, "BIN", "spirescry"):
+                selected = e2e.configure_cli_for_boot()
+
+                self.assertEqual(selected, checkout_cli)
+                self.assertEqual(e2e.bridge.BIN, checkout_cli)
+                self.assertEqual(e2e.os.environ["SPIRESCRY_BIN"], checkout_cli)
+
+    def test_self_boot_preserves_explicit_cli_override(self):
+        with mock.patch.dict(
+                e2e.os.environ, {"SPIRESCRY_BIN": "/tmp/explicit-spirescry"},
+                clear=True), mock.patch.object(e2e.bridge, "BIN", "spirescry"):
+            selected = e2e.configure_cli_for_boot()
+
+            self.assertEqual(selected, "/tmp/explicit-spirescry")
+            self.assertEqual(e2e.bridge.BIN, "/tmp/explicit-spirescry")
+
+    def test_self_boot_fails_fast_when_checkout_cli_is_not_built(self):
+        with tempfile.TemporaryDirectory(prefix="spirescry-cli-missing-") as repo, \
+                mock.patch.dict(e2e.os.environ, {}, clear=True), \
+                mock.patch.object(e2e, "REPO", repo):
+            with self.assertRaisesRegex(SystemExit, r"run: ./build\.sh cli"):
+                e2e.configure_cli_for_boot()
 
 
 if __name__ == "__main__":

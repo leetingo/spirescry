@@ -283,8 +283,8 @@ picks), and text comes from tables extracted out of your local install's
                          # diffs the recorded snapshot key sets — same
                          # phase must expose the same keys in each
 python3 tests/e2e.py --boot   # the pre-merge suite against a self-booted
-                              # host (port 7779): every phase, verb, and
-                              # content atom; intentionally long-running
+                              # host with this checkout's release CLI
+                              # (build it with ./build.sh cli first)
 python3 tests/e2e.py --boot --quick  # iteration loop: skip exhaustive M*,
                                      # click the first option per event
 python3 tests/eventsweep.py --all-options  # event sweep alone (e2e E1)

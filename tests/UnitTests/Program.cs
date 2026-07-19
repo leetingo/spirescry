@@ -56,6 +56,14 @@ internal static class Tests
             artifact["cheatArgumentShapes"]!.AsArray().Count);
     }
 
+    public static void ProtocolVersionCoversSemanticReplayFingerprints()
+    {
+        // v3 is the first version whose replay fingerprint includes the
+        // typed semanticState projection. A v2 CLI must reject a v3 host
+        // before it can silently hash the same observation differently.
+        Equal(3, ProtocolVocabulary.ProtocolVersion);
+    }
+
     public static void ProtocolVocabularyMapsEveryPhaseAndUnknownValues()
     {
         var mapped = Enum.GetValues<Phase>()

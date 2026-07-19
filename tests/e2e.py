@@ -36,7 +36,8 @@ no Steam). Case groups:
   enumerated — parity, V1, and real runs are that layer.
 
   e2e.py --boot           boot a host on STS2_AGENT_PORT (default 7779),
-                          run all cases, tear the host down
+                          use this checkout's release CLI, run all cases,
+                          tear the host down
   e2e.py                  run against an already-listening bridge
                           (boot-log and audit-trail cases are skipped)
   e2e.py --quick          skip the M sweeps, E1 clicks first options only
@@ -155,6 +156,23 @@ def run_test_script(script, *args):
         [sys.executable, os.path.join(REPO, "tests", script), *args])
     assert completed.returncode == 0, \
         f"{script} exited {completed.returncode}"
+
+
+def configure_cli_for_boot():
+    """A self-booted checkout must drive its host with the same checkout's
+    CLI. Falling back to a deployed PATH binary can preserve the same numeric
+    protocol while carrying an older replay projection, producing a false
+    reconstruction divergence long after the compatibility gate."""
+    selected = os.environ.get("SPIRESCRY_BIN")
+    if not selected:
+        selected = os.path.join(
+            REPO, "cli", "target", "release", "spirescry")
+        if not os.path.isfile(selected) or not os.access(selected, os.X_OK):
+            sys.exit(
+                f"checkout CLI not built ({selected}) — run: ./build.sh cli")
+    bridge.BIN = selected
+    os.environ["SPIRESCRY_BIN"] = selected
+    return selected
 
 
 def to_map(seed=None, character="IRONCLAD"):
@@ -1823,6 +1841,9 @@ def main():
             print(name + ("  (--boot only)" if boot_only else "")
                   + ("  (skipped by --quick)" if deep else ""))
         return 0
+
+    if ARGS.boot:
+        configure_cli_for_boot()
 
     proc = None
     if ARGS.boot:
