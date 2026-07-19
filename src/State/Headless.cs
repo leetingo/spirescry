@@ -1,8 +1,10 @@
 using MegaCrit.Sts2.Core.Commands;
+using MegaCrit.Sts2.Core.Context;
 using MegaCrit.Sts2.Core.Entities.CardRewardAlternatives;
 using MegaCrit.Sts2.Core.Entities.Cards;
 using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Rewards;
+using MegaCrit.Sts2.Core.Rooms;
 using MegaCrit.Sts2.Core.Runs;
 using MegaCrit.Sts2.Core.TestSupport;
 using CrystalMinigame = MegaCrit.Sts2.Core.Events.Custom.CrystalSphereEvent.CrystalSphereMinigame;
@@ -248,32 +250,30 @@ public static class HeadlessRewards
         _activeCardPick = null;
     }
 
-    // Build the RewardsSet for the current (just-finished) combat room and
-    // populate every reward. Idempotent while active.
-    public static bool CaptureFromCurrentRoom()
+    // Build the RewardsSet when the engine parks a just-finished combat
+    // choice. Idempotent while active; observation never calls this.
+    public static string? CaptureFromRoom(CombatRoom room)
     {
-        if (IsActive) return true;
-        if (LocalRunContext.Current is not { } run) return false;
-        var room = run.State.CurrentRoom;
-        var player = run.Player;
-        if (room is null) return false;
-        if (ReferenceEquals(_completedFor, room)) return false;
+        if (IsActive || ReferenceEquals(_completedFor, room)) return null;
+        if (LocalRunContext.Current is not { } run
+            || !ReferenceEquals(run.State.CurrentRoom, room))
+            return "combat rewards parked before the local run context was ready";
 
         try
         {
             var set = new RewardsSet(
-                player, run.Manager.RewardsSetSynchronizer).WithRewardsFromRoom(room);
+                run.Player, run.Manager.RewardsSetSynchronizer).WithRewardsFromRoom(room);
             // Async but pure logic — drains inline under the host's
             // patches, so GetResult returns synchronously.
             set.GenerateWithoutOffering().GetAwaiter().GetResult();
             _pending = Flatten(set.Rewards).Select(r => (Reward?)r).ToList();
-            return true;
+            return null;
         }
         catch (Exception ex)
         {
             SafeLog.Error("headless rewards capture", ex);
             _pending = null;
-            return false;
+            return $"combat rewards capture failed: {ex.GetType().Name}: {ex.Message}";
         }
     }
 

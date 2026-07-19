@@ -1,4 +1,5 @@
 using MegaCrit.Sts2.Core.Commands;
+using MegaCrit.Sts2.Core.Combat;
 using MegaCrit.Sts2.Core.Entities.Merchant;
 using MegaCrit.Sts2.Core.Entities.RestSite;
 using MegaCrit.Sts2.Core.Entities.TreasureRelicPicking;
@@ -18,6 +19,7 @@ using MegaCrit.Sts2.Core.Rewards;
 using MegaCrit.Sts2.Core.Rooms;
 using MegaCrit.Sts2.Core.Runs;
 using CrystalMinigame = MegaCrit.Sts2.Core.Events.Custom.CrystalSphereEvent.CrystalSphereMinigame;
+using CrystalScreen = MegaCrit.Sts2.Core.Nodes.Events.Custom.CrystalSphere.NCrystalSphereScreen;
 
 namespace Spirescry.State;
 
@@ -26,6 +28,8 @@ namespace Spirescry.State;
 // adding more boot checks at their call sites.
 internal interface IDecisionSurface
 {
+    Phase? ActivePhase { get; }
+    bool RequiresSettlementFrameStability { get; }
     bool BundleActive { get; }
     BundleDecision? Bundle { get; }
     CrystalMinigame? Crystal { get; }
@@ -62,6 +66,7 @@ internal interface IDecisionSurface
     DecisionSurfaceResult SkipRelicReward();
     DecisionSurfaceResult PickTreasureRelic(int idx);
     DecisionSurfaceResult SkipTreasure();
+    DecisionSurfaceResult ParkCombatRewards(CombatRoom room);
     void ResetRunChoices();
 
     // The headless Harmony hook asks the selected adapter whether it owns
@@ -208,6 +213,37 @@ internal sealed class GuiDecisionSurface : IDecisionSurface
 {
     private static NChooseABundleSelectionScreen? BundleScreen =>
         Screens.Top<NChooseABundleSelectionScreen>();
+
+    public Phase? ActivePhase
+    {
+        get
+        {
+            if (BundleActive) return Phase.BundleSelect;
+            // Preserve the historical precedence: a travel-ready map wins
+            // over an overlay that is still mounted during its teardown.
+            if (NMapScreen.Instance is
+                { IsOpen: true, IsTravelEnabled: true, IsTraveling: false }
+                && LocalRunContext.Current is not null)
+                return Phase.Map;
+            if (NOverlayStack.Instance?.Peek() is { } top)
+                return top switch
+                {
+                    NRewardsScreen => Phase.Rewards,
+                    NCardRewardSelectionScreen => Phase.CardReward,
+                    NChooseARelicSelection => Phase.RelicReward,
+                    NCardGridSelectionScreen or NChooseACardSelectionScreen =>
+                        Phase.CardSelect,
+                    CrystalScreen => Phase.CrystalSphere,
+                    _ => Phase.Overlay,
+                };
+            if (CombatManager.Instance is not { IsInProgress: true }) return null;
+            return NPlayerHand.Instance is { IsInCardSelection: true }
+                ? Phase.HandSelect
+                : Phase.Combat;
+        }
+    }
+
+    public bool RequiresSettlementFrameStability => true;
 
     public bool BundleActive => BundleScreen is not null;
 
@@ -682,6 +718,9 @@ internal sealed class GuiDecisionSurface : IDecisionSurface
 
     public void ResetRunChoices() { }
 
+    public DecisionSurfaceResult ParkCombatRewards(CombatRoom room) =>
+        DecisionSurfaceResult.Success();
+
     public bool TryOwnBundleCompletion(
         IReadOnlyList<IReadOnlyList<CardModel>> bundles,
         out Task<IEnumerable<CardModel>> completion)
@@ -706,6 +745,26 @@ internal sealed class GuiDecisionSurface : IDecisionSurface
 internal sealed class HeadlessDecisionSurface : IDecisionSurface
 {
     private TreasureRoom? _normalRewardsGrantedFor;
+
+    public Phase? ActivePhase
+    {
+        get
+        {
+            if (BundleActive) return Phase.BundleSelect;
+            if (HeadlessRewards.InCardPick) return Phase.CardReward;
+            if (HeadlessRewards.IsActive) return Phase.Rewards;
+            if (HeadlessCrystal.IsActive) return Phase.CrystalSphere;
+            if (HeadlessPicker.IsActive)
+                return CombatManager.Instance is { IsInProgress: true }
+                    ? Phase.HandSelect
+                    : Phase.CardSelect;
+            return CombatManager.Instance is { IsInProgress: true }
+                ? Phase.Combat
+                : null;
+        }
+    }
+
+    public bool RequiresSettlementFrameStability => false;
 
     public bool BundleActive => HeadlessBundle.IsActive;
 
@@ -999,6 +1058,11 @@ internal sealed class HeadlessDecisionSurface : IDecisionSurface
         _normalRewardsGrantedFor = null;
         HeadlessState.ResetAll();
     }
+
+    public DecisionSurfaceResult ParkCombatRewards(CombatRoom room) =>
+        HeadlessRewards.CaptureFromRoom(room) is { } message
+            ? DecisionSurfaceResult.Reject(DecisionSurfaceError.BadState, message)
+            : DecisionSurfaceResult.Success();
 
     private static DecisionSurfaceResult ConfirmPicker() =>
         HeadlessPicker.Confirm() is { } message

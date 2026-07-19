@@ -214,6 +214,7 @@ internal static class HeadlessBoot
         // that hangs on the first combat action is worse than not starting.
         PatchCmdWait();
         VerifyQueueWaitIlPatch();
+        PatchCombatRewardParking();
         PatchTreasureChestGate();
         PatchAct4TreasureRooms();
 
@@ -317,6 +318,27 @@ internal static class HeadlessBoot
 
     private static bool BeginRelicPickingPrefix() =>
         HeadlessTreasure.CanBeginRelicPicking;
+
+    // MarkPreFinished is the engine's transition from combat resolution to
+    // the parked post-combat choice. Capture exactly there; observation is
+    // now a pure read and cannot manufacture rewards.
+    private static void PatchCombatRewardParking()
+    {
+        var method = typeof(CombatRoom).GetMethod(
+            nameof(CombatRoom.MarkPreFinished),
+            BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)
+            ?? throw new InvalidOperationException("CombatRoom.MarkPreFinished not found");
+        _harmony!.Patch(method, postfix: Local(nameof(CombatRewardParkedPostfix)));
+        HostLog.Info("parked post-combat rewards on the decision surface");
+    }
+
+    private static void CombatRewardParkedPostfix(CombatRoom __instance)
+    {
+        var parked = DecisionSurface.Current.ParkCombatRewards(__instance);
+        if (!parked.Ok)
+            throw new InvalidOperationException(
+                parked.Message ?? "decision surface failed to park combat rewards");
+    }
 
     // Custom reward offers (event trades like THE_FUTURE_OF_POTIONS) run
     // RewardsCmd.OfferCustom → RewardsSet.Offer, which shows the GUI

@@ -245,7 +245,7 @@ public static class Handlers
             var outcome = FollowProbe.CandidateOutcome(probe, phaseBefore, acceptedRev);
             if (outcome is not null)
             {
-                if (probe.Headless)
+                if (!probe.RequiresFrameStability)
                     return FollowResponse(
                         action, startedRev, acceptedRev, outcome, probe, logEntryId);
 
@@ -278,7 +278,7 @@ public static class Handlers
             if (remaining == 0)
                 return FollowResponse(
                     action, startedRev, acceptedRev, "timeout", probe, logEntryId);
-            if (!probe.Headless && outcome is not null)
+            if (probe.RequiresFrameStability && outcome is not null)
                 await Signals.WaitForTick(probe.Tick, remaining);
             else
                 await Signals.WaitForChange(since, remaining);
@@ -323,7 +323,7 @@ public static class Handlers
         long Tick,
         string RunId,
         string Phase,
-        bool Headless,
+        bool RequiresFrameStability,
         bool Busy,
         bool HasDecision,
         string StateKey,
@@ -349,7 +349,8 @@ public static class Handlers
             var hasDecision = legal.Any(verb => verb is not ("abandon" or "potion-discard"));
             return new FollowProbe(
                 rev, Signals.TickCount, runId,
-                node["phase"]?.GetValue<string>() ?? "unknown", RunMode.IsHeadless,
+                node["phase"]?.GetValue<string>() ?? "unknown",
+                DecisionSurface.Current.RequiresSettlementFrameStability,
                 busy, hasDecision, stateKey, node);
         }
 
