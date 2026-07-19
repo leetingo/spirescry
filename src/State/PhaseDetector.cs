@@ -56,6 +56,11 @@ public static class PhaseDetector
         if (menuVisible)
             return Phase.MainMenu;
 
+        // Pilot decision surface: the GUI adapter reads the real overlay;
+        // the headless adapter reads its parked completion owner.
+        if (DecisionSurface.Current.BundleActive)
+            return Phase.BundleSelect;
+
         // Headless stand-ins for the screens that don't exist without a
         // scene tree: the virtual rewards flow and the deferred card
         // picker (rest upgrade / removal / event picks / mid-combat hand
@@ -65,7 +70,6 @@ public static class PhaseDetector
         {
             if (HeadlessRewards.InCardPick) return Phase.CardReward;
             if (HeadlessRewards.IsActive) return Phase.Rewards;
-            if (HeadlessBundle.IsActive) return Phase.BundleSelect;
             if (HeadlessCrystal.IsActive) return Phase.CrystalSphere;
             if (HeadlessPicker.IsActive)
                 return CombatManager.Instance is { IsInProgress: true }
@@ -95,7 +99,6 @@ public static class PhaseDetector
                 // choose-a-card screen (Discovery, event card offers) is a
                 // separate type with the same pick-one semantics.
                 NCardGridSelectionScreen or NChooseACardSelectionScreen => Phase.CardSelect,
-                NChooseABundleSelectionScreen => Phase.BundleSelect,
                 CrystalScreen => Phase.CrystalSphere,
                 _ => Phase.Overlay,
             };

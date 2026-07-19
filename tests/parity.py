@@ -34,6 +34,11 @@ def record(d):
     for k, v in d.items():
         if isinstance(v, list) and v and isinstance(v[0], dict):
             slot.setdefault(k + "[]", sorted(v[0].keys()))
+            for child_k, child_v in v[0].items():
+                if (isinstance(child_v, list) and child_v
+                        and isinstance(child_v[0], dict)):
+                    slot.setdefault(
+                        f"{k}[].{child_k}[]", sorted(child_v[0].keys()))
 
 
 run = bridge.run
@@ -66,8 +71,41 @@ def step(msg):
     print(f"== {msg}")
 
 
+def exercise_bundle_pilot():
+    """Record the Neow bundle decision in both boots before the act loop."""
+    step("decision surface: Neow bundle pilot")
+    run("abandon", allow_fail=True)
+    time.sleep(5)
+    bridge.launch_run(
+        seed="BX16", timeout=40, on_obs=record,
+        on_retry=lambda: print("    bundle pilot launch didn't land, retrying"))
+    offer = obs()
+    pack = next((option for option in offer.get("options", [])
+                 if "pack" in (option.get("description") or "").lower()), None)
+    assert pack, ("seed BX16 no longer offers Scroll Boxes — re-pin: "
+                  f"{[option.get('title') for option in offer.get('options', [])]}")
+
+    run("option", str(pack["idx"]))
+    wait_phase("bundle_select")
+    bundle = obs()
+    assert bundle.get("bundles") and bundle["bundles"][0].get("cards"), bundle
+    run("pick-card", "0")
+
+    # GUI previews the selected bundle and completes on confirm; the
+    # headless stand-in owns completion directly and leaves this phase on
+    # pick. Both paths are the same decision-surface protocol.
+    time.sleep(1)
+    if phase() == "bundle_select":
+        run("confirm")
+    wait_phase("event", "map")
+    run("abandon")
+    wait_phase("main_menu")
+
+
 
 def drive(seed=None):
+    exercise_bundle_pilot()
+
     step("new-run")
     run("abandon", allow_fail=True)
     # The bridge comes up during mod init, before a cold engine boot's
@@ -268,6 +306,16 @@ def compare(a_path, b_path):
     a = json.load(open(a_path))
     b = json.load(open(b_path))
     drift = []
+    pilot_slots = {"top", "bundles[]", "bundles[].cards[]"}
+    for path, recording in ((a_path, a), (b_path, b)):
+        pilot = recording.get("bundle_select")
+        if pilot is None:
+            drift.append(f"{path}: missing required bundle_select pilot phase")
+            continue
+        missing = pilot_slots - set(pilot)
+        if missing:
+            drift.append(
+                f"{path}: bundle_select missing shape slots {sorted(missing)}")
     for ph in sorted(set(a) & set(b)):
         for slot in sorted(set(a[ph]) & set(b[ph])):
             if a[ph][slot] != b[ph][slot]:

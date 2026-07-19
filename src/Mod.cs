@@ -3,6 +3,7 @@ using Godot;
 using MegaCrit.Sts2.Core.Logging;
 using MegaCrit.Sts2.Core.Modding;
 using Spirescry.Bridge;
+using Spirescry.State;
 using Spirescry.Threading;
 
 namespace Spirescry;
@@ -90,6 +91,7 @@ internal static class Boot
     {
         if (_started) return;
         _started = true;
+        DecisionSurface.UseGui();
 
         // SceneTree.process_frame fires every frame regardless of pause
         // state and is safe to subscribe at mod-init time.

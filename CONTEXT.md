@@ -20,3 +20,10 @@ _Avoid_: Remote takeover, host control
 The human player or agent with exclusive authority to act for the local seat.
 The human may reclaim ownership at any time, including during agent takeover.
 _Avoid_: Concurrent controller, shared control
+
+**Decision surface**:
+The boot-selected adapter through which Spirescry enumerates the local seat's
+current options, acts on one, and reaches that choice's completion. The GUI
+adapter uses the real screens; the headless adapter uses the existing
+stand-ins and parking hooks.
+_Avoid_: Per-call boot fork, headless screen emulation

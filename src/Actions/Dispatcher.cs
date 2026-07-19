@@ -362,7 +362,7 @@ public static class Dispatcher
             return DispatchResult.Reject(RejectionCodes.Internal, "relic obtain did not start");
         if (RunMode.IsHeadless
             && !HeadlessPicker.IsActive
-            && !HeadlessBundle.IsActive
+            && !DecisionSurface.Current.BundleActive
             && !HeadlessRewards.IsActive)
             obtain.GetAwaiter().GetResult();
         else
@@ -1330,21 +1330,20 @@ public static class Dispatcher
 
     // Bundle offers: pick-card selects the pack. GUI needs a follow-up
     // confirm (the screen previews the pack); host resolves on the pick.
-    private static DispatchResult PickBundle(int idx)
-    {
-        if (RunMode.IsHeadless)
-            return HeadlessBundle.Pick(idx) is { } msg
-                ? DispatchResult.Reject(RejectionCodes.BadIndex, msg)
-                : DispatchResult.Success();
+    private static DispatchResult PickBundle(int idx) =>
+        FromDecisionSurface(DecisionSurface.Current.PickBundle(idx));
 
-        if (Screens.Top<NChooseABundleSelectionScreen>() is not { } screen)
-            return DispatchResult.Reject(RejectionCodes.NotReady, "bundle screen not mounted");
-        var nodes = Screens.BundleNodes(screen);
-        if (nodes is null || nodes.Count == 0)
-            return DispatchResult.Reject(RejectionCodes.NotReady, "bundle row not wired yet — retry");
-        if (BadIdx(idx, nodes.Count, "bundle") is { } err) return err;
-        Reflect.Invoke(screen, "OnBundleClicked", nodes[idx]);
-        return DispatchResult.Success();
+    private static DispatchResult FromDecisionSurface(DecisionSurfaceResult result)
+    {
+        if (result.Ok) return DispatchResult.Success();
+        var error = result.Error switch
+        {
+            DecisionSurfaceError.BadIndex => RejectionCodes.BadIndex,
+            DecisionSurfaceError.BadState => RejectionCodes.BadState,
+            DecisionSurfaceError.NotReady => RejectionCodes.NotReady,
+            _ => RejectionCodes.Internal,
+        };
+        return DispatchResult.Reject(error, result.Message ?? "decision surface rejected action");
     }
 
     private static DispatchResult PickRewardCard(int idx)
@@ -1420,13 +1419,7 @@ public static class Dispatcher
         switch (PhaseDetector.Current())
         {
             case Phase.BundleSelect:
-                if (RunMode.IsHeadless)
-                    return DispatchResult.Reject(RejectionCodes.BadState,
-                        "host bundle picks resolve on pick-card");
-                if (Screens.Top<NChooseABundleSelectionScreen>() is not { } bundleScreen)
-                    return DispatchResult.Reject(RejectionCodes.NotReady, "bundle screen not mounted");
-                Reflect.Invoke(bundleScreen, "ConfirmSelection", new object?[] { null });
-                return DispatchResult.Success();
+                return FromDecisionSurface(DecisionSurface.Current.ConfirmBundle());
 
             case Phase.CardSelect or Phase.HandSelect when RunMode.IsHeadless:
                 return HeadlessPicker.Confirm() is { } msg
@@ -1540,15 +1533,8 @@ public static class Dispatcher
                 HeadlessPicker.CancelIfActive();
                 return DispatchResult.Success();
 
-            case Phase.BundleSelect when RunMode.IsHeadless:
-                HeadlessBundle.CancelIfActive();
-                return DispatchResult.Success();
-
             case Phase.BundleSelect:
-                if (Screens.Top<NChooseABundleSelectionScreen>() is not { } bundleScr)
-                    return DispatchResult.Reject(RejectionCodes.NotReady, "bundle screen not mounted");
-                Reflect.Invoke(bundleScr, "CancelSelection", new object?[] { null });
-                return DispatchResult.Success();
+                return FromDecisionSurface(DecisionSurface.Current.SkipBundle());
 
             case Phase.CardReward:
                 if (Screens.Top<NCardRewardSelectionScreen>() is not { } cardScreen)

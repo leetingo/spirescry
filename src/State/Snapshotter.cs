@@ -86,23 +86,15 @@ public static class Snapshotter
     // Bundle offers: pick one pack of cards (Neow's Scroll Boxes, …).
     private static object BundleSelectSnapshot(string phase)
     {
-        var gui = RunMode.IsHeadless ? null : Screens.Top<NChooseABundleSelectionScreen>();
-        var bundles = RunMode.IsHeadless
-            ? HeadlessBundle.Bundles
-            : gui is { } screen
-                ? Screens.Bundles(screen)
-                : null;
+        var decision = DecisionSurface.Current.Bundle;
+        var bundles = decision?.Bundles;
         if (bundles is null || bundles.Count == 0) return new { phase, available = false };
         return new
         {
             phase,
             player = FooterView(),
-            confirmable = gui is not null
-                && Reflect.Field<NClickableControl>(gui, "_confirmButton") is { IsEnabled: true },
-            cancelable = RunMode.IsHeadless
-                ? HeadlessBundle.IsActive
-                : gui is not null
-                    && Reflect.Field<NClickableControl>(gui, "_skipButton") is { IsEnabled: true },
+            confirmable = decision!.Confirmable,
+            cancelable = decision.Cancelable,
             bundles = bundles.Select((b, i) => new
             {
                 idx = i,

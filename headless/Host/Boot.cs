@@ -45,6 +45,7 @@ internal static class HeadlessBoot
         // NGame-null mode probe to "GUI" — the explicit flag is the mode
         // authority in host boots.
         RunMode.ForcedHeadless = true;
+        DecisionSurface.UseHeadless();
 
         // STS2_HOST_DEBUG=1: print first-chance exception stacks — the
         // engine's own logger swallows them down to one message line.
@@ -519,8 +520,8 @@ internal static class HeadlessBoot
     }
 
     // CardSelectCmd.FromChooseABundleScreen is UI-only (shows the bundle
-    // screen, awaits its click) — reroute it onto the HeadlessBundle
-    // stand-in so Neow's card packs work without a scene tree.
+    // screen, awaits its click) — ask the boot-selected decision surface
+    // to take completion ownership in headless mode.
     private static void RerouteBundleScreen()
     {
         Reroute(
@@ -535,8 +536,7 @@ internal static class HeadlessBoot
         IReadOnlyList<IReadOnlyList<MegaCrit.Sts2.Core.Models.CardModel>> bundles,
         ref Task<IEnumerable<MegaCrit.Sts2.Core.Models.CardModel>> __result)
     {
-        __result = Spirescry.State.HeadlessBundle.Park(bundles);
-        return false;
+        return !DecisionSurface.Current.TryOwnBundleCompletion(bundles, out __result);
     }
 
     // The crystal-sphere minigame is model-driven; ShowScreen is its only
