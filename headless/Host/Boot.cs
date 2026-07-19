@@ -215,7 +215,6 @@ internal static class HeadlessBoot
         VerifyQueueWaitIlPatch();
         PatchTreasureChestGate();
         PatchAct4TreasureRooms();
-        TrackEventOptionTasks();
 
         // Cosmetic — a missing one loses a label or a particle, not liveness.
         try
@@ -317,32 +316,6 @@ internal static class HeadlessBoot
 
     private static bool BeginRelicPickingPrefix() =>
         HeadlessTreasure.CanBeginRelicPicking;
-
-    // EventSynchronizer starts each option's Chosen() task through
-    // RunSafely and discards it, so nothing the follow probe counts as
-    // Busy covers a still-running option effect: a continuation (an
-    // engine Task.Delay between removing cards and granting the reward,
-    // say) could fault AFTER follow reported settled with errors: [].
-    // Track every Chosen task — the exact analogue of the Fire() the
-    // dispatcher already uses for rest-site options, done here because
-    // ChooseLocalOption returns void. A task parked on a deferred picker
-    // keeps Busy true, which is fine: those follows resolve through the
-    // next_decision path, not the quiet path. Load-bearing for the
-    // errors contract.
-    private static void TrackEventOptionTasks()
-    {
-        var chosen = typeof(MegaCrit.Sts2.Core.Events.EventOption).GetMethod(
-            "Chosen", BindingFlags.Public | BindingFlags.Instance)
-            ?? throw new InvalidOperationException(
-                "EventOption.Chosen not found — option faults would escape follow");
-        _harmony!.Patch(chosen, postfix: Local(nameof(EventOptionChosenPostfix)));
-        HostLog.Info("tracking event option tasks through settlement");
-    }
-
-    private static void EventOptionChosenPostfix(Task __result)
-    {
-        if (__result is not null) Signals.TrackAsync(__result, "event-option");
-    }
 
     // Custom reward offers (event trades like THE_FUTURE_OF_POTIONS) run
     // RewardsCmd.OfferCustom → RewardsSet.Offer, which shows the GUI

@@ -19,6 +19,7 @@ public static class Handlers
             var rm = MegaCrit.Sts2.Core.Runs.RunManager.Instance;
             var exec = rm?.ActionExecutor;
             var running = exec?.CurrentlyRunningAction;
+            var pending = Signals.PendingSnapshot();
             var queues = new List<object>();
             foreach (var (owner, depth, paused) in EngineQueues.All(rm))
                 queues.Add(new { owner, depth, paused });
@@ -34,8 +35,8 @@ public static class Handlers
                 // The two counters behind the follow probe's busy flag —
                 // a follow that times out with an idle executor is almost
                 // always one of these stuck above zero.
-                pendingAsync = Signals.PendingAsyncCount,
-                pendingEventOptions = Signals.PendingEventOptionCount,
+                pendingAsync = pending.Other + pending.EventOptions,
+                pendingEventOptions = pending.EventOptions,
                 queues,
             };
         });
@@ -352,32 +353,32 @@ public static class Handlers
 
             var rm = MegaCrit.Sts2.Core.Runs.RunManager.Instance;
             // An event option's task legitimately outlives a follow window
-            // when it awaits an embedded combat or a deferred picker — the
+            // when it awaits an embedded combat or a parked picker — the
             // agent must act for it to ever complete, so those states must
             // not read as busy (combat plays would time out; picker parks
             // would never report next_decision). A pending option task
             // outside both states is an engine continuation still
             // executing (a delay between removing cards and granting the
             // reward, say): THAT blocks settlement, so the response can't
-            // report a half-applied board with errors: [].
-            var standInParked = HeadlessPicker.IsActive
-                || HeadlessBundle.IsActive
-                || HeadlessCrystal.IsActive
-                || HeadlessRewards.IsActive
-                || HeadlessRewards.InCardPick;
+            // report a half-applied board with errors: []. Parked means a
+            // headless stand-in holds the choice (HeadlessState owns that
+            // list) or, in a GUI boot, a nested decision screen does.
+            var phaseString = node["phase"]?.GetValue<string>() ?? "unknown";
+            var parkedDecision = RunMode.IsHeadless
+                ? HeadlessState.HasParkedDecision
+                : IsNestedDecision(phaseString) || phaseString == "crystal_sphere";
             var combatLive = MegaCrit.Sts2.Core.Combat.CombatManager.Instance
                 is { IsInProgress: true };
-            var pendingOther = Signals.PendingAsyncCount - Signals.PendingEventOptionCount;
-            var eventOptionExecuting = Signals.PendingEventOptionCount > 0
-                && !combatLive && !standInParked;
-            var busy = pendingOther > 0
+            var pending = Signals.PendingSnapshot();
+            var eventOptionExecuting = pending.EventOptions > 0
+                && !combatLive && !parkedDecision;
+            var busy = pending.Other > 0
                 || eventOptionExecuting
                 || rm?.ActionExecutor?.CurrentlyRunningAction is not null
                 || EngineQueues.All(rm).Any(queue => queue.depth > 0);
             var hasDecision = legal.Any(verb => verb is not ("abandon" or "potion-discard"));
             return new FollowProbe(
-                rev, Signals.TickCount, runId,
-                node["phase"]?.GetValue<string>() ?? "unknown", RunMode.IsHeadless,
+                rev, Signals.TickCount, runId, phaseString, RunMode.IsHeadless,
                 busy, eventOptionExecuting, hasDecision, stateKey, node);
         }
 

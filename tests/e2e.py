@@ -568,6 +568,34 @@ def p13():
     to_menu()
 
 
+@case("P14 delayed event-option faults land in their own follow window")
+def p14():
+    # The event-option task kind gets the three-state busy treatment:
+    # outside combat and with nothing parked, a pending option task must
+    # hold the follow open. This drives a RunSafely-wrapped delayed
+    # throw through that exact kind — the shape of an option effect
+    # faulting after the phase already flipped back.
+    launch(seed="CIEVOPT")
+    faulted = run("cheat", "event-fault-delayed", "--follow", "5000",
+                  allow_errors=True)
+    assert faulted["settled"] is True, faulted
+    assert any(
+        error.startswith("async_fault:event-option:")
+        and "delayed event-option failure" in error
+        for error in faulted["errors"]
+    ), faulted["errors"]
+
+    log = run("runlog")
+    entry = next(
+        v for v in reversed(log["verbs"])
+        if v["action"] == "cheat"
+        and v.get("args", {}).get("name") == "event-fault-delayed"
+    )
+    assert any("delayed event-option failure" in e
+               for e in entry.get("errors", [])), entry
+    to_menu()
+
+
 # ---------- R: run lifecycle ----------
 
 @case("R1 same seed, same world")

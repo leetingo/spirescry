@@ -74,6 +74,7 @@ public static class Dispatcher
         "goto", "gold", "heal", "hp", "wound-enemies", "event", "combat",
         "card", "card-upgraded", "relic", "potion", "stars", "energy",
         "async-fault", "engine-error", "engine-error-delayed",
+        "event-fault-delayed",
     };
 
     public static DispatchResult Dispatch(string action, JsonElement args) => action switch
@@ -122,6 +123,7 @@ public static class Dispatcher
             "async-fault" => CheatAsyncFault(),
             "engine-error" => CheatEngineError(),
             "engine-error-delayed" => CheatEngineErrorDelayed(),
+            "event-fault-delayed" => CheatEventFaultDelayed(),
             var n => DispatchResult.Reject(RejectionCodes.BadRequest,
                 $"unknown cheat '{n}' (supported: {string.Join(", ", Cheats)})"),
         };
@@ -159,6 +161,27 @@ public static class Dispatcher
         await Task.Delay(250).ConfigureAwait(false);
         MegaCrit.Sts2.Core.Logging.Log.Error(
             "SpirescryForcedException: forced delayed engine log error (cheat engine-error-delayed)");
+    }
+
+    // The event-option shape of the delayed fault: a RunSafely-wrapped
+    // task that throws after a beat, tracked with the EventOption kind —
+    // the regression for the three-state busy logic (not in combat, not
+    // parked → the follow must span the delay and carry the fault in its
+    // own response; engine-error-delayed only covers the flat
+    // fire-and-forget kind).
+    private static DispatchResult CheatEventFaultDelayed()
+    {
+        Signals.TrackAsync(
+            MegaCrit.Sts2.Core.Helpers.TaskHelper.RunSafely(DelayedEventOptionFault()),
+            "event-option", Signals.TrackedKind.EventOption);
+        return DispatchResult.Success();
+    }
+
+    private static async Task DelayedEventOptionFault()
+    {
+        await Task.Delay(250).ConfigureAwait(false);
+        throw new InvalidOperationException(
+            "forced delayed event-option failure (cheat event-fault-delayed)");
     }
 
     private static async Task ForcedAsyncFault()
@@ -950,7 +973,24 @@ public static class Dispatcher
         // Around pre-arms the deferred picker for that.
         HeadlessPicker.Around(() =>
             RunManager.Instance!.EventSynchronizer.ChooseLocalOption(idx));
+        TrackPendingEventOption(RunManager.Instance!.EventSynchronizer);
         return DispatchResult.Success();
+    }
+
+    // The synchronizer starts the option's Chosen() task through
+    // RunSafely and keeps it only in a private list (drained at room
+    // exit) — nothing the follow probe counts would otherwise cover a
+    // still-running option effect, so a continuation could fault after
+    // follow reported settled with errors: []. Track the task it just
+    // appended; reading the list leaves the engine's own room-exit
+    // await untouched. Shared dispatcher code, so GUI boots get the
+    // same settlement coverage as the pure host.
+    private static void TrackPendingEventOption(
+        MegaCrit.Sts2.Core.Multiplayer.Game.EventSynchronizer sync)
+    {
+        if (Reflect.FieldValue(sync, "_pendingOptionTasks") is List<Task> pending
+            && pending.Count > 0 && pending[^1] is { IsCompleted: false } task)
+            Signals.TrackAsync(task, "event-option", Signals.TrackedKind.EventOption);
     }
 
     private static DispatchResult RestOption(int idx)

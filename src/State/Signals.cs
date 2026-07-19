@@ -60,11 +60,6 @@ public static class Signals
 
     public static int PendingAsyncCount { get { lock (Gate) return PendingAsync.Count; } }
 
-    public static int PendingEventOptionCount
-    {
-        get { lock (Gate) return PendingEventOptions.Count; }
-    }
-
     // An abandoned run's option task can be parked on a combat or dialog
     // that no longer exists — it will never complete, and one zombie
     // would hold the follow probe's busy flag for every later run. Drop
@@ -80,12 +75,32 @@ public static class Signals
         }
     }
 
+    // How a tracked task participates in the follow probe's busy logic.
+    // Fire-and-forget dispatcher work blocks settlement until done; an
+    // event option's task legitimately outlives one follow window (it
+    // awaits embedded combats and parked pickers), so its kind gets the
+    // three-state treatment in the probe instead of a flat "busy".
+    public enum TrackedKind { FireAndForget, EventOption }
+
+    // One atomic read of both counters — the probe must not reconstruct
+    // internal state from two independently-locked reads.
+    public readonly record struct PendingWork(int Other, int EventOptions);
+
+    public static PendingWork PendingSnapshot()
+    {
+        lock (Gate)
+            return new PendingWork(
+                PendingAsync.Count - PendingEventOptions.Count,
+                PendingEventOptions.Count);
+    }
+
     // Dispatcher fire-and-forget tasks are part of action settlement too.
     // Tracking them closes the gap where GUI work had left the pump job but
     // had not yet enqueued an engine action or changed phase.
-    public static void TrackAsync(Task task, string label)
+    public static void TrackAsync(
+        Task task, string label, TrackedKind kind = TrackedKind.FireAndForget)
     {
-        var isEventOption = label == "event-option";
+        var isEventOption = kind == TrackedKind.EventOption;
         lock (Gate)
         {
             PendingAsync.Add(task);
