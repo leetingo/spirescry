@@ -559,12 +559,13 @@ internal static class Snapshotter
 
     private static string[] PileState(string name, CardPile? pile, bool sorted = false)
     {
-        var cards = (pile?.Cards ?? Enumerable.Empty<CardModel>())
-            .Where(card => card is not null)
-            .Select(card => CardStateToken(card));
-        if (sorted) cards = cards.OrderBy(card => card, StringComparer.Ordinal);
+        var cards = CollectionSnapshot.Once(
+            (pile?.Cards ?? Enumerable.Empty<CardModel>())
+                .Where(card => card is not null)
+                .Select(card => CardStateToken(card)));
+        if (sorted) Array.Sort(cards, StringComparer.Ordinal);
         return cards.Select((card, index) => SemanticToken("pile", name, index, card))
-            .Prepend(SemanticToken("pileCount", name, cards.Count()))
+            .Prepend(SemanticToken("pileCount", name, cards.Length))
             .ToArray();
     }
 

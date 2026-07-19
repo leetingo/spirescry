@@ -86,6 +86,18 @@ internal static class Tests
         Equal("timeout", SettlementOutcome.Timeout.WireName());
     }
 
+    public static void CollectionSnapshotMaterializesALiveSourceOnlyOnce()
+    {
+        var live = new OneShotEnumerable<int>([1, 2, 3]);
+
+        var snapshot = CollectionSnapshot.Once(live.Select(value => value * 10));
+
+        Equal(1, live.EnumerationCount);
+        Equal(3, snapshot.Length);
+        Equal(60, snapshot.Sum());
+        Equal(60, snapshot.Sum());
+    }
+
     public static void SettlementReturnsImmediateQuietBoundary()
     {
         var clock = new FakeSettlementClock();
@@ -1199,6 +1211,22 @@ internal class BaseProbe
     public string ReadMutable() => Mutable;
 
     private string Join(string first, string second) => $"{first}:{second}";
+}
+
+internal sealed class OneShotEnumerable<T>(IEnumerable<T> values) : IEnumerable<T>
+{
+    public int EnumerationCount { get; private set; }
+
+    public IEnumerator<T> GetEnumerator()
+    {
+        EnumerationCount++;
+        if (EnumerationCount > 1)
+            throw new InvalidOperationException("live source was enumerated twice");
+        return values.GetEnumerator();
+    }
+
+    System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() =>
+        GetEnumerator();
 }
 
 internal sealed class DerivedProbe : BaseProbe
