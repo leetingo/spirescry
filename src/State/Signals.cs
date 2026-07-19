@@ -60,6 +60,23 @@ public static class Signals
 
     public static int PendingAsyncCount { get { lock (Gate) return PendingAsync.Count; } }
 
+    // Option tasks can enter the synchronizer's list outside any
+    // dispatch: a shared choice appends one RunSafely(Chosen()) task per
+    // player, and a multiplayer client's vote lands later via a network
+    // message. Sweep the list on every event-phase tick — both boots run
+    // Tick, so GUI clients get the same coverage — and let the
+    // membership gate in TrackAsync make re-scans idempotent. Main
+    // thread only, like every other engine read here.
+    private static void SweepPendingEventOptions()
+    {
+        if (RunManager.Instance?.EventSynchronizer is not { } sync) return;
+        if (Reflect.FieldValue(sync, "_pendingOptionTasks")
+            is not List<Task> pending) return;
+        foreach (var task in pending)
+            if (task is { IsCompleted: false })
+                TrackAsync(task, "event-option", TrackedKind.EventOption);
+    }
+
     // An abandoned run's option task can be parked on a combat or dialog
     // that no longer exists — it will never complete, and one zombie
     // would hold the follow probe's busy flag for every later run. Drop
@@ -103,8 +120,11 @@ public static class Signals
         var isEventOption = kind == TrackedKind.EventOption;
         lock (Gate)
         {
+            // Event-option tracking is membership-gated: the per-tick
+            // synchronizer sweep re-offers the same tasks every frame,
+            // and each task must get exactly one completion continuation.
+            if (isEventOption && !PendingEventOptions.Add(task)) return;
             PendingAsync.Add(task);
-            if (isEventOption) PendingEventOptions.Add(task);
         }
         _ = task.ContinueWith(completed =>
         {
@@ -211,6 +231,7 @@ public static class Signals
         WatchExecutor();
         RefreshRunIdentity();
         var phase = PhaseDetector.Current().AsString();
+        if (phase == "event") SweepPendingEventOptions();
         if (phase != _lastPhase)
         {
             var from = _lastPhase;

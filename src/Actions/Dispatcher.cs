@@ -163,17 +163,23 @@ public static class Dispatcher
             "SpirescryForcedException: forced delayed engine log error (cheat engine-error-delayed)");
     }
 
-    // The event-option shape of the delayed fault: a RunSafely-wrapped
-    // task that throws after a beat, tracked with the EventOption kind —
-    // the regression for the three-state busy logic (not in combat, not
-    // parked → the follow must span the delay and carry the fault in its
-    // own response; engine-error-delayed only covers the flat
-    // fire-and-forget kind).
+    // The event-option shape of the delayed fault, delivered the way a
+    // multiplayer client's vote arrives: a RunSafely-wrapped task
+    // appended to the synchronizer's real pending list OUTSIDE any
+    // dispatcher tracking. Signals' per-tick sweep must discover it, the
+    // three-state busy logic must hold the follow open across the delay
+    // (not in combat, nothing parked), and the fault must land in the
+    // same response — the integration regression for the sweep path;
+    // engine-error-delayed covers the flat fire-and-forget kind.
     private static DispatchResult CheatEventFaultDelayed()
     {
-        Signals.TrackAsync(
-            MegaCrit.Sts2.Core.Helpers.TaskHelper.RunSafely(DelayedEventOptionFault()),
-            "event-option", Signals.TrackedKind.EventOption);
+        if (RequirePhase(Phase.Event) is { } err) return err;
+        if (RunManager.Instance?.EventSynchronizer is not { } sync
+            || Reflect.FieldValue(sync, "_pendingOptionTasks") is not List<Task> pending)
+            return DispatchResult.Reject(
+                RejectionCodes.Internal, "event synchronizer pending list not found");
+        pending.Add(
+            MegaCrit.Sts2.Core.Helpers.TaskHelper.RunSafely(DelayedEventOptionFault()));
         return DispatchResult.Success();
     }
 
@@ -971,26 +977,41 @@ public static class Dispatcher
         // Headless: an option that opens a deck picker (transform,
         // upgrade, …) awaits a card selection with no screen to serve it —
         // Around pre-arms the deferred picker for that.
-        HeadlessPicker.Around(() =>
-            RunManager.Instance!.EventSynchronizer.ChooseLocalOption(idx));
-        TrackPendingEventOption(RunManager.Instance!.EventSynchronizer);
+        var sync = RunManager.Instance!.EventSynchronizer;
+        var before = PendingOptionTaskCount(sync);
+        HeadlessPicker.Around(() => sync.ChooseLocalOption(idx));
+        TrackPendingEventOptions(sync, before);
         return DispatchResult.Success();
     }
 
-    // The synchronizer starts the option's Chosen() task through
-    // RunSafely and keeps it only in a private list (drained at room
-    // exit) — nothing the follow probe counts would otherwise cover a
-    // still-running option effect, so a continuation could fault after
-    // follow reported settled with errors: []. Track the task it just
-    // appended; reading the list leaves the engine's own room-exit
-    // await untouched. Shared dispatcher code, so GUI boots get the
+    // The synchronizer starts option Chosen() tasks through RunSafely and
+    // keeps them only in a private list (drained at room exit) — nothing
+    // the follow probe counts would otherwise cover a still-running
+    // option effect, so a continuation could fault after follow reported
+    // settled with errors: []. Track the whole suffix this dispatch
+    // appended: a shared-event choice completing on the local vote adds
+    // one task PER PLAYER, not one. Reading the list leaves the engine's
+    // own room-exit await untouched, and Signals' per-tick sweep covers
+    // tasks appended outside any dispatch (a client's vote delivered by
+    // a network message). Shared dispatcher code — GUI boots get the
     // same settlement coverage as the pure host.
-    private static void TrackPendingEventOption(
-        MegaCrit.Sts2.Core.Multiplayer.Game.EventSynchronizer sync)
+    private static int PendingOptionTaskCount(
+        MegaCrit.Sts2.Core.Multiplayer.Game.EventSynchronizer sync) =>
+        Reflect.FieldValue(sync, "_pendingOptionTasks") is List<Task> pending
+            ? pending.Count
+            : 0;
+
+    private static void TrackPendingEventOptions(
+        MegaCrit.Sts2.Core.Multiplayer.Game.EventSynchronizer sync, int before)
     {
-        if (Reflect.FieldValue(sync, "_pendingOptionTasks") is List<Task> pending
-            && pending.Count > 0 && pending[^1] is { IsCompleted: false } task)
-            Signals.TrackAsync(task, "event-option", Signals.TrackedKind.EventOption);
+        if (Reflect.FieldValue(sync, "_pendingOptionTasks") is not List<Task> pending)
+            return;
+        // A canonical-event change inside the dispatch clears the list;
+        // a shrunken count means the prefix is gone, so track everything.
+        var start = pending.Count < before ? 0 : before;
+        for (var i = start; i < pending.Count; i++)
+            if (pending[i] is { IsCompleted: false } task)
+                Signals.TrackAsync(task, "event-option", Signals.TrackedKind.EventOption);
     }
 
     private static DispatchResult RestOption(int idx)

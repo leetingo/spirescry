@@ -570,12 +570,14 @@ def p13():
 
 @case("P14 delayed event-option faults land in their own follow window")
 def p14():
-    # The event-option task kind gets the three-state busy treatment:
-    # outside combat and with nothing parked, a pending option task must
-    # hold the follow open. This drives a RunSafely-wrapped delayed
-    # throw through that exact kind — the shape of an option effect
-    # faulting after the phase already flipped back.
-    launch(seed="CIEVOPT")
+    # Integration regression for the synchronizer-boundary sweep: the
+    # cheat appends a RunSafely-wrapped delayed throw to the REAL
+    # _pendingOptionTasks list without telling the dispatcher — the way
+    # a multiplayer client's vote arrives via a network message. The
+    # per-tick sweep must discover the task, the three-state busy logic
+    # must hold the follow open across the delay (no combat, nothing
+    # parked), and the fault must land in this same response.
+    launch(seed="CIEVOPT")  # parked at the Neow event
     faulted = run("cheat", "event-fault-delayed", "--follow", "5000",
                   allow_errors=True)
     assert faulted["settled"] is True, faulted
