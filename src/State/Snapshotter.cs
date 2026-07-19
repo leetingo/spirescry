@@ -7,6 +7,7 @@ using MegaCrit.Sts2.Core.Events.Custom.CrystalSphereEvent.CrystalSphereItems;
 using MegaCrit.Sts2.Core.Events;
 using MegaCrit.Sts2.Core.HoverTips;
 using MegaCrit.Sts2.Core.Localization;
+using MegaCrit.Sts2.Core.Localization.DynamicVars;
 using MegaCrit.Sts2.Core.Models.Events;
 using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Models.Powers;
@@ -144,6 +145,18 @@ internal static class Snapshotter
 
     private static string RelicStateToken(RelicModel relic) =>
         SemanticToken("relic", relic.Id.Entry, RelicCounter(relic), relic.IsUsedUp);
+
+    private static string[] EventDynamicVarState(DynamicVarSet variables) =>
+        variables
+            .Select(pair => SemanticToken(
+                "eventVar",
+                pair.Key,
+                pair.Value.GetType().FullName,
+                pair.Value.BaseValue,
+                pair.Value.EnchantedValue,
+                pair.Value.PreviewValue))
+            .OrderBy(token => token, StringComparer.Ordinal)
+            .ToArray();
 
     private static string[] PowerState(Creature creature)
     {
@@ -1038,6 +1051,7 @@ internal static class Snapshotter
             SemanticState =
             [
                 SemanticToken("event", ev.GetType().FullName, ev.IsFinished),
+                .. EventDynamicVarState(ev.DynamicVars),
                 .. (ev is FakeMerchant semanticMerchant
                     ? FakeMerchantState(semanticMerchant)
                     : []),
@@ -1073,6 +1087,7 @@ internal static class Snapshotter
                             o.Title?.LocEntryKey,
                             o.Description?.LocTable,
                             o.Description?.LocEntryKey,
+                            o.TextKey,
                             o.IsProceed,
                             lethal,
                             o.Relic?.Id.Entry,

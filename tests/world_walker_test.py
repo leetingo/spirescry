@@ -352,13 +352,38 @@ class WorldWalkerTests(unittest.TestCase):
         self.assertEqual([], actions)
         self.assertEqual(0, sleeps)
 
-    def test_after_revision_long_polls_before_accepting_wanted_phase(self):
-        with mock.patch.object(
-                bridge, "obs", return_value={"phase": "event", "rev": 12}) as observe:
-            settled = bridge.walk_world("event", after_rev=11)
+    def test_initial_settled_observation_skips_revision_wait(self):
+        settled = {"phase": "map", "rev": 13}
+        with mock.patch.object(bridge, "obs") as observe:
+            actual = bridge.walk_world("map", initial=settled)
 
-        self.assertEqual("event", settled["phase"])
-        observe.assert_called_once_with(11)
+        self.assertEqual(settled, actual)
+        observe.assert_not_called()
+
+    def test_event_replay_feeds_followed_observation_into_walker(self):
+        decision = {
+            "phase": bridge.PHASE.EVENT,
+            "rev": 20,
+            "options": [{"idx": 0, "locked": False}],
+        }
+        settled = {"phase": bridge.PHASE.MAP, "rev": 22}
+        with mock.patch.object(eventsweep, "fresh_run"), \
+                mock.patch.object(eventsweep, "force", return_value=decision), \
+                mock.patch.object(
+                    eventsweep.bridge, "follow", return_value=settled) as follow, \
+                mock.patch.object(
+                    eventsweep.bridge, "walk_world", return_value=settled) as walk:
+            actual, error = eventsweep.replay_event_path("TEST_EVENT", (0,))
+
+        self.assertIsNone(error)
+        self.assertEqual(settled, actual)
+        follow.assert_called_once_with("option", "0", timeout_ms=4000)
+        walk.assert_called_once_with(
+            bridge.PHASE.EVENT,
+            bridge.PHASE.MAP,
+            **eventsweep.WORLD_CLAIMS,
+            initial=settled,
+        )
 
     def test_event_sweep_archives_walker_failures_as_stuck_results(self):
         with mock.patch.object(

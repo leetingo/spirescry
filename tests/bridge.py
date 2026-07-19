@@ -307,7 +307,7 @@ _TERMINAL_PHASES = {PHASE.MAIN_MENU, PHASE.GAME_OVER}
 
 def walk_world(*wanted_phases, claim_reward_tiles=False,
                claim_card_reward=False, claim_relic_reward=False,
-               after_rev=None, timeout=60, on_obs=None):
+               initial=None, timeout=60, on_obs=None):
     """Drive the world to a wanted phase, or drain one transient chain.
 
     With no wanted phase, stop at the first stable decision (combat, event,
@@ -317,28 +317,26 @@ def walk_world(*wanted_phases, claim_reward_tiles=False,
     """
     wanted = set(wanted_phases)
     deadline = time.monotonic() + timeout
-    settled_snapshot = None
+    # Callers that already crossed the action's settlement boundary hand
+    # that observation straight to the walker. Waiting from the pre-action
+    # revision here would let the earlier acceptance bump masquerade as the
+    # asynchronous effect completing.
+    settled_snapshot = initial
     settled_snapshot_observed = False
     for _ in range(120):
-        # A caller that just fired an action supplies its pre-action revision;
-        # long-poll once so an asynchronous GUI page cannot be mistaken for
-        # the wanted stable event merely because it has not advanced yet.
+        # An action caller supplies its followed observation directly. This
+        # API intentionally has no pre-action revision mode: any revision
+        # wait can be satisfied by acceptance before the action settles.
         if settled_snapshot is not None:
             snapshot = settled_snapshot
             settled_snapshot = None
             already_observed = settled_snapshot_observed
             settled_snapshot_observed = False
         else:
-            snapshot = (wait_after(
-                after_rev,
-                timeout=_remaining(deadline, "world to settle"),
-                description="world action to change revision",
-                on_obs=on_obs,
-            ) if after_rev is not None else obs())
+            snapshot = obs()
             already_observed = False
-        if after_rev is None and on_obs and not already_observed:
+        if on_obs and not already_observed:
             on_obs(snapshot)
-        after_rev = None
         phase = snapshot.get("phase")
         if phase in wanted or phase in _TERMINAL_PHASES:
             return snapshot

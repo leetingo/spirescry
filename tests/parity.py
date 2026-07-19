@@ -276,10 +276,9 @@ def drive(seed=None):
     wait_phase(bridge.PHASE.COMBAT, timeout=30)
     bridge.kill_current_combat(on_obs=record)
     d = wait_phase(bridge.PHASE.REWARDS)
-    before_proceed = d["rev"]
-    run("proceed")
+    settled = bridge.follow("proceed", timeout_ms=30000)
     d = bridge.walk_world(
-        bridge.PHASE.MAP, after_rev=before_proceed, on_obs=record)
+        bridge.PHASE.MAP, initial=settled, on_obs=record)
     assert d.get("act") == 1, "act transition did not reach act 1"
     print("    act 1 reached")
 

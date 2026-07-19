@@ -42,6 +42,15 @@ def walk_or_stuck(*wanted, **walk_options):
         return {"phase": f"stuck@{obs().get('phase')}:{str(error)[:120]}"}
 
 
+def follow_option(idx, *wanted):
+    """Choose one option and continue from its settled observation."""
+    try:
+        settled = bridge.follow("option", str(idx), timeout_ms=4000)
+    except AssertionError as error:
+        return None, str(error)[:120]
+    return walk_or_stuck(*wanted, initial=settled), None
+
+
 def force(ev):
     """Force one event from a settled map; return its snapshot or None."""
     # Do not let a combat/picker or a previously explored option leak hp,
@@ -77,12 +86,10 @@ def replay_event_path(ev, path):
         opts = d.get("options", [])
         if idx >= len(opts) or opts[idx].get("locked"):
             return None, f"path {path} option {idx} unavailable"
-        before_rev = d.get("rev")
-        result = run("option", str(idx), allow_fail=True)
-        if "_err" in result:
-            return None, f"path {path} option {idx} rejected: {result['_err'][:120]}"
-        d = walk_or_stuck(
-            bridge.PHASE.EVENT, bridge.PHASE.MAP, after_rev=before_rev)
+        d, error = follow_option(
+            idx, bridge.PHASE.EVENT, bridge.PHASE.MAP)
+        if error:
+            return None, f"path {path} option {idx} rejected: {error}"
     return d, None
 
 
@@ -125,14 +132,12 @@ def explore_all_event_options(ev):
             # Followed so the response carries `errors`: bridge.run fails
             # the sweep on any engine fault an option swallows — every
             # option click doubles as an engine_error noise regression.
-            before_rev = current.get("rev")
-            result = run("option", str(idx), "--follow", "4000", allow_fail=True)
-            if "_err" in result:
+            after, error = follow_option(
+                idx, bridge.PHASE.EVENT, bridge.PHASE.MAP)
+            if error:
                 return outcomes, clicked, locked, (
-                    f"path {path} option {idx} rejected: {result['_err'][:120]}")
+                    f"path {path} option {idx} rejected: {error}")
             clicked += 1
-            after = walk_or_stuck(
-                bridge.PHASE.EVENT, bridge.PHASE.MAP, after_rev=before_rev)
             if after.get("phase") == bridge.PHASE.EVENT:
                 if page_signature(after) not in seen_pages:
                     queue.append(path + (idx,))
@@ -203,15 +208,11 @@ def sweep(all_options=False):
             if idx >= len(opts_now) or opts_now[idx].get("locked"):
                 locked_skipped += 1
                 continue
-            before_rev = d.get("rev")
-            result = run(
-                "option", str(idx), "--follow", "4000", allow_fail=True)
-            if "_err" in result:
-                raise AssertionError(
-                    f"event {ev} option {idx}: {result['_err']}")
+            landed_snapshot, error = follow_option(idx, bridge.PHASE.MAP)
+            if error:
+                raise AssertionError(f"event {ev} option {idx}: {error}")
             options_clicked += 1
-            landed = walk_or_stuck(
-                bridge.PHASE.MAP, after_rev=before_rev)["phase"]
+            landed = landed_snapshot["phase"]
             outcomes.append(f"{idx}->{landed}")
         stuck = [o for o in outcomes if "stuck" in o or "FAIL" in o]
         results[ev] = render + (f" STUCK {stuck}" if stuck else " ok")

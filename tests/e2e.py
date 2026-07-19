@@ -571,6 +571,28 @@ def p13():
     to_menu()
 
 
+@case("P14 event economics are part of the semantic fingerprint")
+def p14():
+    to_map(seed="CIEVENTVARS")
+    before = obs()["rev"]
+    run("cheat", PHASE.EVENT, "BIG_FISH")
+    event = bridge.wait_until(
+        lambda snapshot: snapshot.get("phase") == PHASE.EVENT,
+        description="dynamic event to mount",
+        after_rev=before,
+    )
+    variables = [
+        token for token in event.get("semanticState", [])
+        if token.startswith("eventVar:")
+    ]
+    assert variables, event
+    decoded = [json.loads(token.split(":", 1)[1]) for token in variables]
+    assert all(len(variable) == 5 for variable in decoded), decoded
+    assert all(isinstance(variable[0], str)
+               and isinstance(variable[1], str) for variable in decoded), decoded
+    to_menu()
+
+
 # ---------- R: run lifecycle ----------
 
 @case("R1 same seed, same world")
