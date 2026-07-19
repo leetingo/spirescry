@@ -115,7 +115,7 @@ public static class Signals
     // same serialized job as dispatch, never against a prior frame's cache.
     public static string RefreshRunIdentity()
     {
-        var runState = RunManager.Instance?.DebugOnlyGetState();
+        var runState = LocalRunContext.Current?.State;
         string? changedTo = null;
         lock (Gate)
         {

@@ -23,7 +23,8 @@ public static class PhaseDetector
         // Terminal-run check first — but after a run ends and the player
         // returns to the main menu, the terminal flags linger on
         // RunManager, so a visible main menu wins over game_over.
-        var rm = RunManager.Instance;
+        var run = LocalRunContext.Current;
+        var rm = run?.Manager ?? RunManager.Instance;
         var menuVisible = NGame.Instance?.MainMenu is { Visible: true };
         if (rm is not null && (rm.IsGameOver || rm.IsAbandoned) && !menuVisible)
             return Phase.GameOver;
@@ -57,7 +58,7 @@ public static class PhaseDetector
         // The run-state check kills a boot-window flap where the map screen
         // briefly reads open+travel-enabled with no run behind it.
         if (NMapScreen.Instance is { IsOpen: true, IsTravelEnabled: true, IsTraveling: false }
-            && rm?.DebugOnlyGetState() is not null)
+            && run is not null)
             return Phase.Map;
 
         // An overlay captures input, so the room underneath is not
@@ -87,10 +88,8 @@ public static class PhaseDetector
                 ? Phase.HandSelect
                 : Phase.Combat;
 
-        if (rm == null) return Phase.MainMenu;
-
-        var state = rm.DebugOnlyGetState();
-        if (state == null) return Phase.MainMenu;
+        if (run is null) return Phase.MainMenu;
+        var state = run.Value.State;
 
         return state.CurrentRoom switch
         {

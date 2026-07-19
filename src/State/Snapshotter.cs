@@ -1,6 +1,5 @@
 using MegaCrit.Sts2.Core.CardSelection;
 using MegaCrit.Sts2.Core.Combat;
-using MegaCrit.Sts2.Core.Context;
 using MegaCrit.Sts2.Core.Entities.Cards;
 using MegaCrit.Sts2.Core.Entities.Creatures;
 using MegaCrit.Sts2.Core.Entities.Players;
@@ -173,10 +172,11 @@ public static class Snapshotter
 
     private static object GameOverSnapshot(string phase)
     {
-        var rm = RunManager.Instance;
-        var rs = rm?.DebugOnlyGetState();
-        if (rm is null || rs is null) return new { phase, available = false };
-        var player = LocalContext.GetMe(rs);
+        if (LocalRunContext.StateOnly is not { } run)
+            return new { phase, available = false };
+        var rm = run.Manager;
+        var rs = run.State;
+        var player = LocalRunContext.LocalPlayer(rs);
         var creature = player?.Creature;
         return new
         {
@@ -213,8 +213,7 @@ public static class Snapshotter
     // card picks read the deck, events price their options in gold.
     private static object? FooterView()
     {
-        var rs = RunManager.Instance?.DebugOnlyGetState();
-        var player = rs is null ? null : LocalContext.GetMe(rs);
+        var player = LocalRunContext.Current?.Player;
         if (player is null) return null;
         var creature = player.Creature;
         return new
@@ -392,10 +391,12 @@ public static class Snapshotter
 
     private static object ShopSnapshot(string phase)
     {
-        var rs = RunManager.Instance?.DebugOnlyGetState();
+        if (LocalRunContext.Current is not { } run)
+            return new { phase, available = false };
+        var rs = run.State;
         var inv = Screens.ShopInventory(rs);
-        if (rs is null || inv is null) return new { phase, available = false };
-        var player = LocalContext.GetMe(rs);
+        if (inv is null) return new { phase, available = false };
+        var player = run.Player;
 
         // `cost` stays the gold amount for wire compatibility; `price`
         // names it explicitly. Cards add playCost/starCost so their combat
@@ -660,8 +661,9 @@ public static class Snapshotter
 
     private static object MapSnapshot(string phase)
     {
-        var rs = RunManager.Instance?.DebugOnlyGetState();
-        if (rs is null) return new { phase, available = false };
+        if (LocalRunContext.Current is not { } run)
+            return new { phase, available = false };
+        var rs = run.State;
 
         var points = rs.Map is { } map ? AllMapPoints(map) : [];
         var snapshot = new Dictionary<string, object?>
@@ -908,7 +910,7 @@ public static class Snapshotter
         var combat = CombatManager.Instance;
         var state = combat?.DebugOnlyGetState();
         if (combat is null || state is null) return new { phase, available = false };
-        var player = LocalContext.GetMe(state);
+        var player = LocalRunContext.LocalPlayer(state);
         var pcs = player?.PlayerCombatState;
         var creature = player?.Creature;
         if (pcs is null || creature is null)

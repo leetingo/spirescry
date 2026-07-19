@@ -1,5 +1,4 @@
 using MegaCrit.Sts2.Core.Commands;
-using MegaCrit.Sts2.Core.Context;
 using MegaCrit.Sts2.Core.Entities.CardRewardAlternatives;
 using MegaCrit.Sts2.Core.Entities.Cards;
 using MegaCrit.Sts2.Core.Models;
@@ -254,16 +253,16 @@ public static class HeadlessRewards
     public static bool CaptureFromCurrentRoom()
     {
         if (IsActive) return true;
-        var rm = RunManager.Instance;
-        var rs = rm?.DebugOnlyGetState();
-        var room = rs?.CurrentRoom;
-        var player = rs is null ? null : LocalContext.GetMe(rs);
-        if (rm is null || room is null || player is null) return false;
+        if (LocalRunContext.Current is not { } run) return false;
+        var room = run.State.CurrentRoom;
+        var player = run.Player;
+        if (room is null) return false;
         if (ReferenceEquals(_completedFor, room)) return false;
 
         try
         {
-            var set = new RewardsSet(player, rm.RewardsSetSynchronizer).WithRewardsFromRoom(room);
+            var set = new RewardsSet(
+                player, run.Manager.RewardsSetSynchronizer).WithRewardsFromRoom(room);
             // Async but pure logic — drains inline under the host's
             // patches, so GetResult returns synchronously.
             set.GenerateWithoutOffering().GetAwaiter().GetResult();
@@ -362,7 +361,7 @@ public static class HeadlessRewards
     public static void SkipAllAndClear()
     {
         foreach (var (_, r) in Slotted()) InvokeOnSkipped(r);
-        _completedFor = RunManager.Instance?.DebugOnlyGetState()?.CurrentRoom;
+        _completedFor = LocalRunContext.Current?.State.CurrentRoom;
         Clear();
     }
 

@@ -140,7 +140,8 @@ internal sealed class GuiDecisionSurface : IDecisionSurface
         get
         {
             var room = NRun.Instance?.TreasureRoom;
-            var relics = RunManager.Instance?.TreasureRoomRelicSynchronizer
+            var relics = LocalRunContext.Current?.Manager
+                .TreasureRoomRelicSynchronizer
                 ?.CurrentRelics?.ToArray() ?? [];
             var opened = room is not null && Screens.ChestOpened(room);
             return new TreasureDecision(
@@ -328,12 +329,12 @@ internal sealed class HeadlessDecisionSurface : IDecisionSurface
     {
         get
         {
-            var manager = RunManager.Instance;
-            var relics = manager?.TreasureRoomRelicSynchronizer
+            var run = LocalRunContext.Current;
+            var relics = run?.Manager.TreasureRoomRelicSynchronizer
                 ?.CurrentRelics?.ToArray() ?? [];
             var opened = ReferenceEquals(
                 HeadlessTreasure.OpenedRoom,
-                manager?.DebugOnlyGetState()?.CurrentRoom);
+                run?.State.CurrentRoom);
             return new TreasureDecision(
                 opened || relics.Length > 0,
                 ProceedAvailable: true,

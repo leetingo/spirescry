@@ -52,11 +52,6 @@ public readonly record struct DispatchResult(
 // entry points the UI uses. Must be called on the main thread.
 public static class Dispatcher
 {
-    private readonly record struct RunContext(
-        RunManager Manager,
-        RunState State,
-        Player? Player);
-
     // The complete verb surface and the compatibility view of the protocol
     // vocabulary's cheat surface, both in dispatch order. /health advertises
     // them so a CLI newer or older than the host detects skew up front.
@@ -170,10 +165,9 @@ public static class Dispatcher
     {
         if (!TryGetString(args, "id", out var id))
             return DispatchResult.Reject(RejectionCodes.BadRequest, "missing args.id");
-        if (RequireRunContext(
-            out var run, "no run in progress", "no run in progress") is { } runErr)
+        if (RequireRunContext(out var run, "no run in progress") is { } runErr)
             return runErr;
-        var player = run.Player!;
+        var player = run.Player;
 
         var entry = id.ToUpperInvariant();
         var proto = ModelDb.AllPotions.FirstOrDefault(p => p.Id.Entry == entry);
@@ -193,10 +187,9 @@ public static class Dispatcher
             return DispatchResult.Reject(RejectionCodes.BadRequest, "missing args.value");
         if (CombatManager.Instance is not { IsInProgress: true })
             return DispatchResult.Reject(RejectionCodes.BadPhase, "not in combat");
-        if (RequireRunContext(
-            out var run, "no combat state", "no combat state") is { } runErr)
+        if (RequireRunContext(out var run, "no combat state") is { } runErr)
             return runErr;
-        var pcs = run.Player!.PlayerCombatState;
+        var pcs = run.Player.PlayerCombatState;
         if (pcs is null)
             return DispatchResult.Reject(RejectionCodes.NotReady, "no combat state");
         Reflect.SetPropertyOrBackingField(pcs, prop, Math.Max(0, value));
@@ -235,10 +228,9 @@ public static class Dispatcher
 
     private static DispatchResult SetLocalHp(Func<Creature, int> hp)
     {
-        if (RequireRunContext(
-            out var run, "no local creature", "no local creature") is { } runErr)
+        if (RequireRunContext(out var run, "no local creature") is { } runErr)
             return runErr;
-        var creature = run.Player!.Creature;
+        var creature = run.Player.Creature;
         if (creature is null)
             return DispatchResult.Reject(RejectionCodes.BadState, "no local creature");
         return Reflect.SetProperty(creature, "CurrentHp", hp(creature))
@@ -265,17 +257,16 @@ public static class Dispatcher
         if (target is null)
             return DispatchResult.Reject(RejectionCodes.BadTarget, $"no map node at {col},{row} (see obs.graph)");
 
-        return TravelTo(run.Manager, run.State, run.Player!, target);
+        return TravelTo(run.Manager, run.State, run.Player, target);
     }
 
     private static DispatchResult CheatGold(JsonElement args)
     {
         if (!TryGetInt(args, "value", out var value))
             return DispatchResult.Reject(RejectionCodes.BadRequest, "missing args.value");
-        if (RequireRunContext(
-            out var run, "no local player", "no local player") is { } runErr)
+        if (RequireRunContext(out var run, "no local player") is { } runErr)
             return runErr;
-        var player = run.Player!;
+        var player = run.Player;
         return Reflect.SetProperty(player, "Gold", Math.Max(0, value))
             ? DispatchResult.Success()
             : DispatchResult.Reject(RejectionCodes.Internal, "Gold setter not found");
@@ -290,10 +281,9 @@ public static class Dispatcher
     {
         if (!TryGetString(args, "id", out var id))
             return DispatchResult.Reject(RejectionCodes.BadRequest, "missing args.id");
-        if (RequireRunContext(
-            out var run, "no run in progress", "no run in progress") is { } runErr)
+        if (RequireRunContext(out var run, "no run in progress") is { } runErr)
             return runErr;
-        var player = run.Player!;
+        var player = run.Player;
 
         var entry = id.ToUpperInvariant();
         var proto = ModelDb.AllCards.FirstOrDefault(c => c.Id.Entry == entry);
@@ -323,17 +313,16 @@ public static class Dispatcher
     {
         if (!TryGetString(args, "id", out var id))
             return DispatchResult.Reject(RejectionCodes.BadRequest, "missing args.id");
-        if (RequireRunContext(
-            out var run, "no run in progress", "no run in progress") is { } runErr)
+        if (RequireRunContext(out var run, "no run in progress") is { } runErr)
             return runErr;
         var rs = run.State;
-        var player = run.Player!;
+        var player = run.Player;
 
         var entry = id.ToUpperInvariant();
         var proto = ModelDb.AllRelics.FirstOrDefault(r => r.Id.Entry == entry);
         if (proto is null)
             return DispatchResult.Reject(RejectionCodes.BadRequest, $"no relic model '{entry}'");
-        if (!proto.IsAllowed(rs!))
+        if (!proto.IsAllowed(rs))
             return DispatchResult.Reject(RejectionCodes.NotPlayable,
                 $"relic '{entry}' is not allowed in this run");
 
@@ -389,9 +378,9 @@ public static class Dispatcher
     // clearing RunManager state so new-run can start fresh.
     private static DispatchResult Abandon()
     {
-        var rm = RunManager.Instance;
-        if (rm is null || rm.DebugOnlyGetState() is null)
+        if (LocalRunContext.Current is not { } run)
             return DispatchResult.Reject(RejectionCodes.BadPhase, "no run to abandon");
+        var rm = run.Manager;
         // The host installs an inert NGame dummy (display no-ops), so
         // mode comes from RunMode, not from this instance's null-ness.
         var game = RunMode.IsHeadless ? null : NGame.Instance;
@@ -491,28 +480,22 @@ public static class Dispatcher
         return true;
     }
 
-    // Single owner of the run singleton/state/local-player lookup. Callers
-    // that only need run-level state omit playerMessage; callers that need a
-    // local player choose whether its absence is still a readiness gap or an
-    // internal invariant violation without repeating the singleton preamble.
+    // Single owner of action-level run context rejection semantics. A caller
+    // either receives the complete triple or a rejection; the optional
+    // missing-player branch preserves established invariant error codes
+    // without exposing a partially populated context.
     private static DispatchResult? RequireRunContext(
-        out RunContext context,
+        out LocalRunContext context,
         string stateMessage,
         string? playerMessage = null,
         string playerCode = RejectionCodes.BadState)
     {
-        context = default;
-        var manager = RunManager.Instance;
-        var state = manager?.DebugOnlyGetState();
-        if (manager is null || state is null)
-            return DispatchResult.Reject(RejectionCodes.BadState, stateMessage);
-
-        var player = LocalContext.GetMe(state);
-        if (playerMessage is not null && player is null)
-            return DispatchResult.Reject(playerCode, playerMessage);
-
-        context = new RunContext(manager, state, player);
-        return null;
+        var status = LocalRunContext.TryGet(out context);
+        if (status == LocalRunContextStatus.Available) return null;
+        return status == LocalRunContextStatus.MissingLocalPlayer
+            && playerMessage is not null
+                ? DispatchResult.Reject(playerCode, playerMessage)
+                : DispatchResult.Reject(RejectionCodes.BadState, stateMessage);
     }
 
     // Shared travel tail — the gates every travel verb must pass, then the
@@ -648,10 +631,11 @@ public static class Dispatcher
 
     private static void ClearFaultedCompletedCombatExecutor()
     {
-        var rm = RunManager.Instance;
-        if (CombatManager.Instance is { IsInProgress: true }
-            || rm?.DebugOnlyGetState()?.CurrentRoom is not CombatRoom { IsPreFinished: true })
+        if (LocalRunContext.Current is not { } run
+            || CombatManager.Instance is { IsInProgress: true }
+            || run.State.CurrentRoom is not CombatRoom { IsPreFinished: true })
             return;
+        var rm = run.Manager;
 
         var executor = rm.ActionExecutor;
         if (executor?.CurrentlyRunningAction is not EndPlayerTurnAction
@@ -727,17 +711,20 @@ public static class Dispatcher
         // can park inside StartRun's asset preload — State set, no room,
         // nothing ever progressing. Heal that on retry: clear the husk and
         // relaunch. The age gate keeps a genuinely-starting run safe.
-        if (RunManager.Instance is { } prior && prior.DebugOnlyGetState() is { } priorState)
+        // Current deliberately reports clean no-run until the local seat
+        // resolves. The explicit state-only view prevents a second launch in
+        // that boot window without exposing a partial local run context.
+        if (LocalRunContext.StateOnly is { } prior)
         {
             var parked = _lastNewRunUtc != default
                 && DateTime.UtcNow - _lastNewRunUtc > TimeSpan.FromSeconds(8)
-                && priorState.CurrentRoom is null
+                && prior.State.CurrentRoom is null
                 && CombatManager.Instance is not { IsInProgress: true };
             if (!parked)
                 return DispatchResult.Reject(RejectionCodes.RunExists,
                     "a run is loaded — if you just called new-run, poll /obs; otherwise call abandon first");
             SafeLog.Info("clearing a parked boot launch and relaunching");
-            Reflect.SetPropertyOrBackingField(prior, "State", null);
+            Reflect.SetPropertyOrBackingField(prior.Manager, "State", null);
         }
         _lastNewRunUtc = DateTime.UtcNow;
 
@@ -1120,8 +1107,7 @@ public static class Dispatcher
             return DispatchResult.Reject(RejectionCodes.BadIndex,
                 $"{kind} idx {idx} must be non-negative");
 
-        if (RequireRunContext(
-            out var run, "shop inventory not available", "shop inventory not available") is { } runErr)
+        if (RequireRunContext(out var run, "shop inventory not available") is { } runErr)
             return runErr;
         var inv = fakeMerchant?.Inventory ?? Screens.ShopInventory(run.State);
         if (inv is null)
@@ -1142,7 +1128,7 @@ public static class Dispatcher
         if (!entry.EnoughGold)
             return DispatchResult.Reject(RejectionCodes.NotEnoughGold,
                 $"{kind} idx {idx} costs {entry.Cost}");
-        if (entry is MerchantPotionEntry && run.Player!.HasOpenPotionSlots != true)
+        if (entry is MerchantPotionEntry && run.Player.HasOpenPotionSlots != true)
             return DispatchResult.Reject(RejectionCodes.BadState, "no open potion slots");
 
         // Card removal opens a deck-select sub-screen and the Task stays
@@ -1179,7 +1165,7 @@ public static class Dispatcher
         TreasureRoomRelicSynchronizer sync)
     {
         if (!RunMode.IsHeadless) return null;
-        if (RunManager.Instance?.DebugOnlyGetState()?.CurrentRoom is not TreasureRoom room)
+        if (LocalRunContext.Current?.State.CurrentRoom is not TreasureRoom room)
             return DispatchResult.Reject(
                 RejectionCodes.NotReady, "treasure room not available");
         if (ReferenceEquals(HeadlessTreasure.OpenedRoom, room))
@@ -1558,7 +1544,7 @@ public static class Dispatcher
                         RejectionCodes.NotReady, "treasure room not mounted");
                 if (RunMode.IsHeadless)
                 {
-                    if (RunManager.Instance?.DebugOnlyGetState()?.CurrentRoom is not TreasureRoom room)
+                    if (LocalRunContext.Current?.State.CurrentRoom is not TreasureRoom room)
                         return DispatchResult.Reject(
                             RejectionCodes.NotReady, "treasure room not available");
                     if (!ReferenceEquals(HeadlessTreasure.OpenedRoom, room)
@@ -1630,7 +1616,7 @@ public static class Dispatcher
                 $"node {col},{row} not reachable; reachable col,row: [{legal}]");
         }
 
-        return TravelTo(run.Manager, run.State, run.Player!, target);
+        return TravelTo(run.Manager, run.State, run.Player, target);
     }
 
     // ---- combat ----------------------------------------------------------
@@ -1648,7 +1634,7 @@ public static class Dispatcher
             return DispatchResult.Reject(RejectionCodes.BadPhase, "not in combat");
 
         var state = combat.DebugOnlyGetState()!;
-        var player = LocalContext.GetMe(state);
+        var player = LocalRunContext.LocalPlayer(state);
         if (player is null)
             return DispatchResult.Reject(RejectionCodes.Internal, "local player not found in combat");
 
@@ -1682,10 +1668,9 @@ public static class Dispatcher
         }
         if (!TryGetInt(args, "slot", out var slot))
             return DispatchResult.Reject(RejectionCodes.BadRequest, "missing args.slot");
-        if (RequireRunContext(
-            out var run, "no run in progress", "no run in progress") is { } runErr)
+        if (RequireRunContext(out var run, "no run in progress") is { } runErr)
             return runErr;
-        var player = run.Player!;
+        var player = run.Player;
         var slots = player.PotionSlots;
         if (slot < 0 || slot >= slots.Count || slots[slot] is null)
             return DispatchResult.Reject(RejectionCodes.BadIndex, $"no potion in slot {slot}");
@@ -1745,10 +1730,9 @@ public static class Dispatcher
     {
         if (!TryGetInt(args, "slot", out var slot))
             return DispatchResult.Reject(RejectionCodes.BadRequest, "missing args.slot");
-        if (RequireRunContext(
-            out var run, "no run in progress", "no run in progress") is { } runErr)
+        if (RequireRunContext(out var run, "no run in progress") is { } runErr)
             return runErr;
-        var player = run.Player!;
+        var player = run.Player;
         // Outside combat, discarding remains legal in every run phase. During
         // combat, however, a hand/card picker temporarily owns input even
         // though CombatManager still reports an in-progress fight.

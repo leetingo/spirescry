@@ -2,8 +2,6 @@ using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Nodes;
-using MegaCrit.Sts2.Core.Context;
-using MegaCrit.Sts2.Core.Runs;
 
 namespace Spirescry.State;
 
@@ -136,8 +134,9 @@ public static class RunLog
 
     private static void CaptureMetadata()
     {
-        var state = RunManager.Instance?.DebugOnlyGetState();
-        var player = state is null ? null : LocalContext.GetMe(state);
+        var run = LocalRunContext.Current;
+        var state = run?.State;
+        var player = run?.Player;
         _seed = state?.Rng?.StringSeed;
         _character = player?.Character?.Id.Entry;
         _ascension = state?.AscensionLevel;
