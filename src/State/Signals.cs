@@ -35,9 +35,8 @@ public static class Signals
     private static readonly EngineLogCorrelation EngineLogs = new();
     private static readonly WaitClock PublicClock = new();
     private static readonly WaitClock SettlementClock = new();
-    private static readonly List<TaskCompletionSource<bool>> TickWaiters = new();
+    private static readonly WaitClock TickClock = new();
     private static readonly HashSet<Task> PendingFireAndForget = new();
-    private static long _tickCount;
     private static string _lastPhase = "";
     private static object? _runStateRef;
     private static string _runId = "none";
@@ -65,7 +64,7 @@ public static class Signals
         get { lock (Gate) return SettlementClock.Revision; }
     }
 
-    public static long TickCount { get { lock (Gate) return _tickCount; } }
+    public static long TickCount { get { lock (Gate) return TickClock.Revision; } }
 
     public static string RunId { get { lock (Gate) return _runId; } }
 
@@ -393,27 +392,16 @@ public static class Signals
     // therefore also observes distinct process frames before declaring a
     // quiet GUI action settled. Headless Tick calls remain useful to tests,
     // but headless follow resolves synchronously and does not wait on them.
-    public static async Task<bool> WaitForTick(long after, int timeoutMs)
-    {
-        TaskCompletionSource<bool> tcs;
-        lock (Gate)
-        {
-            if (_tickCount > after) return true;
-            tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-            TickWaiters.Add(tcs);
-        }
-        try { return await tcs.Task.WaitAsync(TimeSpan.FromMilliseconds(timeoutMs)); }
-        catch (TimeoutException) { return false; }
-        finally { lock (Gate) TickWaiters.Remove(tcs); }
-    }
+    public static Task<bool> WaitForTick(long after, int timeoutMs) =>
+        WaitForCounterChange(after, timeoutMs, TickClock);
 
     private static void AdvanceTick()
     {
         List<TaskCompletionSource<bool>>? wake = null;
         lock (Gate)
         {
-            _tickCount++;
-            wake = DrainWaitersLocked(TickWaiters);
+            TickClock.Advance();
+            wake = DrainWaitersLocked(TickClock.Waiters);
         }
         Wake(wake);
     }
