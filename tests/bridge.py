@@ -202,3 +202,59 @@ def resolve_transient_phase(d, *, claim_reward_tiles=False,
     else:
         run("proceed", allow_fail=True)
     return None
+
+
+_TRANSIENT_PHASES = {
+    PHASE.BUNDLE_SELECT, PHASE.CARD_SELECT, PHASE.HAND_SELECT,
+    PHASE.CRYSTAL_SPHERE, PHASE.REWARDS, PHASE.CARD_REWARD,
+    PHASE.RELIC_REWARD,
+}
+_TERMINAL_PHASES = {PHASE.MAIN_MENU, PHASE.GAME_OVER}
+
+
+def walk_world(*wanted_phases, claim_reward_tiles=False,
+               claim_card_reward=False, claim_relic_reward=False,
+               after_rev=None):
+    """Drive the world to a wanted phase, or drain one transient chain.
+
+    With no wanted phase, stop at the first stable decision (combat, event,
+    map, shop, ...). With wanted phases, resolve every intervening event,
+    combat, picker, and room. Terminal phases always return to the caller so
+    suites can decide whether to restart or assert an outcome.
+    """
+    wanted = set(wanted_phases)
+    for _ in range(40):
+        # A caller that just fired an action supplies its pre-action revision;
+        # long-poll once so an asynchronous GUI page cannot be mistaken for
+        # the wanted stable event merely because it has not advanced yet.
+        snapshot = obs(after_rev) if after_rev is not None else obs()
+        after_rev = None
+        phase = snapshot.get("phase")
+        if phase in wanted or phase in _TERMINAL_PHASES:
+            return snapshot
+        if not wanted and phase not in _TRANSIENT_PHASES:
+            return snapshot
+
+        if phase == PHASE.EVENT:
+            options = [option for option in snapshot.get("options", [])
+                       if not option.get("locked")
+                       and not option.get("chosen")]
+            if options:
+                run("option", str(options[0]["idx"]), allow_fail=True)
+            else:
+                run("proceed", allow_fail=True)
+        else:
+            error = resolve_transient_phase(
+                snapshot,
+                claim_reward_tiles=claim_reward_tiles,
+                claim_card_reward=claim_card_reward,
+                claim_relic_reward=claim_relic_reward,
+            )
+            if error:
+                raise AssertionError(f"{phase}: {error}")
+        time.sleep(0.5)
+
+    last = obs()
+    raise AssertionError(
+        f"world would not settle to {wanted or 'a stable phase'}: "
+        f"{last.get('phase')}")

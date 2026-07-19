@@ -30,6 +30,12 @@ POOL_CHARACTER = {
     "necrobinder": "NECROBINDER",
     "regent": "REGENT",
 }
+MAP_CLAIMS = {"claim_reward_tiles": True}
+TRANSIENT_CLAIMS = {
+    "claim_reward_tiles": True,
+    "claim_card_reward": True,
+    "claim_relic_reward": True,
+}
 
 
 def model_entries(kind):
@@ -49,49 +55,15 @@ def fresh_run(seed="SWEEP", character="IRONCLAD"):
     bridge.wait_phase(bridge.PHASE.MAP, timeout=20)
 
 
-def settle_to_map(max_steps=40):
-    """Generically resolve whatever is on screen until the map (fresh
-    run on game_over). The same walker V1 uses, shared by the sweeps."""
-    for _ in range(max_steps):
-        d = obs()
-        ph = d["phase"]
-        if ph == bridge.PHASE.MAP:
-            return
-        if ph == bridge.PHASE.MAIN_MENU or ph == bridge.PHASE.GAME_OVER:
-            fresh_run()
-            return
-        if ph == bridge.PHASE.REWARDS:
-            tiles = d.get("rewards", [])
-            if tiles:
-                run("pick-reward", str(tiles[0]["idx"]), allow_fail=True)
-            else:
-                run("proceed", allow_fail=True)
-        elif ph == bridge.PHASE.CARD_REWARD:
-            run("skip", allow_fail=True)
-        elif ph in (bridge.PHASE.CARD_SELECT, bridge.PHASE.HAND_SELECT, bridge.PHASE.BUNDLE_SELECT):
-            resolve_pickers()
-        elif ph == bridge.PHASE.EVENT:
-            opts = [x for x in d.get("options", [])
-                    if not x.get("locked") and not x.get("chosen")]
-            if opts:
-                run("option", str(opts[0]["idx"]), allow_fail=True)
-            else:
-                run("proceed", allow_fail=True)
-        elif ph == bridge.PHASE.COMBAT:
-            bridge.kill_current_combat()
-        else:
-            run("proceed", allow_fail=True)
-        time.sleep(0.5)
-    raise AssertionError(f"world would not settle to map: {obs()['phase']}")
-
-
 def wedge_events(since):
     return [e["type"] for e in run("obs", "--since", str(since), "--wait", "300")
             .get("events", []) if e["type"].startswith("wedge:")]
 
 
 def enter_sandbag():
-    settle_to_map()
+    settled = bridge.walk_world(bridge.PHASE.MAP, **MAP_CLAIMS)
+    if settled["phase"] != bridge.PHASE.MAP:
+        fresh_run()
     run("cheat", bridge.PHASE.COMBAT, SANDBAG)
     d = bridge.wait_phase(bridge.PHASE.COMBAT, timeout=20)
     for _ in range(10):
@@ -100,62 +72,6 @@ def enter_sandbag():
         time.sleep(1)
         d = obs()
     return d
-
-
-def resolve_pickers(deadline_s=8):
-    """Drain any picker a play/potion opened; return the final phase."""
-    end = time.monotonic() + deadline_s
-    while time.monotonic() < end:
-        d = obs()
-        ph = d["phase"]
-        if ph == bridge.PHASE.BUNDLE_SELECT:
-            run("pick-card", "0", allow_fail=True)
-            time.sleep(0.5)
-        elif ph in (bridge.PHASE.CARD_SELECT, bridge.PHASE.HAND_SELECT):
-            # Exercise the effect, not its cancel path. Multi-card picks
-            # (ASTROLABE transforms three) need distinct candidates until
-            # min is satisfied; max-selection auto-confirms in headless.
-            need = max(1, d.get("min", 1))
-            for card in d.get("cards", [])[:need]:
-                picked = run("pick-card", str(card["idx"]), allow_fail=True)
-                if "_err" in picked:
-                    raise AssertionError(f"picker rejected card {card['idx']}: {picked['_err'][:100]}")
-                if obs()["phase"] not in (bridge.PHASE.CARD_SELECT, bridge.PHASE.HAND_SELECT):
-                    break
-            time.sleep(0.5)
-            if obs()["phase"] in (bridge.PHASE.CARD_SELECT, bridge.PHASE.HAND_SELECT):
-                confirmed = run("confirm", allow_fail=True)
-                if "_err" in confirmed:
-                    run("skip", allow_fail=True)
-                    raise AssertionError(f"picker confirm failed: {confirmed['_err'][:100]}")
-                time.sleep(0.5)
-        elif ph == bridge.PHASE.CRYSTAL_SPHERE:
-            run("proceed", allow_fail=True)
-            time.sleep(0.5)
-        elif ph == bridge.PHASE.REWARDS:
-            rewards = d.get("rewards", [])
-            if rewards:
-                run("pick-reward", str(rewards[0]["idx"]), allow_fail=True)
-            else:
-                run("proceed", allow_fail=True)
-            time.sleep(0.5)
-        elif ph == bridge.PHASE.CARD_REWARD:
-            cards = d.get("cards", [])
-            if cards:
-                run("pick-card", str(cards[0]["idx"]), allow_fail=True)
-            else:
-                run("skip", allow_fail=True)
-            time.sleep(0.5)
-        elif ph == bridge.PHASE.RELIC_REWARD:
-            relics = d.get("relics", [])
-            if relics:
-                run("pick-relic", str(relics[0]["idx"]), allow_fail=True)
-            else:
-                run("skip", allow_fail=True)
-            time.sleep(0.5)
-        else:
-            return ph
-    return obs()["phase"]
 
 
 # ---------- sweep: every encounter ----------
@@ -169,7 +85,9 @@ def encounters(log=print):
     fresh_run()
     for i, enc in enumerate(ids):
         try:
-            settle_to_map()
+            settled = bridge.walk_world(bridge.PHASE.MAP, **MAP_CLAIMS)
+            if settled["phase"] != bridge.PHASE.MAP:
+                fresh_run()
             rev = obs()["rev"]
             r = run("cheat", bridge.PHASE.COMBAT, enc, allow_fail=True)
             if "_err" in r:
@@ -191,7 +109,9 @@ def encounters(log=print):
                 failures[enc] = f"wedge after kill: {w}"
                 fresh_run()
                 continue
-            settle_to_map()
+            settled = bridge.walk_world(bridge.PHASE.MAP, **MAP_CLAIMS)
+            if settled["phase"] != bridge.PHASE.MAP:
+                fresh_run()
         except (AssertionError, SystemExit) as e:
             failures[enc] = str(e)[:120]
             fresh_run()
@@ -295,7 +215,7 @@ def cards(log=print, only=None):
                 continue
             plays_in_fight += 1
             playable_executed += 1
-            ph = resolve_pickers()
+            ph = bridge.walk_world(**TRANSIENT_CLAIMS)["phase"]
             w = wedge_events(rev)
             if w:
                 failures[card] = f"wedge: {w}"
@@ -304,7 +224,6 @@ def cards(log=print, only=None):
                 plays_in_fight = 0
             elif ph != bridge.PHASE.COMBAT:
                 # the play legitimately ended the fight (kill, escape…)
-                settle_to_map()
                 d = enter_sandbag()
                 plays_in_fight = 0
         except (AssertionError, SystemExit) as e:
@@ -375,7 +294,9 @@ def potions(log=print):
             res = bridge.cli(*args)
             if res.returncode != 0:
                 # not usable here (out-of-combat potion?) — try the map
-                settle_to_map()
+                settled = bridge.walk_world(bridge.PHASE.MAP, **MAP_CLAIMS)
+                if settled["phase"] != bridge.PHASE.MAP:
+                    fresh_run()
                 res = bridge.cli(*args)
                 if res.returncode != 0:
                     failures[pot] = f"use: {res.stderr.strip()[:110]}"
@@ -383,7 +304,7 @@ def potions(log=print):
                 used_in_fight = 0
                 continue
             used_in_fight += 1
-            resolve_pickers()
+            bridge.walk_world(**TRANSIENT_CLAIMS)
             w = wedge_events(rev)
             if w:
                 failures[pot] = f"wedge: {w}"
@@ -428,7 +349,7 @@ def relics(log=print):
                 return "LEGAL_REJECT"
             return f"grant: {r['_err'][:90]}"
         try:
-            phase = resolve_pickers()
+            phase = bridge.walk_world(**TRANSIENT_CLAIMS)["phase"]
         except AssertionError as e:
             return f"obtain picker: {str(e)[:90]}"
         if phase != bridge.PHASE.MAP:

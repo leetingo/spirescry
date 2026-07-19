@@ -83,6 +83,15 @@ LOG_PATH = None  # set in main() when --boot
 # potions (one opens a mid-combat picker in the boss fight), treasure,
 # smith. SPIRECI2/SPIRECI3 also pass, with less potion coverage.
 PARITY_SEED = "SPIRECI1"
+WORLD_CLAIMS = {
+    "claim_reward_tiles": True,
+    "claim_card_reward": True,
+    "claim_relic_reward": True,
+}
+VICTORY_CLAIMS = {
+    "claim_reward_tiles": True,
+    "claim_relic_reward": True,
+}
 
 
 def case(name, boot_only=False, deep=False):
@@ -146,30 +155,6 @@ def run_test_script(script, *args):
         [sys.executable, os.path.join(REPO, "tests", script), *args])
     assert completed.returncode == 0, \
         f"{script} exited {completed.returncode}"
-
-
-def settle_to_map(max_steps=40):
-    for _ in range(max_steps):
-        d = obs()
-        phase = d.get("phase")
-        if phase == PHASE.MAP:
-            return d
-        if phase in (PHASE.MAIN_MENU, PHASE.GAME_OVER):
-            raise AssertionError(f"run ended while settling to map: {phase}")
-        if phase == PHASE.EVENT:
-            options = [option for option in d.get("options", [])
-                       if not option.get("locked") and not option.get("chosen")]
-            if options:
-                run("option", str(options[0]["idx"]), allow_fail=True)
-            else:
-                run("proceed", allow_fail=True)
-        else:
-            error = bridge.resolve_transient_phase(
-                d, claim_reward_tiles=True, claim_card_reward=True,
-                claim_relic_reward=True)
-            assert error is None, f"{phase}: {error}"
-        time.sleep(0.5)
-    raise AssertionError(f"world would not settle to map: {obs().get('phase')}")
 
 
 def to_map(seed=None, character="IRONCLAD"):
@@ -1361,14 +1346,18 @@ def c7():
     # action pops itself. The next combat must not re-observe that stale task.
     to_map(seed="CIPAIRTEARDOWN")
     for encounter in ("SOUL_NEXUS_ELITE", "SPINY_TOAD_NORMAL"):
-        settle_to_map()
+        settled = bridge.walk_world(PHASE.MAP, **WORLD_CLAIMS)
+        assert settled["phase"] == PHASE.MAP, \
+            f"run ended while walking to map: {settled['phase']}"
         run("cheat", PHASE.COMBAT, encounter)
         combat = bridge.wait_phase(
             PHASE.COMBAT, timeout=20, raise_on_timeout=False)
         assert combat is not None and combat.get("enemies"), (
             encounter, obs())
         bridge.kill_current_combat()
-        settle_to_map()
+        settled = bridge.walk_world(PHASE.MAP, **WORLD_CLAIMS)
+        assert settled["phase"] == PHASE.MAP, \
+            f"run ended while walking to map: {settled['phase']}"
     to_menu()
 
 
@@ -1517,26 +1506,8 @@ def v1():
         run("cheat", "goto", str(boss["col"]), str(boss["row"]), allow_fail=True)
         bridge.wait_phase(PHASE.COMBAT, timeout=30)
         bridge.kill_current_combat()
-        # walk whatever follows — reward tiles, transition events,
-        # pickers — until the next act's map or the victory screen
-        for _ in range(40):
-            d = obs()
-            ph = d["phase"]
-            if ph in (PHASE.MAP, PHASE.GAME_OVER):
-                break
-            if ph == PHASE.EVENT:
-                opts = [x for x in d.get("options", [])
-                        if not x.get("locked") and not x.get("chosen")]
-                if opts:
-                    run("option", str(opts[0]["idx"]), allow_fail=True)
-                else:
-                    run("proceed", allow_fail=True)
-            else:
-                error = bridge.resolve_transient_phase(
-                    d, claim_reward_tiles=True, claim_relic_reward=True)
-                assert error is None, f"{ph}: {error}"
-            time.sleep(0.8)
-        if obs()["phase"] == PHASE.GAME_OVER:
+        d = bridge.walk_world(PHASE.MAP, PHASE.GAME_OVER, **VICTORY_CLAIMS)
+        if d["phase"] == PHASE.GAME_OVER:
             break
     d = obs()
     assert d["phase"] == PHASE.GAME_OVER, f"never reached game_over: {d['phase']}"

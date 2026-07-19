@@ -13,6 +13,11 @@ import bridge
 run = bridge.run
 
 obs = lambda: run("obs")
+WORLD_CLAIMS = {
+    "claim_reward_tiles": False,
+    "claim_card_reward": False,
+    "claim_relic_reward": False,
+}
 
 def fresh_run(seed=None):
     run("abandon", allow_fail=True)
@@ -25,72 +30,21 @@ def fresh_run(seed=None):
         sys.exit("could not reach map for a fresh run")
     run("cheat", "gold", "500", allow_fail=True)
 
-def ensure_map():
-    d = obs()
-    if d["phase"] == bridge.PHASE.MAP:
-        return
-    # try the generic exits first, else nuke
-    for _ in range(4):
-        ph = obs()["phase"]
-        if ph == bridge.PHASE.MAP:
-            return
-        if ph in (bridge.PHASE.EVENT, bridge.PHASE.REST_SITE, bridge.PHASE.TREASURE, bridge.PHASE.REWARDS):
-            run("proceed", allow_fail=True)
-        elif ph == bridge.PHASE.SHOP:
-            run("leave", allow_fail=True)
-        elif ph in (bridge.PHASE.CARD_SELECT, bridge.PHASE.BUNDLE_SELECT):
-            run("pick-card", "0", allow_fail=True)
-            run("skip", allow_fail=True)
-        elif ph == bridge.PHASE.CRYSTAL_SPHERE:
-            run("proceed", allow_fail=True)
-        elif ph in (bridge.PHASE.COMBAT, bridge.PHASE.HAND_SELECT, bridge.PHASE.CARD_REWARD, bridge.PHASE.RELIC_REWARD):
-            break  # fresh run below
-        else:
-            break
-        time.sleep(0.5)
-    if obs()["phase"] != bridge.PHASE.MAP:
-        fresh_run()
-
-def drain(max_steps=30):
-    """Generically resolve whatever an option opened, all the way out.
-    Returns where it settled — map/main_menu/game_over — or 'stuck@…'."""
-    for _ in range(max_steps):
-        d = obs()
-        ph = d.get("phase")
-        if ph in (bridge.PHASE.MAP, bridge.PHASE.MAIN_MENU, bridge.PHASE.GAME_OVER):
-            return ph
-        if ph == bridge.PHASE.EVENT:
-            opts = [o for o in d.get("options", [])
-                    if not o.get("locked") and not o.get("chosen")]
-            if opts:
-                run("option", str(opts[0]["idx"]), allow_fail=True)
-            else:
-                run("proceed", allow_fail=True)
-        else:  # rewards, rest_site, treasure, crystal_sphere, …
-            error = bridge.resolve_transient_phase(d)
-            if error:
-                return f"stuck@{ph}:{error}"
-        time.sleep(0.4)
-    return f"stuck@{obs().get('phase')}"
-
-
-def settle_to_event_or_exit(max_steps=30):
-    """Resolve transient screens without choosing another event option."""
-    for _ in range(max_steps):
-        d = obs()
-        ph = d.get("phase")
-        if ph in (bridge.PHASE.EVENT, bridge.PHASE.MAP, bridge.PHASE.MAIN_MENU, bridge.PHASE.GAME_OVER):
-            return d
-        error = bridge.resolve_transient_phase(d)
-        if error:
-            return {"phase": f"stuck@{ph}:{error}"}
-        time.sleep(0.4)
-    return {"phase": f"stuck@{obs().get('phase')}"}
+def walk_or_stuck(*wanted, **walk_options):
+    """Keep the sweep aggregating after one option wedges or times out."""
+    try:
+        return bridge.walk_world(
+            *wanted, **WORLD_CLAIMS, **walk_options)
+    except AssertionError as error:
+        return {"phase": f"stuck@{obs().get('phase')}:{str(error)[:120]}"}
 
 
 def force(ev):
     """Force one event from a settled map; return its snapshot or None."""
-    ensure_map()
+    # Do not let a combat/picker or a previously explored option leak hp,
+    # deck, or one-shot state into the next forced event.
+    if obs().get("phase") != bridge.PHASE.MAP:
+        fresh_run()
     if "_err" in run("cheat", bridge.PHASE.EVENT, ev, allow_fail=True):
         return None
     d = obs()
@@ -117,11 +71,12 @@ def replay_event_path(ev, path):
         opts = d.get("options", [])
         if idx >= len(opts) or opts[idx].get("locked"):
             return None, f"path {path} option {idx} unavailable"
+        before_rev = d.get("rev")
         result = run("option", str(idx), allow_fail=True)
         if "_err" in result:
             return None, f"path {path} option {idx} rejected: {result['_err'][:120]}"
-        time.sleep(0.4)
-        d = settle_to_event_or_exit()
+        d = walk_or_stuck(
+            bridge.PHASE.EVENT, bridge.PHASE.MAP, after_rev=before_rev)
     return d, None
 
 
@@ -164,17 +119,18 @@ def explore_all_event_options(ev):
             # Followed so the response carries `errors`: bridge.run fails
             # the sweep on any engine fault an option swallows — every
             # option click doubles as an engine_error noise regression.
+            before_rev = current.get("rev")
             result = run("option", str(idx), "--follow", "4000", allow_fail=True)
             if "_err" in result:
                 return outcomes, clicked, locked, (
                     f"path {path} option {idx} rejected: {result['_err'][:120]}")
-            time.sleep(0.4)
             clicked += 1
-            after = settle_to_event_or_exit()
+            after = walk_or_stuck(
+                bridge.PHASE.EVENT, bridge.PHASE.MAP, after_rev=before_rev)
             if after.get("phase") == bridge.PHASE.EVENT:
                 if page_signature(after) not in seen_pages:
                     queue.append(path + (idx,))
-                landed = drain()
+                landed = walk_or_stuck(bridge.PHASE.MAP)["phase"]
             else:
                 landed = after.get("phase")
             outcomes.append(f"{path + (idx,)}->{landed}")
@@ -241,10 +197,11 @@ def sweep(all_options=False):
             if idx >= len(opts_now) or opts_now[idx].get("locked"):
                 locked_skipped += 1
                 continue
+            before_rev = d.get("rev")
             run("option", str(idx), "--follow", "4000", allow_fail=True)
-            time.sleep(0.5)
             options_clicked += 1
-            landed = drain()
+            landed = walk_or_stuck(
+                bridge.PHASE.MAP, after_rev=before_rev)["phase"]
             outcomes.append(f"{idx}->{landed}")
         stuck = [o for o in outcomes if "stuck" in o or "FAIL" in o]
         results[ev] = render + (f" STUCK {stuck}" if stuck else " ok")
