@@ -590,7 +590,10 @@ internal static class HeadlessBoot
     // Monster model flavor hooks (BeforeDeath, BeforeRemovedFromRoom) play
     // death SFX / arm animations; in host they NRE on missing audio and
     // scene nodes, and that aborts CreatureCmd.Kill — the boss never dies
-    // and the win condition never fires. Swallow: flavor only.
+    // and the win condition never fires. Soul Nexus puts the same
+    // presentation-only work in its AfterDeath event handler, so target that
+    // one exact hook too. Do not blanket-swallow AfterDeath: other monsters
+    // can own gameplay there.
     private static void PatchMonsterFlavorHooks()
     {
         var bf = BindingFlags.Public | BindingFlags.NonPublic
@@ -600,7 +603,10 @@ internal static class HeadlessBoot
         // Task-returning hooks must not leave a null result behind —
         // the engine awaits it.
         var patched = PatchMethodsAndSwallow(
-            types, bf, m => m.Name is "BeforeDeath" or "BeforeRemovedFromRoom",
+            types, bf, m => m.Name is "BeforeDeath" or "BeforeRemovedFromRoom"
+                || (m.Name == "AfterDeath"
+                    && m.DeclaringType?.FullName
+                        == "MegaCrit.Sts2.Core.Models.Monsters.SoulNexus"),
             completeFaultedTasks: true);
         HostLog.Info($"swallowed {patched} monster flavor hooks");
     }

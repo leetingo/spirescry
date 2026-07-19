@@ -85,9 +85,18 @@ public static class Signals
         // an unreadable state count as in-combat — unknown context must
         // degrade toward reporting an error, never toward hiding one.
         bool combatInProgress;
-        try { combatInProgress = CombatManager.Instance is { IsInProgress: true }; }
-        catch { combatInProgress = true; }
-        Bump(ErrorEvents.FromLogLine(text, combatInProgress));
+        bool headlessHost;
+        try
+        {
+            combatInProgress = CombatManager.Instance is { IsInProgress: true };
+            headlessHost = DecisionSurface.Current is HeadlessDecisionSurface;
+        }
+        catch
+        {
+            combatInProgress = true;
+            headlessHost = false;
+        }
+        Bump(ErrorEvents.FromLogLine(text, combatInProgress, headlessHost));
     }
 
     // Error events accepted-to-settlement: the follow response surfaces

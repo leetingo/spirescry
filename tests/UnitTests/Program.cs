@@ -509,6 +509,44 @@ internal static class Tests
             combatInProgress: false)));
     }
 
+    public static void ErrorEventsDowngradeOnlyExactHeadlessCompletionNoise()
+    {
+        var headlessCompletionNoise = new[]
+        {
+            "Act 4 is not yet implemented.",
+            "EpochModel was not found :(",
+            "System.InvalidOperationException: Tried to set event options after event was finished!\n"
+                + "   at MegaCrit.Sts2.Core.Models.EventModel.SetEventState(LocString description, IEnumerable`1 eventOptions)\n"
+                + "   at MegaCrit.Sts2.Core.Models.EventModel.SetEventFinished(LocString description)",
+        };
+
+        foreach (var line in headlessCompletionNoise)
+        {
+            var note = ErrorEvents.FromLogLine(
+                line, combatInProgress: true, headlessHost: true);
+            True(note.StartsWith("engine_note:", StringComparison.Ordinal));
+            False(ErrorEvents.IsError(note));
+
+            // The same engine error in the GUI remains actionable.
+            True(ErrorEvents.IsError(ErrorEvents.FromLogLine(
+                line, combatInProgress: true, headlessHost: false)));
+        }
+
+        // Exact messages from another call path remain actionable even in
+        // the host: only the known completion-tail stack is presentation
+        // noise.
+        True(ErrorEvents.IsError(ErrorEvents.FromLogLine(
+            "EpochModel was not found :(\n   at Some.Other.Frame()",
+            combatInProgress: false, headlessHost: true)));
+        // Soul Nexus is repaired at host composition so its death hook can
+        // finish. If that NRE ever reaches the error channel, keep failing:
+        // downgrading it here would leave PlayCardAction permanently busy.
+        True(ErrorEvents.IsError(ErrorEvents.FromLogLine(
+            "System.NullReferenceException: Object reference not set to an instance of an object.\n"
+                + "   at MegaCrit.Sts2.Core.Models.Monsters.SoulNexus.AfterDeath(Creature _)",
+            combatInProgress: false, headlessHost: true)));
+    }
+
     public static void DecisionClosedChestAdvertisesTheOpeningPickRelic()
     {
         // Headless closed chest: relics empty, proceed always available.
