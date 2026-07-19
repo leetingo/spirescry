@@ -147,16 +147,18 @@ internal static class Snapshotter
         SemanticToken("relic", relic.Id.Entry, RelicCounter(relic), relic.IsUsedUp);
 
     private static string[] EventDynamicVarState(DynamicVarSet variables) =>
-        variables
-            .Select(pair => SemanticToken(
-                "eventVar",
-                pair.Key,
-                pair.Value.GetType().FullName,
-                pair.Value.BaseValue,
-                pair.Value.EnchantedValue,
-                pair.Value.PreviewValue))
-            .OrderBy(token => token, StringComparer.Ordinal)
-            .ToArray();
+        CollectionSnapshot.ReadStable(
+            "event dynamic vars semantic state",
+            () => variables
+                .Select(pair => SemanticToken(
+                    "eventVar",
+                    pair.Key,
+                    pair.Value.GetType().FullName,
+                    pair.Value.BaseValue,
+                    pair.Value.EnchantedValue,
+                    pair.Value.PreviewValue))
+                .OrderBy(token => token, StringComparer.Ordinal)
+                .ToArray());
 
     private static string[] PowerState(Creature creature)
         => CollectionSnapshot.ReadStable(

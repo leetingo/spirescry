@@ -575,7 +575,7 @@ def p13():
 def p14():
     to_map(seed="CIEVENTVARS")
     before = obs()["rev"]
-    run("cheat", PHASE.EVENT, "BIG_FISH")
+    run("cheat", PHASE.EVENT, "DENSE_VEGETATION")
     event = bridge.wait_until(
         lambda snapshot: snapshot.get("phase") == PHASE.EVENT,
         description="dynamic event to mount",
