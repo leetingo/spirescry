@@ -73,7 +73,7 @@ public static class Dispatcher
     {
         "goto", "gold", "heal", "hp", "wound-enemies", "event", "combat",
         "card", "card-upgraded", "relic", "potion", "stars", "energy",
-        "async-fault", "engine-error",
+        "async-fault", "engine-error", "engine-error-delayed",
     };
 
     public static DispatchResult Dispatch(string action, JsonElement args) => action switch
@@ -121,6 +121,7 @@ public static class Dispatcher
             "energy" => SetCombatResource("Energy", args),
             "async-fault" => CheatAsyncFault(),
             "engine-error" => CheatEngineError(),
+            "engine-error-delayed" => CheatEngineErrorDelayed(),
             var n => DispatchResult.Reject(RejectionCodes.BadRequest,
                 $"unknown cheat '{n}' (supported: {string.Join(", ", Cheats)})"),
         };
@@ -140,6 +141,24 @@ public static class Dispatcher
         MegaCrit.Sts2.Core.Logging.Log.Error(
             "SpirescryForcedException: forced engine log error (cheat engine-error)");
         return DispatchResult.Success();
+    }
+
+    // The delayed variant: the error line lands from a continuation a
+    // moment after acceptance, like an engine effect faulting mid-chain.
+    // Fired through the same tracking Fire() uses, so a follow must stay
+    // busy across the delay and carry the error in ITS OWN response —
+    // the regression for delayed faults leaking past settlement.
+    private static DispatchResult CheatEngineErrorDelayed()
+    {
+        Fire(DelayedEngineError(), "engine-error-delayed");
+        return DispatchResult.Success();
+    }
+
+    private static async Task DelayedEngineError()
+    {
+        await Task.Delay(250).ConfigureAwait(false);
+        MegaCrit.Sts2.Core.Logging.Log.Error(
+            "SpirescryForcedException: forced delayed engine log error (cheat engine-error-delayed)");
     }
 
     private static async Task ForcedAsyncFault()

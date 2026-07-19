@@ -31,6 +31,11 @@ public static class Handlers
                     ? null
                     : $"{running.GetType().Name}:{running.State}",
                 executorStuckMs = Signals.ExecutorStuckMs,
+                // The two counters behind the follow probe's busy flag —
+                // a follow that times out with an idle executor is almost
+                // always one of these stuck above zero.
+                pendingAsync = Signals.PendingAsyncCount,
+                pendingEventOptions = Signals.PendingEventOptionCount,
                 queues,
             };
         });
@@ -47,6 +52,8 @@ public static class Handlers
             snapshot.runId,
             snapshot.executor,
             snapshot.executorStuckMs,
+            snapshot.pendingAsync,
+            snapshot.pendingEventOptions,
             snapshot.queues,
         });
     }
@@ -325,6 +332,7 @@ public static class Handlers
         string Phase,
         bool Headless,
         bool Busy,
+        bool OptionExecuting,
         bool HasDecision,
         string StateKey,
         JsonObject Observation)
@@ -343,20 +351,45 @@ public static class Handlers
             var stateKey = node.ToJsonString();
 
             var rm = MegaCrit.Sts2.Core.Runs.RunManager.Instance;
-            var busy = Signals.PendingAsyncCount > 0
+            // An event option's task legitimately outlives a follow window
+            // when it awaits an embedded combat or a deferred picker — the
+            // agent must act for it to ever complete, so those states must
+            // not read as busy (combat plays would time out; picker parks
+            // would never report next_decision). A pending option task
+            // outside both states is an engine continuation still
+            // executing (a delay between removing cards and granting the
+            // reward, say): THAT blocks settlement, so the response can't
+            // report a half-applied board with errors: [].
+            var standInParked = HeadlessPicker.IsActive
+                || HeadlessBundle.IsActive
+                || HeadlessCrystal.IsActive
+                || HeadlessRewards.IsActive
+                || HeadlessRewards.InCardPick;
+            var combatLive = MegaCrit.Sts2.Core.Combat.CombatManager.Instance
+                is { IsInProgress: true };
+            var pendingOther = Signals.PendingAsyncCount - Signals.PendingEventOptionCount;
+            var eventOptionExecuting = Signals.PendingEventOptionCount > 0
+                && !combatLive && !standInParked;
+            var busy = pendingOther > 0
+                || eventOptionExecuting
                 || rm?.ActionExecutor?.CurrentlyRunningAction is not null
                 || EngineQueues.All(rm).Any(queue => queue.depth > 0);
             var hasDecision = legal.Any(verb => verb is not ("abandon" or "potion-discard"));
             return new FollowProbe(
                 rev, Signals.TickCount, runId,
                 node["phase"]?.GetValue<string>() ?? "unknown", RunMode.IsHeadless,
-                busy, hasDecision, stateKey, node);
+                busy, eventOptionExecuting, hasDecision, stateKey, node);
         }
 
         public static string? CandidateOutcome(
             FollowProbe probe, string phaseBefore, long acceptedRev)
         {
             if (!probe.Busy) return "settled";
+            // A mid-flight option effect can flip the phase back to event
+            // before its continuation finishes (and before a late fault
+            // logs) — the page on screen is transient, not a decision to
+            // report. Wait for the task to park or complete.
+            if (probe.OptionExecuting) return null;
             if (!probe.HasDecision) return null;
             if (probe.Phase != phaseBefore || IsNestedDecision(probe.Phase))
                 return "next_decision";

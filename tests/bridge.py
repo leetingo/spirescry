@@ -153,8 +153,12 @@ def kill_current_combat(*, on_obs=None):
                        if card["target"] == "anyenemy"
                        and card["cost"] <= energy), None)
         if attack:
-            run("play", attack["model"], "--target", str(alive[0]["id"]),
-                allow_fail=True)
+            # play wants the exact selector: an upgraded copy is
+            # "MODEL+", and the bare model no longer matches once an
+            # accumulated relic upgrades the deck (the 84/85 bestiary
+            # failure — thirty silent bad_index rejects in a row).
+            run("play", attack.get("selector") or attack["model"],
+                "--target", str(alive[0]["id"]), allow_fail=True)
             time.sleep(1)
         else:
             run("end-turn", allow_fail=True)

@@ -219,6 +219,10 @@ public static class HeadlessState
         HeadlessBundle.CancelIfActive();
         HeadlessCrystal.Clear();
         HeadlessTreasure.Clear();
+        // A dead run's option task may be parked on a combat or dialog
+        // that will never resume — one zombie would hold the follow
+        // probe's busy flag for every later run.
+        Signals.DropEventOptionTracking();
     }
 }
 

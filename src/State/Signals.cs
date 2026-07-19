@@ -21,6 +21,12 @@ public static class Signals
     private static readonly object Gate = new();
     private static readonly List<(long rev, string type)> Log = new();
     private static readonly List<(long rev, string type)> Errors = new();
+    // Event option tasks legitimately outlive one follow window: they
+    // await embedded combats and deferred pickers. Counted separately so
+    // the follow probe can tell "an option effect is still executing"
+    // (block the quiet path) from "the option is waiting on the agent or
+    // a whole combat" (don't).
+    private static readonly HashSet<Task> PendingEventOptions = new();
     private static readonly List<TaskCompletionSource<bool>> Waiters = new();
     private static readonly List<TaskCompletionSource<bool>> TickWaiters = new();
     private static readonly HashSet<Task> PendingAsync = new();
@@ -54,15 +60,44 @@ public static class Signals
 
     public static int PendingAsyncCount { get { lock (Gate) return PendingAsync.Count; } }
 
+    public static int PendingEventOptionCount
+    {
+        get { lock (Gate) return PendingEventOptions.Count; }
+    }
+
+    // An abandoned run's option task can be parked on a combat or dialog
+    // that no longer exists — it will never complete, and one zombie
+    // would hold the follow probe's busy flag for every later run. Drop
+    // the tracking (both sets — the general count derives pendingOther by
+    // subtraction); the orphaned continuations remove nothing and their
+    // completion Bump is harmless.
+    public static void DropEventOptionTracking()
+    {
+        lock (Gate)
+        {
+            foreach (var task in PendingEventOptions) PendingAsync.Remove(task);
+            PendingEventOptions.Clear();
+        }
+    }
+
     // Dispatcher fire-and-forget tasks are part of action settlement too.
     // Tracking them closes the gap where GUI work had left the pump job but
     // had not yet enqueued an engine action or changed phase.
     public static void TrackAsync(Task task, string label)
     {
-        lock (Gate) PendingAsync.Add(task);
+        var isEventOption = label == "event-option";
+        lock (Gate)
+        {
+            PendingAsync.Add(task);
+            if (isEventOption) PendingEventOptions.Add(task);
+        }
         _ = task.ContinueWith(completed =>
         {
-            lock (Gate) PendingAsync.Remove(task);
+            lock (Gate)
+            {
+                PendingAsync.Remove(task);
+                if (isEventOption) PendingEventOptions.Remove(task);
+            }
             Bump(AsyncCompletionEvent(completed, label));
         }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously,
             TaskScheduler.Default);

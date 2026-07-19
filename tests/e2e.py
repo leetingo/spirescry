@@ -202,9 +202,19 @@ def b1():
     assert "end-turn" in caps["verbs"], caps
     assert "relic" in caps["cheats"], caps
     assert d["protocolVersion"] == 2, d["protocolVersion"]
+    # The identity contract: buildHash is <gitref>[-dirty].<12-hex content
+    # hash> and must match what this checkout stamps right now. A host
+    # reporting "unknown" was not built through build.sh — reject it, or
+    # the suite validates liveness against a host it cannot identify.
     build_hash = d["buildHash"]
-    assert (build_hash == "unknown" or
-            re.fullmatch(r"[0-9a-f]{7,12}(?:-dirty)?", build_hash)), build_hash
+    assert re.fullmatch(r"[0-9a-f]{7,12}(?:-dirty)?\.[0-9a-f]{12}", build_hash), \
+        (f"buildHash '{build_hash}' is not a content stamp — "
+         f"build the host via ./build.sh (headless-setup) so identity is verifiable")
+    expected = subprocess.run(
+        [os.path.join(REPO, "build.sh"), "stamp"],
+        capture_output=True, text=True, timeout=60).stdout.strip()
+    assert build_hash == expected, \
+        f"host build '{build_hash}' != checkout stamp '{expected}' — stale host"
 
 
 @case("B2 boot log: patches landed, models clean", boot_only=True)
@@ -544,6 +554,17 @@ def p13():
         if v["action"] == "cheat" and v.get("args", {}).get("name") == "engine-error"
     )
     assert any("forced engine log error" in e for e in entry.get("errors", [])), entry
+
+    # Delayed variant: the error line lands from a tracked continuation
+    # ~250ms after acceptance. Follow must stay busy across the delay and
+    # carry the fault in THIS response — a first-quiet-probe return would
+    # report errors: [] and leak the fault past the runlog entry too.
+    delayed = run("cheat", "engine-error-delayed", "--follow", "5000",
+                  allow_errors=True)
+    assert any(
+        error.startswith("engine_error:") and "delayed engine log error" in error
+        for error in delayed["errors"]
+    ), delayed["errors"]
     to_menu()
 
 
@@ -1567,20 +1588,40 @@ def e2():
     picking = run("option", str(combine["idx"]), "--follow", "5000")
     assert picking["obs"]["phase"] == "card_select", picking["obs"]["phase"]
     run("pick-card", "0", "--follow", "5000")
-    run("pick-card", "1", "--follow", "5000")  # max picks auto-resolve
+    done = run("pick-card", "1", "--follow", "5000")  # max picks auto-resolve
 
-    # The combine pauses on an engine-side Task.Delay between removing
-    # the Defends and granting the reward — wait for the grant, don't
-    # race it.
-    granted = bridge.wait_until(
-        lambda snapshot: any(
-            c.get("model") == "ULTIMATE_DEFEND"
-            for c in (snapshot.get("player") or {}).get("deck") or []),
-        timeout=10,
-        description="ultimate defend granted")
-    models = [c["model"] for c in granted["player"]["deck"]]
+    # The option task is tracked through settlement: the engine-side
+    # Task.Delay between removing the Defends and granting the reward
+    # counts as Busy, so THIS response must already carry the completed
+    # effect — no post-hoc polling. (Regression for delayed engine work
+    # escaping the follow window; the follow obs deck is the compact
+    # counts-by-specifier dict.)
+    deck_after = done["obs"]["player"]["deck"]
+    assert any(key.startswith("ULTIMATE_DEFEND") for key in deck_after), deck_after
+
+    models = [c["model"] for c in obs()["player"]["deck"]]
     assert models.count("DEFEND_IRONCLAD") == models0.count("DEFEND_IRONCLAD") - 2, \
         (models0, models)
+    to_menu()
+
+
+@case("E3 trial double-down genuinely abandons the run")
+def e3():
+    # The confirm popup can't exist headless, so the host reroutes
+    # DoubleDown onto the popup's accepted action (the screen-free
+    # abandon teardown). The generic sweep can't tell that from an inert
+    # swallow — this asserts the real outcome: run over, cleanly.
+    to_map(seed="CITRIALDD")
+    run("cheat", "event", "TRIAL")
+    bridge.wait_phase("event")
+    run("option", "1", "--follow", "5000")  # Reject → the double-down page
+    down = bridge.wait_phase("event")
+    idx = next(o["idx"] for o in down["options"]
+               if "double" in (o.get("title") or "").lower())
+    ended = run("option", str(idx), "--follow", "8000", allow_errors=True)
+    assert ended["errors"] == [], ended["errors"]
+    assert ended["obs"]["phase"] == "game_over", ended["obs"]["phase"]
+    assert ended["obs"]["outcome"] == "abandoned", ended["obs"]
     to_menu()
 
 
