@@ -132,9 +132,24 @@ def followed_http_obs(status, result, description):
         f"{description}: {status} {result}"
     assert result.get("settled") is True, \
         f"{description} did not settle: {result.get('outcome')}"
+    assert result.get("outcome") in ("settled", "next_decision"), \
+        f"{description} faulted: {result.get('outcome')}"
+    assert result.get("errors") == [], \
+        f"{description} reported engine errors: {result.get('errors')}"
     snapshot = result.get("obs")
     assert isinstance(snapshot, dict), f"{description} returned no observation"
     return snapshot
+
+
+def await_semantic_snapshot(settled, predicate, description, timeout=10):
+    """Read past settlement when presentation data is not revision-bearing."""
+    if predicate(settled):
+        return settled
+    return bridge.wait_until(
+        predicate,
+        timeout=timeout,
+        description=description,
+    )
 
 
 def host_log():
@@ -1282,6 +1297,13 @@ def k1():
 def k2():
     full_obs = to_map(seed="CIRELICSTATE")
     full_obs = bridge.follow("cheat", "relic", "HAPPY_FLOWER")
+    full_obs = await_semantic_snapshot(
+        full_obs,
+        lambda snapshot: any(
+            relic.get("model") == "HAPPY_FLOWER" and relic.get("description")
+            for relic in (snapshot.get("player") or {}).get("relicStates", [])),
+        "HAPPY_FLOWER description hydration",
+    )
     full = full_obs["player"]
     assert "HAPPY_FLOWER" in full["relics"], \
         f"relic IDs changed shape: {full['relics']}"
@@ -1311,6 +1333,11 @@ def k2():
 def k3():
     d = to_map(seed="CISPOILSMAP")
     d = bridge.follow("cheat", "card", "SPOILS_MAP")
+    d = await_semantic_snapshot(
+        d,
+        lambda snapshot: bool(snapshot.get("graph")),
+        "Spoils Map graph hydration",
+    )
     assert "marked" not in d, d
     assert all("markers" not in point for point in d["graph"]), d["graph"]
     assert "marked" not in run("obs", "--compact")
