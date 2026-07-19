@@ -2,6 +2,7 @@
 """Public B1 contract for stamped host identity."""
 
 import os
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -32,6 +33,17 @@ def health(build_hash):
 
 
 class BuildIdentityTests(unittest.TestCase):
+    @staticmethod
+    def stamp(repo):
+        return subprocess.run(
+            [os.path.join(repo, "build.sh"), "stamp"],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=True,
+        ).stdout.strip()
+
     def assert_b1_accepts(self, build_hash):
         completed = subprocess.CompletedProcess(
             ["build.sh", "stamp"], 0, stdout=build_hash + "\n", stderr="")
@@ -61,6 +73,41 @@ class BuildIdentityTests(unittest.TestCase):
             "94c7e57.a1b2c3d4e5f6",
             checkout_stamp="94c7e57.0123456789ab",
         )
+
+    def test_generator_content_changes_stamp_while_checkout_stays_dirty(self):
+        source_repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with tempfile.TemporaryDirectory(prefix="spirescry-stamp-input-") as root:
+            checkout = os.path.join(root, "repo")
+            subprocess.run(
+                ["git", "clone", "--quiet", "--no-hardlinks", source_repo, checkout],
+                check=True,
+                timeout=60,
+            )
+            # Exercise the working build.sh during the TDD cycle; after commit
+            # this is identical to the clone's tracked copy.
+            shutil.copy2(
+                os.path.join(source_repo, "build.sh"),
+                os.path.join(checkout, "build.sh"),
+            )
+            generator = os.path.join(checkout, "cli", "protocol_generator.rs")
+            with open(generator, encoding="utf-8") as handle:
+                original = handle.read()
+
+            baseline = self.stamp(checkout)
+            with open(generator, "w", encoding="utf-8") as handle:
+                handle.write(original + "\n// stamp variant one\n")
+            first_dirty = self.stamp(checkout)
+            with open(generator, "w", encoding="utf-8") as handle:
+                handle.write(original + "\n// stamp variant two\n")
+            second_dirty = self.stamp(checkout)
+            with open(generator, "w", encoding="utf-8") as handle:
+                handle.write(original)
+            restored = self.stamp(checkout)
+
+        self.assertNotEqual(first_dirty, second_dirty)
+        self.assertIn("-dirty.", first_dirty)
+        self.assertIn("-dirty.", second_dirty)
+        self.assertEqual(baseline, restored)
 
     def test_self_boot_uses_checkout_cli_instead_of_stale_path_binary(self):
         with tempfile.TemporaryDirectory(prefix="spirescry-cli-selection-") as repo:

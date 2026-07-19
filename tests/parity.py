@@ -43,6 +43,13 @@ def record(d):
 run = bridge.run
 
 
+def follow(*args, timeout_ms=10000):
+    """Run one parity action to settlement and record its observation once."""
+    settled = bridge.follow(*args, timeout_ms=timeout_ms)
+    record(settled)
+    return settled
+
+
 def obs():
     d = bridge.obs()
     record(d)
@@ -57,18 +64,14 @@ def wait_phase(*want, timeout=20):
     return bridge.wait_phase(*want, timeout=timeout, on_obs=record)
 
 
-def confirm_if_selecting(after_rev):
+def confirm_if_selecting(settled_pick):
     # GUI pickers wait for an explicit confirm; the host picker resolves
     # itself once max cards are picked. Both are legal under the protocol:
-    # after pick-card, re-read and confirm only if still selecting.
-    d = bridge.wait_after(
-        after_rev, description="card pick to apply", on_obs=record)
-    if d.get("phase") == bridge.PHASE.CARD_SELECT:
-        before_confirm = d["rev"]
-        run("confirm")
-        bridge.wait_after(
-            before_confirm,
-            description="card selection confirm to apply", on_obs=record)
+    # consume pick-card's settled observation and confirm only if it still
+    # exposes the picker.
+    if settled_pick.get("phase") == bridge.PHASE.CARD_SELECT:
+        return follow("confirm")
+    return settled_pick
 
 
 def step(msg):
@@ -95,22 +98,14 @@ def exercise_bundle_pilot():
     wait_phase(bridge.PHASE.BUNDLE_SELECT)
     bundle = obs()
     assert bundle.get("bundles") and bundle["bundles"][0].get("cards"), bundle
-    before_pick = bundle["rev"]
-    run("pick-card", "0")
+    d = follow("pick-card", "0")
 
     # GUI previews the selected bundle and completes on confirm; the
     # headless stand-in owns completion directly and leaves this phase on
     # pick. Both paths are the same decision-surface protocol.
-    d = bridge.wait_after(
-        before_pick, description="bundle pick to apply", on_obs=record)
     if d.get("phase") == bridge.PHASE.BUNDLE_SELECT:
-        before_confirm = d["rev"]
-        run("confirm")
-        bridge.wait_phase(
-            bridge.PHASE.EVENT, bridge.PHASE.MAP, on_obs=record,
-            after_rev=before_confirm)
-    else:
-        assert d.get("phase") in (bridge.PHASE.EVENT, bridge.PHASE.MAP), d
+        d = follow("confirm")
+    assert d.get("phase") in (bridge.PHASE.EVENT, bridge.PHASE.MAP), d
     run("abandon")
     wait_phase(bridge.PHASE.MAIN_MENU)
 
@@ -157,29 +152,18 @@ def drive(seed=None):
     wait_phase(bridge.PHASE.REWARDS)
 
     step("rewards: claim all (re-read between picks; GUI reflows idx)")
+    d = obs()
     for _ in range(8):
-        d = obs()
         if d["phase"] == bridge.PHASE.CARD_REWARD:
             print("    card offer:", [c["model"] for c in d["cards"]])
-            pre = d["rev"]
-            run("pick-card", "0")
-            bridge.wait_after(
-                pre, description="reward card pick to apply",
-                on_obs=record)
+            d = follow("pick-card", "0")
             continue
         rewards = d.get(bridge.PHASE.REWARDS, [])
         if not rewards:
             break
-        pre = d["rev"]
-        run("pick-reward", str(rewards[0]["idx"]))
-        # In-phase mutations must advance the revision so --since waiters
-        # wake — gold/potion claims change no phase and ride no engine
-        # event, so the accepted step itself has to bump.
-        d = bridge.wait_after(
-            pre, description="reward tile claim to apply",
-            on_obs=record)
-        assert d["rev"] > pre, f"rev stuck at {pre} after pick-reward"
-    wait_phase(bridge.PHASE.REWARDS)
+        d = follow("pick-reward", str(rewards[0]["idx"]))
+    if d.get("phase") != bridge.PHASE.REWARDS:
+        d = wait_phase(bridge.PHASE.REWARDS)
     run("proceed")
     wait_phase(bridge.PHASE.MAP)
 
@@ -198,10 +182,9 @@ def drive(seed=None):
     assert isinstance(preview["upgradedPreview"], str), \
         f"upgradedPreview wire type changed: {preview['upgradedPreview']!r}"
     assert "upgradedPlayCost" in preview and "upgradedStarCost" in preview, preview
-    d = obs()
-    run("pick-card", "1")
-    confirm_if_selecting(d["rev"])
-    wait_phase(bridge.PHASE.REST_SITE)
+    d = confirm_if_selecting(follow("pick-card", "1"))
+    if d.get("phase") != bridge.PHASE.REST_SITE:
+        d = wait_phase(bridge.PHASE.REST_SITE)
     run("proceed")
     wait_phase(bridge.PHASE.MAP)
 
@@ -210,7 +193,7 @@ def drive(seed=None):
     if shop is None:
         print("    no shop on this map — skipped")
     else:
-        run("cheat", "gold", "1000")
+        follow("cheat", "gold", "1000")
         run("cheat", "goto", str(shop["col"]), str(shop["row"]))
         wait_phase(bridge.PHASE.SHOP)
         inventory = obs()
@@ -225,28 +208,28 @@ def drive(seed=None):
             assert removal["cost"] == removal["price"], removal
         run("buy", "card_removal", "--idx", "0")
         wait_phase(bridge.PHASE.CARD_SELECT)
-        d = obs()
-        run("pick-card", "0")
-        confirm_if_selecting(d["rev"])
-        wait_phase(bridge.PHASE.SHOP)
-        gold = obs()["gold"]
+        d = confirm_if_selecting(follow("pick-card", "0"))
+        if d.get("phase") != bridge.PHASE.SHOP:
+            d = wait_phase(bridge.PHASE.SHOP)
+        gold = d["gold"]
         assert gold == 925, f"expected 925 gold after removal, got {gold}"
 
         step("shop: potions (potion-use/potion-discard checks)")
-        for_sale = obs().get("potions", [])
-        bought = sum(
-            1 for idx in range(min(2, len(for_sale)))
-            if "_err" not in run("buy", "potion", "--idx", str(idx), allow_fail=True)
-        )
+        d = obs()
+        for_sale = d.get("potions", [])
+        bought = 0
+        for potion in for_sale[:2]:
+            d = follow("buy", "potion", "--idx", str(potion["idx"]))
+            bought += 1
         if bought == 0:
             print("    no potions in the shop this run — skipped")
         else:
             print(f"    bought {bought} potion(s)")
             # The shop's own stock is top-level `potions`; the player's
             # belt (with slot numbers) rides under `player`.
-            slot = obs()["player"]["potions"][0]["slot"]
-            run("potion-discard", str(slot))
-            assert not any(p["slot"] == slot for p in obs()["player"]["potions"]), \
+            slot = d["player"]["potions"][0]["slot"]
+            d = follow("potion-discard", str(slot))
+            assert not any(p["slot"] == slot for p in d["player"]["potions"]), \
                 "potion-discard did not clear the slot"
 
         run("leave")
@@ -261,18 +244,17 @@ def drive(seed=None):
         wait_phase(bridge.PHASE.TREASURE)
         d = obs()
         if not d["chestOpened"]:
-            run("pick-relic", "0")
-            d = obs()
+            d = follow("pick-relic", "0")
         print("    relics:", [r["model"] for r in d["relics"]])
         if d["relics"]:
-            run("pick-relic", "0")
+            d = follow("pick-relic", "0")
         run("proceed")
         wait_phase(bridge.PHASE.MAP)
 
     step("boss → act transition")
     d = obs()
     boss = next(p for p in d["graph"] if p["type"] == "boss")
-    run("cheat", "goto", str(boss["col"]), str(boss["row"]), allow_fail=True)
+    run("cheat", "goto", str(boss["col"]), str(boss["row"]))
     wait_phase(bridge.PHASE.COMBAT, timeout=30)
     bridge.kill_current_combat(on_obs=record)
     d = wait_phase(bridge.PHASE.REWARDS)
@@ -295,20 +277,8 @@ def drive(seed=None):
         if d["phase"] == bridge.PHASE.GAME_OVER:
             break
         if d["phase"] == bridge.PHASE.COMBAT and d.get("side") == "player":
-            before_hp = d["rev"]
-            run("cheat", "hp", "1")
-            d = bridge.wait_after(
-                before_hp, description="lethal hp cheat to apply", on_obs=record)
-            before_turn = d["rev"]
-            run("end-turn")
-            d = bridge.wait_until(
-                lambda snapshot: snapshot.get("phase") == bridge.PHASE.GAME_OVER
-                or (snapshot.get("phase") == bridge.PHASE.COMBAT
-                    and snapshot.get("side") == "player"),
-                description="defeat turn to resolve",
-                on_obs=record,
-                after_rev=before_turn,
-            )
+            d = follow("cheat", "hp", "1")
+            d = follow("end-turn", timeout_ms=30000)
         else:
             d = bridge.wait_until(
                 lambda snapshot: snapshot.get("phase") == bridge.PHASE.GAME_OVER
