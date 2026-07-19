@@ -313,15 +313,16 @@ fn main() -> ExitCode {
     };
     match result {
         Ok(v) => {
+            let settlement_outcome = v.get("outcome").and_then(SettlementOutcome::from_value);
             // Engine faults logged between acceptance and settlement ride
-            // the response's "errors" array; an outcome of "settled" alone
-            // must not read as proof the effect executed cleanly.
+            // the response's "errors" array and the typed fault outcome.
             if let Some(errors) = v.get("errors").and_then(Value::as_array) {
                 if !errors.is_empty() {
                     eprintln!(
                         "spirescry: host logged {} engine error(s) during this action — \
-                         the outcome is suspect; inspect the 'errors' field before the next verb",
-                        errors.len()
+                         outcome={:?}; inspect the 'errors' field before the next verb",
+                        errors.len(),
+                        settlement_outcome,
                     );
                 }
             }
@@ -464,14 +465,15 @@ fn replay_value(client: &impl ReplayTransport, log: &Value) -> CliResult<Value> 
         return Err(format!("runlog crosses RunIds at verb {}", idx + 1).into());
     }
     if let Some((idx, _)) = verbs.iter().enumerate().find(|(_, verb)| {
-        !matches!(
-            verb.get("outcome").and_then(Value::as_str),
-            Some("settled" | "next_decision")
-        ) || verb
-            .get("fingerprint")
-            .and_then(Value::as_str)
-            .filter(|value| !value.is_empty())
-            .is_none()
+        !verb
+            .get("outcome")
+            .and_then(SettlementOutcome::from_value)
+            .is_some_and(SettlementOutcome::is_replayable)
+            || verb
+                .get("fingerprint")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .is_none()
     }) {
         return Err(format!(
             "runlog verb {} has no verifiable settled fingerprint",
@@ -562,9 +564,27 @@ fn replay_value(client: &impl ReplayTransport, log: &Value) -> CliResult<Value> 
                 "follow": 10_000,
             }),
         )?;
-        if response.get("settled").and_then(Value::as_bool) != Some(true) {
+        let outcome = response
+            .get("outcome")
+            .and_then(SettlementOutcome::from_value)
+            .ok_or_else(|| {
+                format!(
+                    "verb {} ({}) follow response has no valid outcome",
+                    idx + 1,
+                    action,
+                )
+            })?;
+        if !outcome.reached_boundary() {
             return Err(format!(
                 "divergence at verb {} ({}): reconstruction timed out",
+                idx + 1,
+                action,
+            )
+            .into());
+        }
+        if !outcome.is_replayable() {
+            return Err(format!(
+                "divergence at verb {} ({}): reconstruction faulted",
                 idx + 1,
                 action,
             )
@@ -1435,6 +1455,22 @@ mod tests {
         assert_eq!(artifact["protocolVersion"], PROTOCOL_VERSION);
         assert_eq!(artifact["rejectionCodes"], json!(REJECTION_CODES));
         assert_eq!(artifact["phases"], json!(PHASES));
+        let outcomes = artifact["settlementOutcomes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(SettlementOutcome::from_value)
+            .collect::<Option<Vec<_>>>()
+            .unwrap();
+        assert_eq!(
+            outcomes,
+            vec![
+                SettlementOutcome::Settled,
+                SettlementOutcome::NextDecision,
+                SettlementOutcome::Fault,
+                SettlementOutcome::Timeout,
+            ]
+        );
         assert_eq!(artifact["faultEventTokens"], Value::Object(faults));
         assert_eq!(artifact["cheatArgumentShapes"], json!(cheats));
     }

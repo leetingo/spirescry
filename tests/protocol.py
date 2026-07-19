@@ -15,6 +15,7 @@ with open(ARTIFACT, encoding="utf-8") as artifact_file:
 PROTOCOL_VERSION = DOCUMENT["protocolVersion"]
 REJECTION_CODES = tuple(DOCUMENT["rejectionCodes"])
 PHASES = tuple(DOCUMENT["phases"])
+SETTLEMENT_OUTCOMES = tuple(DOCUMENT["settlementOutcomes"])
 FAULT_EVENT_TOKENS = DOCUMENT["faultEventTokens"]
 CHEAT_ARGUMENT_SHAPES = tuple(DOCUMENT["cheatArgumentShapes"])
 
@@ -31,6 +32,7 @@ def _namespace(values):
 
 
 PHASE = _namespace(PHASES)
+SETTLEMENT_OUTCOME = _namespace(SETTLEMENT_OUTCOMES)
 REJECTION = _namespace(REJECTION_CODES)
 FAULT_EVENT = _namespace(FAULT_EVENT_TOKENS.values())
 
@@ -67,6 +69,11 @@ def check_documentation():
         r"`([^`]+)`", _marked("README.md", "phases")))
     assert readme_phases == PHASES, \
         f"README phases drift: {readme_phases} != {PHASES}"
+
+    readme_outcomes = tuple(re.findall(
+        r"`([^`]+)`", _marked("README.md", "settlement-outcomes")))
+    assert readme_outcomes == SETTLEMENT_OUTCOMES, \
+        f"README settlement outcomes drift: {readme_outcomes} != {SETTLEMENT_OUTCOMES}"
 
     readme_rejections = _table_first_column(
         _marked("README.md", "rejection-codes"))

@@ -6,6 +6,17 @@ namespace Spirescry.State
         CardReward, RelicReward, CardSelect, HandSelect, BundleSelect,
         CrystalSphere, GameOver, Overlay, Unknown,
     }
+
+    // The typed result of following one accepted bridge verb to a boundary.
+    // Wire spellings live in ProtocolVocabulary.SettlementOutcomes below so
+    // every generated consumer derives the same four-value vocabulary.
+    public enum SettlementOutcome
+    {
+        Settled,
+        NextDecision,
+        Fault,
+        Timeout,
+    }
 }
 
 namespace Spirescry
@@ -45,6 +56,7 @@ public static class ProtocolVocabulary
         int ProtocolVersion,
         IReadOnlyList<string> RejectionCodes,
         IReadOnlyList<string> Phases,
+        IReadOnlyList<string> SettlementOutcomes,
         FaultEventTokens FaultEventTokens,
         IReadOnlyList<CheatArgumentShape> CheatArgumentShapes);
 
@@ -62,6 +74,7 @@ public static class ProtocolVocabulary
             ProtocolVersion,
             Rejections.All,
             Phases.All,
+            SettlementOutcomes.All,
             new FaultEventTokens(
                 FaultEvents.EngineError,
                 FaultEvents.AsyncFault,
@@ -143,6 +156,26 @@ public static class ProtocolVocabulary
             Phase.GameOver => GameOver,
             Phase.Overlay => Overlay,
             _ => Unknown,
+        };
+    }
+
+    public static class SettlementOutcomes
+    {
+        public const string Settled = "settled";
+        public const string NextDecision = "next_decision";
+        public const string Fault = "fault";
+        public const string Timeout = "timeout";
+
+        public static IReadOnlyList<string> All { get; } = Array.AsReadOnly(
+            [Settled, NextDecision, Fault, Timeout]);
+
+        public static string Name(SettlementOutcome outcome) => outcome switch
+        {
+            SettlementOutcome.Settled => Settled,
+            SettlementOutcome.NextDecision => NextDecision,
+            SettlementOutcome.Fault => Fault,
+            SettlementOutcome.Timeout => Timeout,
+            _ => throw new ArgumentOutOfRangeException(nameof(outcome), outcome, null),
         };
     }
 

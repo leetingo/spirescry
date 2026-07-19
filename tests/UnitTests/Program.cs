@@ -48,6 +48,8 @@ internal static class Tests
             artifact["rejectionCodes"]!.AsArray().Count);
         Equal(ProtocolVocabulary.Phases.All.Count,
             artifact["phases"]!.AsArray().Count);
+        Equal(ProtocolVocabulary.SettlementOutcomes.All.Count,
+            artifact["settlementOutcomes"]!.AsArray().Count);
         Equal(ProtocolVocabulary.FaultEvents.All.Count,
             artifact["faultEventTokens"]!.AsObject().Count);
         Equal(ProtocolVocabulary.Cheats.All.Count,
@@ -62,6 +64,163 @@ internal static class Tests
         True(mapped.SequenceEqual(ProtocolVocabulary.Phases.All));
         Equal(ProtocolVocabulary.Phases.Unknown,
             ProtocolVocabulary.Phases.Name((Phase)999));
+    }
+
+    public static void ProtocolVocabularyMapsEverySettlementOutcome()
+    {
+        var mapped = Enum.GetValues<SettlementOutcome>()
+            .Select(ProtocolVocabulary.SettlementOutcomes.Name).ToArray();
+
+        True(mapped.SequenceEqual(ProtocolVocabulary.SettlementOutcomes.All));
+        Equal("settled", SettlementOutcome.Settled.WireName());
+        Equal("next_decision", SettlementOutcome.NextDecision.WireName());
+        Equal("fault", SettlementOutcome.Fault.WireName());
+        Equal("timeout", SettlementOutcome.Timeout.WireName());
+    }
+
+    public static void SettlementReturnsImmediateQuietBoundary()
+    {
+        var clock = new FakeSettlementClock();
+        var ticks = new FakeSettlementTicks(clock,
+            Probe(revision: 4, tick: 2, busy: false));
+        var module = new SettlementModule(ticks, clock);
+
+        var result = module.Follow(Request(timeoutMs: 100)).GetAwaiter().GetResult();
+
+        Equal(SettlementOutcome.Settled, result.Outcome);
+        Equal(1, ticks.Captures);
+        Equal(0, ticks.ChangeWaits + ticks.TickWaits);
+    }
+
+    public static void SettlementBusyAccountingIncludesEveryWorkChannel()
+    {
+        var activities = new[]
+        {
+            new SettlementActivity(
+                PendingAsyncCount: 1, ExecutorRunning: false, QueuedActionCount: 0),
+            new SettlementActivity(
+                PendingAsyncCount: 0, ExecutorRunning: true, QueuedActionCount: 0),
+            new SettlementActivity(
+                PendingAsyncCount: 0, ExecutorRunning: false, QueuedActionCount: 1),
+        };
+
+        foreach (var activity in activities)
+        {
+            var clock = new FakeSettlementClock();
+            var ticks = new FakeSettlementTicks(clock, 5,
+                Probe(activity: activity, hasDecision: false));
+            var module = new SettlementModule(ticks, clock);
+
+            var result = module.Follow(Request(timeoutMs: 5))
+                .GetAwaiter().GetResult();
+
+            Equal(SettlementOutcome.Timeout, result.Outcome);
+            Equal(1, ticks.ChangeWaits);
+        }
+    }
+
+    public static void SettlementPreservesSamePhaseEventDecisionSemantics()
+    {
+        var clock = new FakeSettlementClock();
+        var ticks = new FakeSettlementTicks(clock,
+            Probe(revision: 11, tick: 2, phase: "event",
+                busy: true, hasDecision: true));
+        var module = new SettlementModule(ticks, clock);
+
+        var result = module.Follow(Request(
+            phaseBefore: "event", acceptedRevision: 10, timeoutMs: 100))
+            .GetAwaiter().GetResult();
+
+        Equal(SettlementOutcome.NextDecision, result.Outcome);
+    }
+
+    public static void SettlementRequiresThreeStableDistinctFramesWhenRequested()
+    {
+        var clock = new FakeSettlementClock();
+        var ticks = new FakeSettlementTicks(clock, 1,
+            Probe(revision: 4, tick: 1, busy: false,
+                requiresFrameStability: true, stateKey: "same"),
+            Probe(revision: 4, tick: 2, busy: false,
+                requiresFrameStability: true, stateKey: "same"),
+            Probe(revision: 4, tick: 3, busy: false,
+                requiresFrameStability: true, stateKey: "same"));
+        var module = new SettlementModule(ticks, clock);
+
+        var result = module.Follow(Request(timeoutMs: 100)).GetAwaiter().GetResult();
+
+        Equal(SettlementOutcome.Settled, result.Outcome);
+        Equal(3, ticks.Captures);
+        Equal(2, ticks.TickWaits);
+        Equal(0, ticks.ChangeWaits);
+    }
+
+    public static void SettlementTimesOutThroughInjectedClock()
+    {
+        var clock = new FakeSettlementClock();
+        var ticks = new FakeSettlementTicks(clock, 5,
+            Probe(revision: 4, tick: 1, busy: true, hasDecision: false));
+        var module = new SettlementModule(ticks, clock);
+
+        var result = module.Follow(Request(timeoutMs: 5)).GetAwaiter().GetResult();
+
+        Equal(SettlementOutcome.Timeout, result.Outcome);
+        Equal(1, ticks.ChangeWaits);
+    }
+
+    public static void SettlementClassifiesObservedErrorAsFaultWithoutFrameDelay()
+    {
+        var clock = new FakeSettlementClock();
+        var ticks = new FakeSettlementTicks(clock,
+            Probe(revision: 5, tick: 1, busy: true,
+                requiresFrameStability: true,
+                errors: ["async_fault:test:TestException:kaboom"]));
+        var module = new SettlementModule(ticks, clock);
+
+        var result = module.Follow(Request(timeoutMs: 100)).GetAwaiter().GetResult();
+
+        Equal(SettlementOutcome.Fault, result.Outcome);
+        True(result.Outcome.ReachedBoundary());
+        False(result.Outcome.IsReplayable());
+        Equal(0, ticks.TickWaits + ticks.ChangeWaits);
+    }
+
+    public static void SettlementExecutorWatchdogUsesInjectedClockAndFiresOnce()
+    {
+        var clock = new FakeSettlementClock();
+        var module = new SettlementModule(
+            new FakeSettlementTicks(clock, Probe()), clock);
+        var action = new object();
+        var probe = Watchdog(action, "PlayCardAction");
+
+        Equal(0, module.ObserveWatchdogs(probe).Events.Count);
+        clock.Advance(SettlementModule.WedgeTimeoutMs);
+        Equal(0, module.ObserveWatchdogs(probe).Events.Count);
+        clock.Advance(1);
+        var wedged = module.ObserveWatchdogs(probe);
+        Equal("wedge:PlayCardAction", string.Join(',', wedged.Events));
+        Equal(SettlementModule.WedgeTimeoutMs + 1L, wedged.ExecutorStuckMs);
+        clock.Advance(1000);
+        Equal(0, module.ObserveWatchdogs(probe).Events.Count);
+    }
+
+    public static void SettlementDeadBoardWatchdogUsesInjectedClockAndFiresOnce()
+    {
+        var clock = new FakeSettlementClock();
+        var module = new SettlementModule(
+            new FakeSettlementTicks(clock, Probe()), clock);
+        var deadBoard = Watchdog(
+            action: null,
+            actionName: null,
+            combatInProgress: true,
+            queuesEmpty: true,
+            allEnemiesDead: true);
+
+        Equal(0, module.ObserveWatchdogs(deadBoard).Events.Count);
+        clock.Advance(SettlementModule.WedgeTimeoutMs + 1);
+        Equal("wedge:DeadBoard", string.Join(',',
+            module.ObserveWatchdogs(deadBoard).Events));
+        clock.Advance(1000);
+        Equal(0, module.ObserveWatchdogs(deadBoard).Events.Count);
     }
 
     public static void HealthCapabilitiesAdvertiseCheatArgumentShapes()
@@ -193,60 +352,57 @@ internal static class Tests
 
     public static void MissingQueuePopIsSettledOnlyAfterCombatTeardown()
     {
+        var clock = new FakeSettlementClock();
+        var settlement = new SettlementModule(
+            new FakeSettlementTicks(clock, Probe()), clock);
         var pop = new InvalidOperationException(
             "Tried to pop action EndPlayerTurnAction, but we didn't find it in any queue!");
 
-        Equal(InlineFaultKind.VictorySettled, ResolutionGuards.ClassifyInlineFault(
+        Equal(InlineFaultKind.VictorySettled, settlement.ClassifyInlineFault(
             pop, "EndPlayerTurnAction", combatInProgress: false, revisionChanged: true));
-        Equal(InlineFaultKind.Partial, ResolutionGuards.ClassifyInlineFault(
+        Equal(InlineFaultKind.Partial, settlement.ClassifyInlineFault(
             pop, "EndPlayerTurnAction", combatInProgress: true, revisionChanged: true));
-        Equal(InlineFaultKind.Partial, ResolutionGuards.ClassifyInlineFault(
+        Equal(InlineFaultKind.Partial, settlement.ClassifyInlineFault(
             pop, "PlayCardAction", combatInProgress: false, revisionChanged: true));
-        Equal(InlineFaultKind.Failed, ResolutionGuards.ClassifyInlineFault(
+        Equal(InlineFaultKind.Failed, settlement.ClassifyInlineFault(
             new InvalidOperationException("some other queue failure"),
             "EndPlayerTurnAction", combatInProgress: false, revisionChanged: false));
 
-        Equal(InlineFaultKind.VictorySettled, ResolutionGuards.ClassifyInlineFault(
+        Equal(InlineFaultKind.VictorySettled, settlement.ClassifyInlineFault(
             new AggregateException(pop),
             "EndPlayerTurnAction", combatInProgress: false, revisionChanged: false));
-        Equal(InlineFaultKind.Failed, ResolutionGuards.ClassifyInlineFault(
+        Equal(InlineFaultKind.Failed, settlement.ClassifyInlineFault(
             new AggregateException(new InvalidOperationException("some other queue failure")),
             "EndPlayerTurnAction", combatInProgress: false, revisionChanged: false));
     }
 
     public static void InlineFaultClassificationDistinguishesPartialFromFailed()
     {
+        var clock = new FakeSettlementClock();
+        var settlement = new SettlementModule(
+            new FakeSettlementTicks(clock, Probe()), clock);
         var fault = new MissingMethodException("missing Godot API");
 
-        Equal(InlineFaultKind.Partial, ResolutionGuards.ClassifyInlineFault(
+        Equal(InlineFaultKind.Partial, settlement.ClassifyInlineFault(
             fault, "PlayCardAction", combatInProgress: true, revisionChanged: true));
-        Equal(InlineFaultKind.Failed, ResolutionGuards.ClassifyInlineFault(
+        Equal(InlineFaultKind.Failed, settlement.ClassifyInlineFault(
             fault, "PlayCardAction", combatInProgress: true, revisionChanged: false));
     }
 
     public static void EndingCombatIsNotADeadBoardWedge()
     {
-        False(ResolutionGuards.IsDeadBoardCandidate(
-            actionRunning: false,
-            pickerActive: false,
-            combatInProgress: true,
-            combatIsEnding: true,
-            queuesEmpty: true,
-            allEnemiesDead: true));
-        False(ResolutionGuards.IsDeadBoardCandidate(
-            actionRunning: false,
-            pickerActive: false,
-            combatInProgress: true,
-            combatIsEnding: false,
-            queuesEmpty: false,
-            allEnemiesDead: true));
-        True(ResolutionGuards.IsDeadBoardCandidate(
-            actionRunning: false,
-            pickerActive: false,
-            combatInProgress: true,
-            combatIsEnding: false,
-            queuesEmpty: true,
-            allEnemiesDead: true));
+        var clock = new FakeSettlementClock();
+        var module = new SettlementModule(
+            new FakeSettlementTicks(clock, Probe()), clock);
+        var ending = Watchdog(null, null, combatInProgress: true,
+            combatIsEnding: true, queuesEmpty: true, allEnemiesDead: true);
+        var queued = Watchdog(null, null, combatInProgress: true,
+            queuesEmpty: false, allEnemiesDead: true);
+
+        Equal(0, module.ObserveWatchdogs(ending).Events.Count);
+        clock.Advance(SettlementModule.WedgeTimeoutMs + 1);
+        Equal(0, module.ObserveWatchdogs(ending).Events.Count);
+        Equal(0, module.ObserveWatchdogs(queued).Events.Count);
     }
 
     public static void CardIdentityGrammarProducesBareSelectorAndTextKeyTogether()
@@ -497,6 +653,60 @@ internal static class Tests
         Equal("run-7", wire["runId"]!.GetValue<string>());
     }
 
+    private static SettlementRequest Request(
+        string phaseBefore = "map",
+        long startedRevision = 3,
+        long acceptedRevision = 4,
+        long acceptedTick = 0,
+        int timeoutMs = 100) => new(
+            phaseBefore,
+            startedRevision,
+            acceptedRevision,
+            acceptedTick,
+            timeoutMs);
+
+    private static SettlementProbe Probe(
+        long revision = 4,
+        long tick = 1,
+        string phase = "map",
+        bool requiresFrameStability = false,
+        bool busy = false,
+        bool hasDecision = false,
+        string stateKey = "state",
+        string[]? errors = null,
+        SettlementActivity? activity = null) => new(
+            revision,
+            tick,
+            "run",
+            phase,
+            requiresFrameStability,
+            activity ?? new SettlementActivity(
+                busy ? 1 : 0, ExecutorRunning: false, QueuedActionCount: 0),
+            hasDecision,
+            stateKey,
+            new SnapshotContract(phase)
+            {
+                Revision = revision,
+                RunId = "run",
+            },
+            errors ?? []);
+
+    private static SettlementWatchdogProbe Watchdog(
+        object? action,
+        string? actionName,
+        bool pickerActive = false,
+        bool combatInProgress = false,
+        bool combatIsEnding = false,
+        bool queuesEmpty = false,
+        bool allEnemiesDead = false) => new(
+            action,
+            actionName,
+            pickerActive,
+            combatInProgress,
+            combatIsEnding,
+            queuesEmpty,
+            allEnemiesDead);
+
     private static void Equal(object? expected, object? actual)
     {
         if (!Equals(expected, actual))
@@ -549,4 +759,59 @@ internal class BaseProbe
 
 internal sealed class DerivedProbe : BaseProbe
 {
+}
+
+internal sealed class FakeSettlementClock : ISettlementClock
+{
+    public DateTimeOffset UtcNow { get; private set; } =
+        DateTimeOffset.UnixEpoch;
+
+    public void Advance(int milliseconds) =>
+        UtcNow = UtcNow.AddMilliseconds(milliseconds);
+}
+
+internal sealed class FakeSettlementTicks : ISettlementTickSource
+{
+    private readonly FakeSettlementClock _clock;
+    private readonly int _waitAdvanceMs;
+    private readonly SettlementProbe[] _probes;
+
+    public FakeSettlementTicks(
+        FakeSettlementClock clock, params SettlementProbe[] probes)
+        : this(clock, 1, probes) { }
+
+    public FakeSettlementTicks(
+        FakeSettlementClock clock,
+        int waitAdvanceMs,
+        params SettlementProbe[] probes)
+    {
+        _clock = clock;
+        _waitAdvanceMs = waitAdvanceMs;
+        _probes = probes;
+    }
+
+    public int Captures { get; private set; }
+    public int ChangeWaits { get; private set; }
+    public int TickWaits { get; private set; }
+
+    public Task<SettlementProbe> Capture(long startedRevision)
+    {
+        var probe = _probes[Math.Min(Captures, _probes.Length - 1)];
+        Captures++;
+        return Task.FromResult(probe);
+    }
+
+    public Task WaitForChange(long afterRevision, int timeoutMs)
+    {
+        ChangeWaits++;
+        _clock.Advance(Math.Min(_waitAdvanceMs, timeoutMs));
+        return Task.CompletedTask;
+    }
+
+    public Task WaitForTick(long afterTick, int timeoutMs)
+    {
+        TickWaits++;
+        _clock.Advance(Math.Min(_waitAdvanceMs, timeoutMs));
+        return Task.CompletedTask;
+    }
 }

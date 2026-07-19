@@ -19,7 +19,7 @@ public static class ErrorEvents
 
     // The one error line the engine emits on a healthy path: the victory
     // stale-pop (EndPlayerTurnAction popped after combat teardown already
-    // drained it). Mirrors ResolutionGuards' VictorySettled gate — same
+    // drained it). Mirrors SettlementModule's VictorySettled gate — same
     // message pattern (shared predicate) and the same "combat is over"
     // requirement: the identical text logged mid-combat is queue
     // corruption and stays a real error. The caller supplies the combat
@@ -28,7 +28,7 @@ public static class ErrorEvents
     private static bool IsKnownBenignLogLine(string text, bool combatInProgress) =>
         !combatInProgress
         && text.Contains("InvalidOperationException", StringComparison.Ordinal)
-        && ResolutionGuards.IsStalePopMessage(text);
+        && SettlementModule.IsStalePopMessage(text);
 
     public static string FromAsyncFault(
         string label, string exceptionType, string message) =>

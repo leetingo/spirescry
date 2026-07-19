@@ -79,9 +79,12 @@ upgrade candidates keep the string `upgradedPreview` and add
 **`POST /step`** takes `{"action": ..., "args": ...}`. Add
 `"follow": <ms>` (CLI: `--follow [ms]`) to wait past acceptance until
 the engine queues and tracked async work settle, or until a new decision
-surface appears. The response distinguishes `outcome: settled`,
-`next_decision`, and `timeout`, and includes resolution events plus a fresh
-decision `obs`. GUI callbacks that do not return a task must also expose the
+surface appears. The response carries one of the typed settlement outcomes:
+<!-- protocol:settlement-outcomes:start -->
+`settled`, `next_decision`, `fault`, `timeout`.
+<!-- protocol:settlement-outcomes:end -->
+It includes resolution events plus a fresh decision `obs`; `fault` also keeps
+the engine error tokens in `errors`. GUI callbacks that do not return a task must expose the
 same boundary across three consecutive frames; guard checks still happen
 atomically before dispatch. This is a bounded settlement signal for work the
 bridge can observe, not a claim that every opaque engine continuation has

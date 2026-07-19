@@ -38,6 +38,12 @@
     "overlay",
     "unknown"
   ],
+  "settlementOutcomes": [
+    "settled",
+    "next_decision",
+    "fault",
+    "timeout"
+  ],
   "faultEventTokens": {
     "engineError": "engine_error:",
     "asyncFault": "async_fault:",

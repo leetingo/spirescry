@@ -13,6 +13,10 @@ class ProtocolConsumerContract(unittest.TestCase):
         self.assertEqual(protocol.REJECTION_CODES, tuple(protocol.DOCUMENT["rejectionCodes"]))
         self.assertEqual(protocol.PHASES, tuple(protocol.DOCUMENT["phases"]))
         self.assertEqual(
+            protocol.SETTLEMENT_OUTCOMES,
+            tuple(protocol.DOCUMENT["settlementOutcomes"]),
+        )
+        self.assertEqual(
             protocol.FAULT_EVENT_TOKENS,
             protocol.DOCUMENT["faultEventTokens"],
         )
@@ -24,6 +28,7 @@ class ProtocolConsumerContract(unittest.TestCase):
     def test_python_namespaces_are_derived_from_artifact_tokens(self):
         for namespace, tokens in (
             (protocol.PHASE, protocol.PHASES),
+            (protocol.SETTLEMENT_OUTCOME, protocol.SETTLEMENT_OUTCOMES),
             (protocol.REJECTION, protocol.REJECTION_CODES),
             (protocol.FAULT_EVENT, protocol.FAULT_EVENT_TOKENS.values()),
         ):

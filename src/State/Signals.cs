@@ -29,17 +29,12 @@ public static class Signals
     private static string _lastPhase = "";
     private static object? _runStateRef;
     private static string _runId = "none";
-    private static GameAction? _watchedAction;
-    private static DateTime _watchedSinceUtc;
-    private static bool _wedgeAnnounced;
-    private static DateTime? _deadBoardSinceUtc;
-    private static bool _deadBoardAnnounced;
     private static bool _logHooked;
 
     // Milliseconds the executor has been stuck on the SAME action. The
     // serial executor never recovers from a parked action on its own —
     // past the threshold the contract is: abandon and start over.
-    public static long ExecutorStuckMs { get; private set; }
+    public static long ExecutorStuckMs => Settlement.Current.ExecutorStuckMs;
 
     private static ActionExecutor? _exec;
     private static MegaCrit.Sts2.Core.GameActions.Multiplayer.ActionQueueSet? _queueSet;
@@ -158,7 +153,7 @@ public static class Signals
     public static void Tick()
     {
         EnsureSubscribed();
-        WatchExecutor();
+        WatchSettlement();
         RefreshRunIdentity();
         var phase = PhaseDetector.Current().AsString();
         if (phase != _lastPhase)
@@ -227,69 +222,23 @@ public static class Signals
                 .ToArray();
     }
 
-    private static void WatchExecutor()
+    private static void WatchSettlement()
     {
-        var running = RunManager.Instance?.ActionExecutor?.CurrentlyRunningAction;
-        WatchDeadBoard(running);
-        if (running is null || !ReferenceEquals(running, _watchedAction))
-        {
-            _watchedAction = running;
-            _watchedSinceUtc = DateTime.UtcNow;
-            ExecutorStuckMs = 0;
-            _wedgeAnnounced = false;
-            return;
-        }
-        // A deferred pick parks the executing action on purpose — the
-        // engine is waiting on the agent's pick-card/confirm, not stuck.
-        // Hold the clock at zero so a slow decision can't fire a spurious
-        // wedge (a potion pick pondered past 8s used to).
-        if (HeadlessPicker.IsActive)
-        {
-            _watchedSinceUtc = DateTime.UtcNow;
-            ExecutorStuckMs = 0;
-            return;
-        }
-        ExecutorStuckMs = (long)(DateTime.UtcNow - _watchedSinceUtc).TotalMilliseconds;
-        if (ExecutorStuckMs > 8000 && !_wedgeAnnounced)
-        {
-            _wedgeAnnounced = true;
-            Bump($"wedge:{running.GetType().Name}");
-        }
-    }
-
-    // The stuck-executor clock above can't see the other fatal shape: an
-    // exception mid death-resolution aborts the chain, leaving nothing
-    // running, nothing queued, every enemy dead — and the combat never
-    // ending. Executor-idle resets the wedge clock, so a second clock
-    // times the dead board itself and announces once past the same
-    // threshold.
-    private static void WatchDeadBoard(GameAction? running)
-    {
+        var run = RunManager.Instance;
+        var running = run?.ActionExecutor?.CurrentlyRunningAction;
         var combat = CombatManager.Instance;
-        // IsEnding legitimately has an all-dead board while victory
-        // actions, revives, and phase transitions are still settling.
-        var queuesEmpty = RunManager.Instance is { } rm
-            && EngineQueues.All(rm).All(q => q.depth == 0);
-        var deadBoard = ResolutionGuards.IsDeadBoardCandidate(
-            running is not null,
+        var queuesEmpty = run is not null
+            && EngineQueues.All(run).All(queue => queue.depth == 0);
+        var result = Settlement.Current.ObserveWatchdogs(new SettlementWatchdogProbe(
+            running,
+            running?.GetType().Name,
             HeadlessPicker.IsActive,
             combat is { IsInProgress: true },
             combat is { IsEnding: true },
             queuesEmpty,
-            combat is not null && AllEnemiesDead(combat));
-        if (!deadBoard)
-        {
-            _deadBoardSinceUtc = null;
-            _deadBoardAnnounced = false;
-            return;
-        }
-        _deadBoardSinceUtc ??= DateTime.UtcNow;
-        if (!_deadBoardAnnounced
-            && (DateTime.UtcNow - _deadBoardSinceUtc.Value).TotalMilliseconds > 8000)
-        {
-            _deadBoardAnnounced = true;
-            Bump("wedge:DeadBoard");
-        }
+            combat is not null && AllEnemiesDead(combat)));
+        foreach (var settlementEvent in result.Events)
+            Bump(settlementEvent);
     }
 
     private static bool AllEnemiesDead(CombatManager combat)

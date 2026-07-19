@@ -23,6 +23,7 @@ fn generate(document: &Value) -> String {
         .expect("protocolVersion must be an unsigned integer");
     let rejections = strings(&document["rejectionCodes"], "rejectionCodes");
     let phases = strings(&document["phases"], "phases");
+    let settlement_outcomes = strings(&document["settlementOutcomes"], "settlementOutcomes");
     let faults = document["faultEventTokens"]
         .as_object()
         .expect("faultEventTokens must be an object");
@@ -51,6 +52,7 @@ fn generate(document: &Value) -> String {
     ));
     emit_strings(&mut code, "REJECTION", "REJECTION_CODES", &rejections);
     emit_strings(&mut code, "PHASE", "PHASES", &phases);
+    emit_settlement_outcome(&mut code, &settlement_outcomes);
 
     for (name, value) in faults {
         let value = value.as_str().expect("fault token must be a string");
@@ -98,6 +100,32 @@ fn generate(document: &Value) -> String {
     code
 }
 
+fn emit_settlement_outcome(code: &mut String, values: &[&str]) {
+    code.push_str("#[derive(Debug, Clone, Copy, PartialEq, Eq)]\nenum SettlementOutcome {\n");
+    for value in values {
+        code.push_str(&format!("    {},\n", variant_name(value)));
+    }
+    code.push_str("}\nimpl SettlementOutcome {\n");
+    code.push_str("    fn from_value(value: &serde_json::Value) -> Option<Self> {\n");
+    code.push_str("        match value.as_str() {\n");
+    for value in values {
+        code.push_str(&format!(
+            "            Some({value:?}) => Some(Self::{}),\n",
+            variant_name(value)
+        ));
+    }
+    code.push_str("            _ => None,\n        }\n    }\n");
+    code.push_str(
+        "    fn is_replayable(self) -> bool {\n\
+             matches!(self, Self::Settled | Self::NextDecision)\n\
+         }\n\
+         fn reached_boundary(self) -> bool {\n\
+             self != Self::Timeout\n\
+         }\n\
+         }\n",
+    );
+}
+
 fn strings<'a>(value: &'a Value, field: &str) -> Vec<&'a str> {
     value
         .as_array()
@@ -139,4 +167,19 @@ fn constant_name(prefix: &str, value: &str) -> String {
         result.pop();
     }
     result
+}
+
+fn variant_name(value: &str) -> String {
+    value
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let mut characters = part.chars();
+            let first = characters
+                .next()
+                .expect("non-empty protocol enum segment")
+                .to_ascii_uppercase();
+            format!("{first}{}", characters.as_str().to_ascii_lowercase())
+        })
+        .collect()
 }

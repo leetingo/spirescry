@@ -234,7 +234,7 @@ internal static class DecisionSurfaceActions
         }
         catch (Exception ex)
         {
-            var fault = ResolutionGuards.ClassifyInlineFault(
+            var fault = Settlement.Current.ClassifyInlineFault(
                 ex,
                 actionName,
                 CombatManager.Instance is { IsInProgress: true },
@@ -283,7 +283,7 @@ internal static class DecisionSurfaceActions
                 is not TaskCompletionSource<bool> completion
             || !completion.Task.IsFaulted
             || completion.Task.Exception is not { } completionError
-            || ResolutionGuards.ClassifyInlineFault(
+            || Settlement.Current.ClassifyInlineFault(
                 completionError,
                 "EndPlayerTurnAction",
                 combatInProgress: false,
