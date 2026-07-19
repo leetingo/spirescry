@@ -24,17 +24,28 @@ def cli(*args, timeout=30):
     """Run one spirescry command. not_ready is the bridge's transient
     signal (queue paused, map intro window, ...) — by contract the agent
     retries it (the CLI exits 75, EX_TEMPFAIL, for exactly that)."""
+    deadline = time.monotonic() + timeout
+
+    def timed_out():
+        return subprocess.CompletedProcess(
+            [BIN, *args], 124, "", f"command timed out after {timeout}s")
+
     for _ in range(15):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return timed_out()
         try:
             r = subprocess.run(
-                [BIN, *args], capture_output=True, text=True, timeout=timeout)
+                [BIN, *args], capture_output=True, text=True,
+                timeout=remaining)
         except subprocess.TimeoutExpired:
-            return subprocess.CompletedProcess(
-                [BIN, *args], 124, "",
-                f"command timed out after {timeout}s")
+            return timed_out()
         if r.returncode != 75:
             break
-        time.sleep(0.4)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return timed_out()
+        time.sleep(min(0.4, remaining))
     return r
 
 
@@ -120,9 +131,12 @@ def wait_after(after_rev, timeout=20, description="action revision",
 def follow(*args, timeout_ms=10000, allow_errors=False):
     """Run one action through the bridge's settlement boundary."""
     result = run(
-        *args, "--follow", str(timeout_ms), allow_errors=allow_errors,
-        timeout=max(30, timeout_ms / 1000 + 10),
+        *args, "--follow", str(timeout_ms), allow_fail=True,
+        allow_errors=allow_errors,
+        timeout=max(0.001, timeout_ms / 1000),
     )
+    if "_err" in result:
+        raise AssertionError(f"{' '.join(args)}: {result['_err']}")
     if result.get("settled") is not True:
         raise AssertionError(
             f"{' '.join(args)} did not settle: {result.get('outcome')}")
@@ -141,14 +155,6 @@ def launch_run(character="IRONCLAD", seed=None, *, timeout=30, on_obs=None):
         PHASE.EVENT, timeout=timeout, on_obs=on_obs, after_rev=before_rev)
 
 
-def _checked_action(*args):
-    """Run one walker action and surface its concrete rejection at once."""
-    result = run(*args, allow_fail=True)
-    if "_err" in result:
-        raise AssertionError(f"{' '.join(args)}: {result['_err']}")
-    return result
-
-
 def _remaining(deadline, description):
     remaining = deadline - time.monotonic()
     if remaining <= 0:
@@ -156,34 +162,36 @@ def _remaining(deadline, description):
     return remaining
 
 
-def _act_and_wait(snapshot, *args, deadline, on_obs=None):
-    before_rev = snapshot.get("rev")
-    if before_rev is None:
+def _follow_before(deadline, *args):
+    remaining = _remaining(deadline, f"{' '.join(args)} to settle")
+    timeout_ms = max(1, min(10000, int(remaining * 1000)))
+    return follow(*args, timeout_ms=timeout_ms)
+
+
+def _act_and_settle(snapshot, *args, deadline, on_obs=None):
+    if snapshot.get("rev") is None:
         raise AssertionError(
             f"cannot follow {' '.join(args)}: snapshot has no revision")
-    _checked_action(*args)
-    return wait_after(
-        before_rev,
-        timeout=_remaining(deadline, f"{' '.join(args)} to change revision"),
-        description=f"{' '.join(args)} to change revision",
-        on_obs=on_obs,
-    )
+    settled = _follow_before(deadline, *args)
+    if on_obs:
+        on_obs(settled)
+    return settled
 
 
-def kill_current_combat(*, on_obs=None, timeout=60):
+def kill_current_combat(*, on_obs=None, timeout=60, initial=None):
     """Cheat-kill the current combat, resolving any picker it opens."""
     deadline = time.monotonic() + timeout
-    d = obs()
-    if on_obs:
+    d = initial if initial is not None else obs()
+    if initial is None and on_obs:
         on_obs(d)
     used_potion = False
     for _ in range(90):
         if d["phase"] in (PHASE.HAND_SELECT, PHASE.CARD_SELECT):
             if d.get("confirmable"):
-                d = _act_and_wait(
+                d = _act_and_settle(
                     d, "confirm", deadline=deadline, on_obs=on_obs)
             elif d.get("cards"):
-                d = _act_and_wait(
+                d = _act_and_settle(
                     d, "pick-card", str(d["cards"][0]["idx"]),
                     deadline=deadline, on_obs=on_obs)
             else:
@@ -191,7 +199,7 @@ def kill_current_combat(*, on_obs=None, timeout=60):
                     f"{d['phase']} has neither selectable cards nor confirm")
             continue
         if d["phase"] != PHASE.COMBAT:
-            return
+            return d
         if d.get("side") != "player":
             d = wait_until(
                 lambda snapshot: snapshot.get("phase") != PHASE.COMBAT
@@ -208,28 +216,28 @@ def kill_current_combat(*, on_obs=None, timeout=60):
             if pot:
                 alive_now = [e for e in d["enemies"] if e["alive"]]
                 if pot["target"] == "anyenemy" and alive_now:
-                    d = _act_and_wait(
+                    d = _act_and_settle(
                         d, "potion-use", str(pot["slot"]), "--target",
                         str(alive_now[0]["id"]), deadline=deadline,
                         on_obs=on_obs)
                 else:
-                    d = _act_and_wait(
+                    d = _act_and_settle(
                         d, "potion-use", str(pot["slot"]),
                         deadline=deadline, on_obs=on_obs)
                 continue
-        d = _act_and_wait(
+        d = _act_and_settle(
             d, "cheat", "heal", deadline=deadline, on_obs=on_obs)
         if d.get("phase") != PHASE.COMBAT:
-            return
-        d = _act_and_wait(
+            return d
+        d = _act_and_settle(
             d, "cheat", "wound-enemies", deadline=deadline, on_obs=on_obs)
         if d["phase"] in (PHASE.HAND_SELECT, PHASE.CARD_SELECT):
             continue
         if d["phase"] != PHASE.COMBAT:
-            return
+            return d
         alive = [e for e in d["enemies"] if e["alive"]]
         if not alive:
-            d = _act_and_wait(
+            d = _act_and_settle(
                 d, "end-turn", deadline=deadline, on_obs=on_obs)
             continue
         energy = d["you"]["energy"][0]
@@ -237,11 +245,11 @@ def kill_current_combat(*, on_obs=None, timeout=60):
                        if card["target"] == "anyenemy"
                        and card["cost"] <= energy), None)
         if attack:
-            d = _act_and_wait(
+            d = _act_and_settle(
                 d, "play", attack["model"], "--target",
                 str(alive[0]["id"]), deadline=deadline, on_obs=on_obs)
         else:
-            d = _act_and_wait(
+            d = _act_and_settle(
                 d, "end-turn", deadline=deadline, on_obs=on_obs)
     raise AssertionError("combat did not finish in 90 revision-driven steps")
 
@@ -250,11 +258,12 @@ def resolve_transient_phase(d, *, claim_reward_tiles=False,
                             claim_card_reward=False,
                             claim_relic_reward=False, timeout=60,
                             on_obs=None):
-    """Advance one non-event transient phase by exactly one checked action."""
+    """Advance one transient phase and return its settled observation."""
     phase = d.get("phase")
+    deadline = time.monotonic() + timeout
     if phase in (PHASE.CARD_SELECT, PHASE.HAND_SELECT):
         if d.get("confirmable"):
-            _checked_action("confirm")
+            return _follow_before(deadline, "confirm")
         else:
             card = next(
                 (card for card in d.get("cards", [])
@@ -262,26 +271,30 @@ def resolve_transient_phase(d, *, claim_reward_tiles=False,
             if card is None:
                 raise AssertionError(
                     f"{phase} has neither selectable cards nor confirm")
-            _checked_action("pick-card", str(card["idx"]))
+            return _follow_before(deadline, "pick-card", str(card["idx"]))
     elif phase == PHASE.BUNDLE_SELECT:
         if d.get("confirmable"):
-            _checked_action("confirm")
+            return _follow_before(deadline, "confirm")
         else:
-            _checked_action("pick-card", "0")
+            return _follow_before(deadline, "pick-card", "0")
     elif phase == PHASE.COMBAT:
-        kill_current_combat(timeout=timeout, on_obs=on_obs)
+        return kill_current_combat(
+            timeout=timeout, on_obs=on_obs, initial=d)
     elif phase == PHASE.REWARDS and claim_reward_tiles and d.get("rewards"):
-        _checked_action("pick-reward", str(d["rewards"][0]["idx"]))
+        return _follow_before(
+            deadline, "pick-reward", str(d["rewards"][0]["idx"]))
     elif phase == PHASE.CARD_REWARD and claim_card_reward and d.get("cards"):
-        _checked_action("pick-card", str(d["cards"][0]["idx"]))
+        return _follow_before(
+            deadline, "pick-card", str(d["cards"][0]["idx"]))
     elif phase == PHASE.RELIC_REWARD and claim_relic_reward and d.get("relics"):
-        _checked_action("pick-relic", str(d["relics"][0]["idx"]))
+        return _follow_before(
+            deadline, "pick-relic", str(d["relics"][0]["idx"]))
     elif phase in (PHASE.CARD_REWARD, PHASE.RELIC_REWARD):
-        _checked_action("skip")
+        return _follow_before(deadline, "skip")
     elif phase == PHASE.SHOP:
-        _checked_action("leave")
+        return _follow_before(deadline, "leave")
     else:
-        _checked_action("proceed")
+        return _follow_before(deadline, "proceed")
 
 
 _TRANSIENT_PHASES = {
@@ -304,17 +317,26 @@ def walk_world(*wanted_phases, claim_reward_tiles=False,
     """
     wanted = set(wanted_phases)
     deadline = time.monotonic() + timeout
+    settled_snapshot = None
+    settled_snapshot_observed = False
     for _ in range(120):
         # A caller that just fired an action supplies its pre-action revision;
         # long-poll once so an asynchronous GUI page cannot be mistaken for
         # the wanted stable event merely because it has not advanced yet.
-        snapshot = (wait_after(
-            after_rev,
-            timeout=_remaining(deadline, "world to settle"),
-            description="world action to change revision",
-            on_obs=on_obs,
-        ) if after_rev is not None else obs())
-        if after_rev is None and on_obs:
+        if settled_snapshot is not None:
+            snapshot = settled_snapshot
+            settled_snapshot = None
+            already_observed = settled_snapshot_observed
+            settled_snapshot_observed = False
+        else:
+            snapshot = (wait_after(
+                after_rev,
+                timeout=_remaining(deadline, "world to settle"),
+                description="world action to change revision",
+                on_obs=on_obs,
+            ) if after_rev is not None else obs())
+            already_observed = False
+        if after_rev is None and on_obs and not already_observed:
             on_obs(snapshot)
         after_rev = None
         phase = snapshot.get("phase")
@@ -328,11 +350,14 @@ def walk_world(*wanted_phases, claim_reward_tiles=False,
                        if not option.get("locked")
                        and not option.get("chosen")]
             if options:
-                _checked_action("option", str(options[0]["idx"]))
+                settled_snapshot = _follow_before(
+                    deadline, "option", str(options[0]["idx"]))
             else:
-                _checked_action("proceed")
+                settled_snapshot = _follow_before(deadline, "proceed")
+            settled_snapshot_observed = False
+            continue
         else:
-            resolve_transient_phase(
+            settled_snapshot = resolve_transient_phase(
                 snapshot,
                 claim_reward_tiles=claim_reward_tiles,
                 claim_card_reward=claim_card_reward,
@@ -340,10 +365,11 @@ def walk_world(*wanted_phases, claim_reward_tiles=False,
                 timeout=_remaining(deadline, "world to settle"),
                 on_obs=on_obs,
             )
-        after_rev = snapshot.get("rev")
-        if after_rev is None:
-            raise AssertionError(
-                f"cannot follow {phase}: snapshot has no revision")
+            if not isinstance(settled_snapshot, dict):
+                raise AssertionError(
+                    f"{phase} action returned no settled observation")
+            settled_snapshot_observed = phase == PHASE.COMBAT and on_obs is not None
+            continue
 
     last = obs()
     raise AssertionError(

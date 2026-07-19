@@ -24,15 +24,20 @@ class WorldWalkerTests(unittest.TestCase):
             return next(remaining)
 
         def act(*args, **kwargs):
-            action_args = args[:-2] if args[-2:] == ("--follow", "10000") else args
-            actions.append((action_args, kwargs))
+            actions.append((args, kwargs))
             return {}
+
+        def settle(*args, **kwargs):
+            actions.append((args, kwargs))
+            return next(remaining)
 
         def kill(**_kwargs):
             actions.append((("kill-current-combat",), {}))
+            return next(remaining)
 
         with mock.patch.object(bridge, "obs", side_effect=observe), \
                 mock.patch.object(bridge, "run", side_effect=act), \
+                mock.patch.object(bridge, "follow", side_effect=settle), \
                 mock.patch.object(
                     bridge, "kill_current_combat", side_effect=kill), \
                 mock.patch.object(bridge.time, "sleep") as sleep:
@@ -67,7 +72,51 @@ class WorldWalkerTests(unittest.TestCase):
                 bridge.walk_world("map")
 
         observe.assert_called_once_with()
-        act.assert_called_once_with("option", "2", allow_fail=True)
+        act.assert_called_once_with(
+            "option", "2", "--follow", "10000", allow_fail=True,
+            allow_errors=False, timeout=10.0)
+
+    def test_acceptance_revision_is_not_reprocessed_as_settlement(self):
+        decision = {
+            "phase": "event", "rev": 10,
+            "options": [{"idx": 2, "locked": False, "chosen": False}],
+        }
+        accepted = dict(decision, rev=11, changed=True)
+        settled = {"phase": "map", "rev": 12}
+        with mock.patch.object(
+                bridge, "obs", side_effect=[decision, accepted]) as observe, \
+                mock.patch.object(bridge, "run", return_value={"rev": 11}) as act, \
+                mock.patch.object(
+                    bridge, "follow", return_value=settled) as follow, \
+                mock.patch.object(bridge.time, "monotonic", return_value=100):
+            actual = bridge.walk_world("map", timeout=0.25)
+
+        self.assertEqual(settled, actual)
+        follow.assert_called_once_with("option", "2", timeout_ms=250)
+        act.assert_not_called()
+        observe.assert_called_once_with()
+
+    def test_transient_action_returns_its_followed_settlement_to_walker(self):
+        decision = {
+            "phase": "rewards", "rev": 30,
+            "rewards": [{"idx": 4}],
+        }
+        accepted = dict(decision, rev=31, changed=True)
+        settled = {"phase": "map", "rev": 32}
+        with mock.patch.object(
+                bridge, "obs", side_effect=[decision, accepted]) as observe, \
+                mock.patch.object(bridge, "run", return_value={"rev": 31}) as act, \
+                mock.patch.object(
+                    bridge, "follow", return_value=settled) as follow, \
+                mock.patch.object(bridge.time, "monotonic", return_value=100):
+            actual = bridge.walk_world(
+                "map", claim_reward_tiles=True, timeout=0.25)
+
+        self.assertEqual(settled, actual)
+        follow.assert_called_once_with(
+            "pick-reward", "4", timeout_ms=250)
+        act.assert_not_called()
+        observe.assert_called_once_with()
 
     def test_transient_action_rejections_keep_their_verb_and_error(self):
         cases = [
@@ -114,6 +163,41 @@ class WorldWalkerTests(unittest.TestCase):
 
         sleep.assert_not_called()
 
+    def test_combat_action_consumes_followed_settlement_not_acceptance_bump(self):
+        combat = {
+            "phase": "combat", "rev": 20, "side": "player",
+            "potions": [], "enemies": [{"alive": True, "id": 1}],
+            "you": {"energy": [3, 3]}, "hand": [],
+        }
+        accepted = dict(combat, rev=21, changed=True)
+        settled = {"phase": "map", "rev": 22}
+        with mock.patch.object(
+                bridge, "obs", side_effect=[combat, accepted]) as observe, \
+                mock.patch.object(bridge, "run", return_value={"rev": 21}) as act, \
+                mock.patch.object(
+                    bridge, "follow", return_value=settled) as follow, \
+                mock.patch.object(bridge.time, "monotonic", return_value=100):
+            bridge.kill_current_combat(timeout=0.25)
+
+        follow.assert_called_once_with("cheat", "heal", timeout_ms=250)
+        act.assert_not_called()
+        observe.assert_called_once_with()
+
+    def test_walker_reports_each_observation_once_across_combat(self):
+        combat = {
+            "phase": "combat", "rev": 40, "side": "player",
+            "potions": [], "enemies": [{"alive": True, "id": 1}],
+            "you": {"energy": [3, 3]}, "hand": [],
+        }
+        settled = {"phase": "map", "rev": 42}
+        observed = []
+        with mock.patch.object(bridge, "obs", return_value=combat), \
+                mock.patch.object(bridge, "follow", return_value=settled):
+            actual = bridge.walk_world("map", on_obs=observed.append)
+
+        self.assertEqual(settled, actual)
+        self.assertEqual([combat, settled], observed)
+
     def test_wait_until_requires_a_revision_change_after_an_action(self):
         with mock.patch.object(
                 bridge, "obs",
@@ -138,11 +222,12 @@ class WorldWalkerTests(unittest.TestCase):
             "obs": {"phase": "treasure", "rev": 19},
         }
         with mock.patch.object(bridge, "run", return_value=response) as act:
-            settled = bridge.follow("skip")
+            settled = bridge.follow("skip", timeout_ms=250)
 
         self.assertEqual(response["obs"], settled)
         act.assert_called_once_with(
-            "skip", "--follow", "10000", allow_errors=False, timeout=30)
+            "skip", "--follow", "250", allow_fail=True,
+            allow_errors=False, timeout=0.25)
 
     def test_follow_rejects_an_unsettled_boundary(self):
         with mock.patch.object(
@@ -150,6 +235,23 @@ class WorldWalkerTests(unittest.TestCase):
                 return_value={"settled": False, "outcome": "timeout"}):
             with self.assertRaisesRegex(AssertionError, "skip did not settle"):
                 bridge.follow("skip")
+
+    def test_not_ready_backoff_cannot_exceed_cli_timeout(self):
+        not_ready = bridge.subprocess.CompletedProcess(
+            [bridge.BIN, "end-turn"], 75, "", "not_ready")
+        with mock.patch.object(
+                bridge.subprocess, "run", return_value=not_ready) as process, \
+                mock.patch.object(
+                    bridge.time, "monotonic",
+                    side_effect=[100.0, 100.0, 100.1, 100.25]), \
+                mock.patch.object(bridge.time, "sleep") as sleep:
+            result = bridge.cli("end-turn", timeout=0.25)
+
+        self.assertEqual(124, result.returncode)
+        process.assert_called_once_with(
+            [bridge.BIN, "end-turn"], capture_output=True, text=True,
+            timeout=0.25)
+        self.assertAlmostEqual(0.15, sleep.call_args.args[0])
 
     def test_launch_is_single_checked_action_followed_by_revision_wait(self):
         started = {"phase": bridge.PHASE.EVENT, "rev": 8}
