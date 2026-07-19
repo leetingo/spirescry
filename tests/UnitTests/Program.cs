@@ -285,15 +285,13 @@ internal static class Tests
 
     public static void DecisionLegalVerbsComeFromVisibleTargetsAndGates()
     {
-        var snapshot = System.Text.Json.Nodes.JsonNode.Parse("""
-            {
-              "phase":"card_select",
-              "cards":[{"idx":0}],
-              "confirmable":false,
-              "cancelable":true,
-              "player":{"potions":[]}
-            }
-            """)!.AsObject();
+        var snapshot = new SnapshotContract("card_select")
+        {
+            Cards = [new SnapshotItemContract { Index = 0 }],
+            Confirmable = false,
+            Cancelable = true,
+            Player = new SnapshotPlayerContract { Potions = [] },
+        };
 
         var legal = DecisionProjection.LegalVerbs(snapshot, runActive: true);
 
@@ -361,30 +359,26 @@ internal static class Tests
         // pick-relic is the verb that opens the chest — omitting it left
         // "proceed" as the only advertised action and a legal-verbs-only
         // agent had to walk past every treasure room.
-        var headless = System.Text.Json.Nodes.JsonNode.Parse("""
-            {
-              "phase":"treasure",
-              "chestOpened":false,
-              "proceedAvailable":true,
-              "relics":[],
-              "player":{"potions":[]}
-            }
-            """)!.AsObject();
+        var headless = new SnapshotContract("treasure")
+        {
+            ChestOpened = false,
+            ProceedAvailable = true,
+            Relics = [],
+            Player = new SnapshotPlayerContract { Potions = [] },
+        };
 
         Equal("pick-relic,proceed,abandon", string.Join(',',
             DecisionProjection.LegalVerbs(headless, runActive: true)));
 
         // GUI closed chest: the proceed button hides until the chest is
         // resolved, so opening is the only advertised move.
-        var gui = System.Text.Json.Nodes.JsonNode.Parse("""
-            {
-              "phase":"treasure",
-              "chestOpened":false,
-              "proceedAvailable":false,
-              "relics":[],
-              "player":{"potions":[]}
-            }
-            """)!.AsObject();
+        var gui = new SnapshotContract("treasure")
+        {
+            ChestOpened = false,
+            ProceedAvailable = false,
+            Relics = [],
+            Player = new SnapshotPlayerContract { Potions = [] },
+        };
 
         Equal("pick-relic,abandon", string.Join(',',
             DecisionProjection.LegalVerbs(gui, runActive: true)));
@@ -392,30 +386,26 @@ internal static class Tests
 
     public static void DecisionOpenChestOffersPickAndSkipThenOnlyProceed()
     {
-        var offering = System.Text.Json.Nodes.JsonNode.Parse("""
-            {
-              "phase":"treasure",
-              "chestOpened":true,
-              "proceedAvailable":true,
-              "relics":[{"idx":0}],
-              "player":{"potions":[]}
-            }
-            """)!.AsObject();
+        var offering = new SnapshotContract("treasure")
+        {
+            ChestOpened = true,
+            ProceedAvailable = true,
+            Relics = [new SnapshotItemContract { Index = 0 }],
+            Player = new SnapshotPlayerContract { Potions = [] },
+        };
 
         Equal("pick-relic,skip,proceed,abandon", string.Join(',',
             DecisionProjection.LegalVerbs(offering, runActive: true)));
 
         // Resolved offer: the chest stays open and empty — pick-relic must
         // not be advertised again (the dispatcher would reject it).
-        var resolved = System.Text.Json.Nodes.JsonNode.Parse("""
-            {
-              "phase":"treasure",
-              "chestOpened":true,
-              "proceedAvailable":true,
-              "relics":[],
-              "player":{"potions":[]}
-            }
-            """)!.AsObject();
+        var resolved = new SnapshotContract("treasure")
+        {
+            ChestOpened = true,
+            ProceedAvailable = true,
+            Relics = [],
+            Player = new SnapshotPlayerContract { Potions = [] },
+        };
 
         Equal("proceed,abandon", string.Join(',',
             DecisionProjection.LegalVerbs(resolved, runActive: true)));
@@ -425,19 +415,86 @@ internal static class Tests
     {
         foreach (var phase in new[] { "event", "rewards" })
         {
-            var snapshot = System.Text.Json.Nodes.JsonNode.Parse($$"""
-                {
-                  "phase":"{{phase}}",
-                  "available":false,
-                  "options":[{"idx":0}],
-                  "rewards":[{"idx":0}]
-                }
-                """)!.AsObject();
+            var snapshot = new SnapshotContract(phase)
+            {
+                Available = false,
+                Options = [new SnapshotItemContract { Index = 0 }],
+                Rewards = [new SnapshotItemContract { Index = 0 }],
+            };
 
             var legal = DecisionProjection.LegalVerbs(snapshot, runActive: false);
 
             Equal("", string.Join(',', legal));
         }
+    }
+
+    public static void DecisionPotionVisibilityPreservesTopLevelPrecedence()
+    {
+        var inventoryPotion = new SnapshotItemContract { Index = 0 };
+        var shop = new SnapshotContract("shop")
+        {
+            Potions = [],
+            Player = new SnapshotPlayerContract { Potions = [inventoryPotion] },
+        };
+        var map = new SnapshotContract("map")
+        {
+            Player = new SnapshotPlayerContract { Potions = [inventoryPotion] },
+        };
+
+        Equal("leave,abandon", string.Join(',',
+            DecisionProjection.LegalVerbs(shop, runActive: true)));
+        Equal("potion-discard,abandon", string.Join(',',
+            DecisionProjection.LegalVerbs(map, runActive: true)));
+    }
+
+    public static void SnapshotContractPreservesUnconsumedProducerFields()
+    {
+        var card = new SnapshotItemContract
+        {
+            Index = 0,
+            Playable = true,
+        };
+        card.AddExtensions(new { model = "STRIKE_R" });
+        var player = new SnapshotPlayerContract { Potions = [] };
+        player.AddExtensions(new { hp = new[] { 40, 80 } });
+        var snapshot = new SnapshotContract("combat")
+        {
+            Side = "player",
+            ActionsDisabled = false,
+            Hand = [card],
+            Player = player,
+        };
+
+        snapshot.AddExtensions(new
+        {
+            phaseSpecific = new { value = 7, missing = (string?)null },
+        });
+
+        var wire = snapshot.ToJsonObject();
+        Equal("combat", snapshot.Phase);
+        Equal("player", snapshot.Side);
+        True(snapshot.Hand.Single().Playable == true);
+        Equal("STRIKE_R", wire["hand"]![0]!["model"]!.GetValue<string>());
+        Equal(7, wire["phaseSpecific"]!["value"]!.GetValue<int>());
+        True(wire["phaseSpecific"]!["missing"] is null);
+    }
+
+    public static void SnapshotContractOwnsFollowAndAttributionMetadata()
+    {
+        var snapshot = new SnapshotContract("event")
+        {
+            Revision = 42,
+            RunId = "run-7",
+            Legal = ["option", "proceed"],
+        };
+
+        Equal(42L, snapshot.Revision);
+        Equal("run-7", snapshot.RunId);
+        Equal("option,proceed", string.Join(',', snapshot.Legal));
+        var wire = snapshot.ToJsonObject();
+        Equal("event", wire["phase"]!.GetValue<string>());
+        Equal(42L, wire["rev"]!.GetValue<long>());
+        Equal("run-7", wire["runId"]!.GetValue<string>());
     }
 
     private static void Equal(object? expected, object? actual)

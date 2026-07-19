@@ -70,20 +70,20 @@ public static class RunLog
         }
     }
 
-    public static void RecordOutcome(
-        long entryId, string outcome, JsonObject observation, string[]? errors = null)
+    internal static void RecordOutcome(
+        long entryId, string outcome, SnapshotContract observation, string[]? errors = null)
     {
         lock (Gate)
         {
             var entry = Verbs.FirstOrDefault(v => v["id"]?.GetValue<long>() == entryId);
             if (entry is null) return;
-            var observedRunId = observation["runId"]?.GetValue<string>();
+            var observedRunId = observation.RunId;
             if (entry["action"]?.GetValue<string>() == "new-run"
                 && observedRunId is not (null or "none")
                 && CanAdopt(observedRunId))
                 AdoptRun(observedRunId, captureMetadata: false);
             entry["outcome"] = outcome;
-            entry["phaseAfter"] = observation["phase"]?.GetValue<string>();
+            entry["phaseAfter"] = observation.Phase;
             // Engine faults during this verb's window: preserved in the
             // diagnostic recipe so a polluted run stays attributable even
             // after the host log rotates away.
@@ -158,9 +158,9 @@ public static class RunLog
 
     // FNV-1a over the response's stable JSON ordering. Revisions and RunIds
     // are deliberately removed: a reconstruction is a different run.
-    internal static string Fingerprint(JsonObject observation)
+    internal static string Fingerprint(SnapshotContract observation)
     {
-        var canonical = Canonicalize(observation)!;
+        var canonical = Canonicalize(observation.ToJsonObject())!;
         var bytes = Encoding.UTF8.GetBytes(canonical.ToJsonString(CanonicalJson));
         ulong hash = 14695981039346656037;
         foreach (var b in bytes)

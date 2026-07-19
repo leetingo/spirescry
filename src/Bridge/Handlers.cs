@@ -73,13 +73,12 @@ public static class Handlers
         {
             var runId = Signals.RefreshRunIdentity();
             var snapshot = Snapshotter.ForCurrentPhase(compact, decision, knownCards ?? []);
-            var node = JsonSerializer.SerializeToNode(snapshot)!.AsObject();
             var revision = Signals.Revision;
-            node["rev"] = revision;
-            node["runId"] = runId;
+            snapshot.Revision = revision;
+            snapshot.RunId = runId;
             if (decision)
-                node["legal"] = JsonSerializer.SerializeToNode(
-                    DecisionProjection.LegalVerbs(node, runId != "none"));
+                snapshot.Legal = DecisionProjection.LegalVerbs(snapshot, runId != "none");
+            var node = snapshot.ToJsonObject();
             if (since >= 0)
             {
                 node["changed"] = revision > since;
@@ -313,45 +312,48 @@ public static class Handlers
             ["outcome"] = outcome,
             ["errors"] = JsonSerializer.SerializeToNode(errors),
             ["events"] = JsonSerializer.SerializeToNode(Signals.EventsSince(startedRev)),
-            ["obs"] = probe.Observation,
+            ["obs"] = probe.Observation.ToJsonObject(),
         };
         return new Response { Body = node.ToJsonString() };
     }
 
     private sealed record FollowProbe(
-        long Rev,
         long Tick,
-        string RunId,
-        string Phase,
         bool RequiresFrameStability,
         bool Busy,
-        bool HasDecision,
         string StateKey,
-        JsonObject Observation)
+        SnapshotContract Observation)
     {
+        public long Rev => Observation.Revision
+            ?? throw new InvalidOperationException("follow snapshot has no revision");
+
+        public string RunId => Observation.RunId
+            ?? throw new InvalidOperationException("follow snapshot has no run identity");
+
+        public string Phase => Observation.Phase;
+
+        public bool HasDecision => Observation.Legal.Any(
+            verb => verb is not ("abandon" or "potion-discard"));
+
         public static FollowProbe Capture()
         {
             var runId = Signals.RefreshRunIdentity();
             var snapshot = Snapshotter.ForCurrentPhase(
                 compact: false, decision: true, knownCardTexts: []);
-            var node = JsonSerializer.SerializeToNode(snapshot)!.AsObject();
             var rev = Signals.Revision;
-            node["rev"] = rev;
-            node["runId"] = runId;
-            var legal = DecisionProjection.LegalVerbs(node, runId != "none");
-            node["legal"] = JsonSerializer.SerializeToNode(legal);
-            var stateKey = node.ToJsonString();
+            snapshot.Revision = rev;
+            snapshot.RunId = runId;
+            snapshot.Legal = DecisionProjection.LegalVerbs(snapshot, runId != "none");
+            var stateKey = snapshot.ToJsonString();
 
             var rm = MegaCrit.Sts2.Core.Runs.RunManager.Instance;
             var busy = Signals.PendingAsyncCount > 0
                 || rm?.ActionExecutor?.CurrentlyRunningAction is not null
                 || EngineQueues.All(rm).Any(queue => queue.depth > 0);
-            var hasDecision = legal.Any(verb => verb is not ("abandon" or "potion-discard"));
             return new FollowProbe(
-                rev, Signals.TickCount, runId,
-                node["phase"]?.GetValue<string>() ?? "unknown",
+                Signals.TickCount,
                 DecisionSurface.Current.RequiresSettlementFrameStability,
-                busy, hasDecision, stateKey, node);
+                busy, stateKey, snapshot);
         }
 
         public static string? CandidateOutcome(
