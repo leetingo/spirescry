@@ -123,12 +123,12 @@ internal static class Tests
     {
         var clock = new FakeSettlementClock();
         var ticks = new FakeSettlementTicks(clock,
-            Probe(revision: 11, tick: 2, phase: "event",
+            Probe(revision: 11, tick: 2, phase: Phase.Event,
                 busy: true, hasDecision: true));
         var module = new SettlementModule(ticks, clock);
 
         var result = module.Follow(Request(
-            phaseBefore: "event", acceptedRevision: 10, timeoutMs: 100))
+            phaseBefore: Phase.Event, acceptedRevision: 10, timeoutMs: 100))
             .GetAwaiter().GetResult();
 
         Equal(SettlementOutcome.NextDecision, result.Outcome);
@@ -441,7 +441,7 @@ internal static class Tests
 
     public static void DecisionLegalVerbsComeFromVisibleTargetsAndGates()
     {
-        var snapshot = new SnapshotContract("card_select")
+        var snapshot = new SnapshotContract(Phase.CardSelect)
         {
             Cards = [new SnapshotItemContract { Index = 0 }],
             Confirmable = false,
@@ -515,7 +515,7 @@ internal static class Tests
         // pick-relic is the verb that opens the chest — omitting it left
         // "proceed" as the only advertised action and a legal-verbs-only
         // agent had to walk past every treasure room.
-        var headless = new SnapshotContract("treasure")
+        var headless = new SnapshotContract(Phase.Treasure)
         {
             ChestOpened = false,
             ProceedAvailable = true,
@@ -528,7 +528,7 @@ internal static class Tests
 
         // GUI closed chest: the proceed button hides until the chest is
         // resolved, so opening is the only advertised move.
-        var gui = new SnapshotContract("treasure")
+        var gui = new SnapshotContract(Phase.Treasure)
         {
             ChestOpened = false,
             ProceedAvailable = false,
@@ -542,7 +542,7 @@ internal static class Tests
 
     public static void DecisionOpenChestOffersPickAndSkipThenOnlyProceed()
     {
-        var offering = new SnapshotContract("treasure")
+        var offering = new SnapshotContract(Phase.Treasure)
         {
             ChestOpened = true,
             ProceedAvailable = true,
@@ -555,7 +555,7 @@ internal static class Tests
 
         // Resolved offer: the chest stays open and empty — pick-relic must
         // not be advertised again (the dispatcher would reject it).
-        var resolved = new SnapshotContract("treasure")
+        var resolved = new SnapshotContract(Phase.Treasure)
         {
             ChestOpened = true,
             ProceedAvailable = true,
@@ -569,7 +569,7 @@ internal static class Tests
 
     public static void DecisionUnavailableTransitionsDoNotAdvertiseActions()
     {
-        foreach (var phase in new[] { "event", "rewards" })
+        foreach (var phase in new[] { Phase.Event, Phase.Rewards })
         {
             var snapshot = new SnapshotContract(phase)
             {
@@ -587,12 +587,12 @@ internal static class Tests
     public static void DecisionPotionVisibilityPreservesTopLevelPrecedence()
     {
         var inventoryPotion = new SnapshotItemContract { Index = 0 };
-        var shop = new SnapshotContract("shop")
+        var shop = new SnapshotContract(Phase.Shop)
         {
             Potions = [],
             Player = new SnapshotPlayerContract { Potions = [inventoryPotion] },
         };
-        var map = new SnapshotContract("map")
+        var map = new SnapshotContract(Phase.Map)
         {
             Player = new SnapshotPlayerContract { Potions = [inventoryPotion] },
         };
@@ -613,7 +613,7 @@ internal static class Tests
         card.AddExtensions(new { model = "STRIKE_R" });
         var player = new SnapshotPlayerContract { Potions = [] };
         player.AddExtensions(new { hp = new[] { 40, 80 } });
-        var snapshot = new SnapshotContract("combat")
+        var snapshot = new SnapshotContract(Phase.Combat)
         {
             Side = "player",
             ActionsDisabled = false,
@@ -627,7 +627,7 @@ internal static class Tests
         });
 
         var wire = snapshot.ToJsonObject();
-        Equal("combat", snapshot.Phase);
+        Equal(Phase.Combat, snapshot.Phase);
         Equal("player", snapshot.Side);
         True(snapshot.Hand.Single().Playable == true);
         Equal("STRIKE_R", wire["hand"]![0]!["model"]!.GetValue<string>());
@@ -637,7 +637,7 @@ internal static class Tests
 
     public static void SnapshotContractOwnsFollowAndAttributionMetadata()
     {
-        var snapshot = new SnapshotContract("event")
+        var snapshot = new SnapshotContract(Phase.Event)
         {
             Revision = 42,
             RunId = "run-7",
@@ -653,8 +653,41 @@ internal static class Tests
         Equal("run-7", wire["runId"]!.GetValue<string>());
     }
 
+    public static void SnapshotConsumerProjectionTracksTypedStateOnly()
+    {
+        SnapshotContract Build(string model, bool playable)
+        {
+            var card = new SnapshotItemContract
+            {
+                Index = 0,
+                Playable = playable,
+            };
+            card.AddExtensions(new { model });
+            var snapshot = new SnapshotContract(Phase.Combat)
+            {
+                Revision = 7,
+                RunId = "source",
+                Side = "player",
+                Hand = [card],
+                Legal = ["play", "end-turn"],
+            };
+            snapshot.AddExtensions(new { decorativeFrame = model });
+            return snapshot;
+        }
+
+        var original = Build("STRIKE_R", playable: true);
+        var extensionChanged = Build("BASH", playable: true);
+        var typedStateChanged = Build("STRIKE_R", playable: false);
+
+        Equal(original.ConsumerStateKey(), extensionChanged.ConsumerStateKey());
+        False(original.ConsumerStateKey() == typedStateChanged.ConsumerStateKey());
+        Equal("8f0945d175edb49c", original.ConsumerFingerprint());
+        False(original.ConsumerProjection().ContainsKey("decorativeFrame"));
+        False(original.ConsumerProjection()["hand"]![0]!.AsObject().ContainsKey("model"));
+    }
+
     private static SettlementRequest Request(
-        string phaseBefore = "map",
+        Phase phaseBefore = Phase.Map,
         long startedRevision = 3,
         long acceptedRevision = 4,
         long acceptedTick = 0,
@@ -668,26 +701,23 @@ internal static class Tests
     private static SettlementProbe Probe(
         long revision = 4,
         long tick = 1,
-        string phase = "map",
+        Phase phase = Phase.Map,
         bool requiresFrameStability = false,
         bool busy = false,
         bool hasDecision = false,
         string stateKey = "state",
         string[]? errors = null,
         SettlementActivity? activity = null) => new(
-            revision,
             tick,
-            "run",
-            phase,
             requiresFrameStability,
             activity ?? new SettlementActivity(
                 busy ? 1 : 0, ExecutorRunning: false, QueuedActionCount: 0),
-            hasDecision,
-            stateKey,
             new SnapshotContract(phase)
             {
                 Revision = revision,
                 RunId = "run",
+                Side = stateKey,
+                Legal = hasDecision ? ["option"] : [],
             },
             errors ?? []);
 

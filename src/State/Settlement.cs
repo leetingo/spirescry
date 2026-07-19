@@ -20,23 +20,32 @@ internal static class SettlementOutcomeRules
 }
 
 internal sealed record SettlementRequest(
-    string PhaseBefore,
+    Phase PhaseBefore,
     long StartedRevision,
     long AcceptedRevision,
     long AcceptedTick,
     int TimeoutMs);
 
 internal sealed record SettlementProbe(
-    long Revision,
     long Tick,
-    string RunId,
-    string Phase,
     bool RequiresFrameStability,
     SettlementActivity Activity,
-    bool HasDecision,
-    string StateKey,
     SnapshotContract Observation,
-    IReadOnlyList<string> Errors);
+    IReadOnlyList<string> Errors)
+{
+    public long Revision => Observation.Revision
+        ?? throw new InvalidOperationException("settlement snapshot has no revision");
+
+    public string RunId => Observation.RunId
+        ?? throw new InvalidOperationException("settlement snapshot has no run identity");
+
+    public Phase Phase => Observation.Phase;
+
+    public bool HasDecision => Observation.Legal.Any(
+        verb => verb is not ("abandon" or "potion-discard"));
+
+    public string StateKey => Observation.ConsumerStateKey();
+}
 
 internal readonly record struct SettlementActivity(
     int PendingAsyncCount,
@@ -175,7 +184,7 @@ internal sealed class SettlementModule
     }
 
     internal static SettlementOutcome? CandidateOutcome(
-        SettlementProbe probe, string phaseBefore, long acceptedRevision)
+        SettlementProbe probe, Phase phaseBefore, long acceptedRevision)
     {
         if (probe.Errors.Count > 0) return SettlementOutcome.Fault;
         if (!probe.Activity.IsBusy) return SettlementOutcome.Settled;
@@ -184,7 +193,7 @@ internal sealed class SettlementModule
             return SettlementOutcome.NextDecision;
         // Event tasks intentionally remain parked while a page exposes its
         // next option inside the same coarse phase.
-        return probe.Phase == ProtocolVocabulary.Phases.Event
+        return probe.Phase == Phase.Event
             && probe.Revision > acceptedRevision
                 ? SettlementOutcome.NextDecision
                 : null;
@@ -219,12 +228,12 @@ internal sealed class SettlementModule
             "Tried to pop action EndPlayerTurnAction", StringComparison.Ordinal)
         && message.Contains("didn't find it in any queue", StringComparison.Ordinal);
 
-    internal static bool IsNestedDecision(string phase) => phase is
-        ProtocolVocabulary.Phases.CardSelect
-        or ProtocolVocabulary.Phases.HandSelect
-        or ProtocolVocabulary.Phases.BundleSelect
-        or ProtocolVocabulary.Phases.CardReward
-        or ProtocolVocabulary.Phases.RelicReward;
+    internal static bool IsNestedDecision(Phase phase) => phase is
+        Phase.CardSelect
+        or Phase.HandSelect
+        or Phase.BundleSelect
+        or Phase.CardReward
+        or Phase.RelicReward;
 
     private void WatchExecutor(
         SettlementWatchdogProbe probe, ICollection<string> events)

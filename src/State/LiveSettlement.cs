@@ -33,17 +33,10 @@ internal sealed class LiveSettlementTickSource : ISettlementTickSource
                 Signals.PendingAsyncCount,
                 run?.Manager.ActionExecutor?.CurrentlyRunningAction is not null,
                 EngineQueues.All(run?.Manager).Sum(queue => queue.depth));
-            var hasDecision = snapshot.Legal.Any(
-                verb => verb is not ("abandon" or "potion-discard"));
             return new SettlementProbe(
-                revision,
                 Signals.TickCount,
-                runId,
-                snapshot.Phase,
                 DecisionSurface.Current.RequiresSettlementFrameStability,
                 activity,
-                hasDecision,
-                snapshot.ToJsonString(),
                 snapshot,
                 Signals.ErrorsSince(startedRevision));
         });

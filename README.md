@@ -181,7 +181,10 @@ one `runId`. A recipe is complete only when every verb used follow, reached
 `settled` or `next_decision`, and recorded a state fingerprint. From a clean
 `main_menu` (`runId: none`), `spirescry replay run.json` re-drives that recipe
 with CAS guards and follow settlement, checking every recorded state
-fingerprint and stopping at the first divergence.
+fingerprint and stopping at the first divergence. Fingerprints cover the
+typed decision/settlement projection (phase, gates, target indices, and legal
+verbs); descriptive snapshot extensions are intentionally outside that
+compatibility contract.
 This is a debugging aid, not authoritative replay recording: the output is
 explicitly a new reconstruction with its own `runId`, and its final state
 must never be attributed to the source run.

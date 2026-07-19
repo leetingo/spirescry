@@ -58,45 +58,45 @@ internal static class Snapshotter
         var phase = PhaseDetector.Current();
         return phase switch
         {
-            Phase.Combat => CombatSnapshot(phase.AsString()),
-            Phase.Map => MapSnapshot(phase.AsString()),
-            Phase.Event => EventSnapshot(phase.AsString()),
-            Phase.Rewards => RewardsSnapshot(phase.AsString()),
-            Phase.CardReward => CardRewardSnapshot(phase.AsString()),
-            Phase.Shop => ShopSnapshot(phase.AsString()),
-            Phase.RestSite => RestSiteSnapshot(phase.AsString()),
-            Phase.Treasure => TreasureSnapshot(phase.AsString()),
-            Phase.RelicReward => RelicRewardSnapshot(phase.AsString()),
-            Phase.CardSelect => CardSelectSnapshot(phase.AsString()),
-            Phase.HandSelect => HandSelectSnapshot(phase.AsString()),
-            Phase.BundleSelect => BundleSelectSnapshot(phase.AsString()),
-            Phase.CrystalSphere => CrystalSphereSnapshot(phase.AsString()),
-            Phase.GameOver => GameOverSnapshot(phase.AsString()),
+            Phase.Combat => CombatSnapshot(phase),
+            Phase.Map => MapSnapshot(phase),
+            Phase.Event => EventSnapshot(phase),
+            Phase.Rewards => RewardsSnapshot(phase),
+            Phase.CardReward => CardRewardSnapshot(phase),
+            Phase.Shop => ShopSnapshot(phase),
+            Phase.RestSite => RestSiteSnapshot(phase),
+            Phase.Treasure => TreasureSnapshot(phase),
+            Phase.RelicReward => RelicRewardSnapshot(phase),
+            Phase.CardSelect => CardSelectSnapshot(phase),
+            Phase.HandSelect => HandSelectSnapshot(phase),
+            Phase.BundleSelect => BundleSelectSnapshot(phase),
+            Phase.CrystalSphere => CrystalSphereSnapshot(phase),
+            Phase.GameOver => GameOverSnapshot(phase),
             // Name the capturing overlay so a stuck screen is diagnosable
             // from /obs alone.
             Phase.Overlay or Phase.Unknown => Snapshot(
-                phase.AsString(),
+                phase,
                 new { overlay = NOverlayStack.Instance?.Peek()?.GetType().Name }),
-            _ => new SnapshotContract(phase.AsString()),
+            _ => new SnapshotContract(phase),
         };
     }
 
-    private static SnapshotContract Snapshot(string phase, object extensions)
+    private static SnapshotContract Snapshot(Phase phase, object extensions)
     {
         var snapshot = new SnapshotContract(phase);
         snapshot.AddExtensions(extensions);
         return snapshot;
     }
 
-    private static SnapshotItemContract Item(object extensions)
+    private static SnapshotItemContract Item(object extensions, int? index = null)
     {
-        var item = new SnapshotItemContract();
+        var item = new SnapshotItemContract { Index = index };
         item.AddExtensions(extensions);
         return item;
     }
 
     // Bundle offers: pick one pack of cards (Neow's Scroll Boxes, …).
-    private static SnapshotContract BundleSelectSnapshot(string phase)
+    private static SnapshotContract BundleSelectSnapshot(Phase phase)
     {
         var decision = DecisionSurface.Current.Bundle;
         var bundles = decision?.Bundles;
@@ -107,18 +107,23 @@ internal static class Snapshotter
             Player = FooterView(),
             Confirmable = decision!.Confirmable,
             Cancelable = decision.Cancelable,
-            Bundles = bundles.Select((b, i) => Item(new
+            Bundles = bundles.Select((bundle, bundleIndex) =>
             {
-                idx = i,
-                cards = b.Select(RewardCardView).ToArray(),
-            })).ToArray(),
+                var item = new SnapshotItemContract
+                {
+                    Index = bundleIndex,
+                    Cards = bundle.Select((card, cardIndex) =>
+                        Item(RewardCardView(card), cardIndex)).ToArray(),
+                };
+                return item;
+            }).ToArray(),
         };
     }
 
     // The crystal-sphere event minigame: a cell grid, a divination tool,
     // and a fixed number of reveals. map-move clicks a cell, option picks
     // the tool, proceed leaves.
-    private static SnapshotContract CrystalSphereSnapshot(string phase)
+    private static SnapshotContract CrystalSphereSnapshot(Phase phase)
     {
         var entity = DecisionSurface.Current.Crystal;
         if (entity is null) return new SnapshotContract(phase) { Available = false };
@@ -187,7 +192,7 @@ internal static class Snapshotter
         _ => "unknown",
     };
 
-    private static SnapshotContract GameOverSnapshot(string phase)
+    private static SnapshotContract GameOverSnapshot(Phase phase)
     {
         if (LocalRunContext.StateOnly is not { } run)
             return new SnapshotContract(phase) { Available = false };
@@ -410,7 +415,7 @@ internal static class Snapshotter
         return new { count = cards.Length, cards = (object)cards };
     }
 
-    private static SnapshotContract ShopSnapshot(string phase)
+    private static SnapshotContract ShopSnapshot(Phase phase)
     {
         if (LocalRunContext.Current is not { } run)
             return new SnapshotContract(phase) { Available = false };
@@ -430,7 +435,6 @@ internal static class Snapshotter
             var showText = card is not null && ShouldShowCardText(card);
             var entry = Item(new
             {
-                idx = i,
                 model = card?.Id.Entry,
                 title = card?.Title,
                 textKey = card is null ? null : CardSpecifier.TextKey(card),
@@ -441,7 +445,7 @@ internal static class Snapshotter
                 starCost = card is null ? null : CardSpecifier.StarCost(card),
                 stocked = e.IsStocked,
                 affordable = e.EnoughGold,
-            });
+            }, i);
             entry.Purchasable = e.IsStocked && e.EnoughGold;
             return entry;
         }
@@ -455,14 +459,13 @@ internal static class Snapshotter
                 || player?.HasOpenPotionSlots == true;
             var entry = Item(new
             {
-                idx = i,
                 model,
                 title = SafeText(title),
                 cost = e.Cost,
                 price = e.Cost,
                 stocked = e.IsStocked,
                 affordable = e.EnoughGold,
-            });
+            }, i);
             entry.Purchasable = e.IsStocked && e.EnoughGold && potionHasRoom;
             return entry;
         }
@@ -493,7 +496,7 @@ internal static class Snapshotter
         return snapshot;
     }
 
-    private static SnapshotContract RestSiteSnapshot(string phase)
+    private static SnapshotContract RestSiteSnapshot(Phase phase)
     {
         var decision = DecisionSurface.Current.RestSite;
         if (decision is null) return new SnapshotContract(phase) { Available = false };
@@ -505,11 +508,10 @@ internal static class Snapshotter
             {
                 var option = Item(new
                 {
-                    idx = i,
                     id = o.OptionId.ToString(),
                     title = SafeText(o.Title),
                     description = SafeText(o.Description),
-                });
+                }, i);
                 option.Enabled = o.IsEnabled;
                 return option;
             }).ToArray(),
@@ -521,7 +523,7 @@ internal static class Snapshotter
     // makes the offer visible here just as the GUI's chest-open callback
     // does. chestOpened=false therefore means "unopened", never "empty":
     // an empty relics array with an open chest is a resolved offer.
-    private static SnapshotContract TreasureSnapshot(string phase)
+    private static SnapshotContract TreasureSnapshot(Phase phase)
     {
         var decision = DecisionSurface.Current.Treasure;
         return new SnapshotContract(phase)
@@ -533,11 +535,11 @@ internal static class Snapshotter
             ProceedAvailable = decision.ProceedAvailable,
             Player = FooterView(),
             Relics = decision.Relics
-                .Select((relic, i) => Item(RelicView(relic, i))).ToArray(),
+                .Select((relic, i) => Item(RelicView(relic), i)).ToArray(),
         };
     }
 
-    private static SnapshotContract RelicRewardSnapshot(string phase)
+    private static SnapshotContract RelicRewardSnapshot(Phase phase)
     {
         var screen = Screens.Top<NChooseARelicSelection>();
         var holders = screen is null ? null : Screens.RelicHolders(screen);
@@ -546,13 +548,12 @@ internal static class Snapshotter
         return new SnapshotContract(phase)
         {
             Player = FooterView(),
-            Relics = holders.Select((h, i) => Item(RelicView(h.Relic.Model, i))).ToArray(),
+            Relics = holders.Select((h, i) => Item(RelicView(h.Relic.Model), i)).ToArray(),
         };
     }
 
-    private static object RelicView(RelicModel r, int i) => new
+    private static object RelicView(RelicModel r) => new
     {
-        idx = i,
         model = r.Id.Entry,
         title = SafeText(r.Title),
         rarity = r.Rarity.ToString().ToLowerInvariant(),
@@ -562,7 +563,7 @@ internal static class Snapshotter
     // Tile idx is the position in the screen's full button list — claimed
     // tiles linger disabled during their hide tween, so sibling indices
     // stay stable; we just omit them from the snapshot.
-    private static SnapshotContract RewardsSnapshot(string phase)
+    private static SnapshotContract RewardsSnapshot(Phase phase)
     {
         var decision = DecisionSurface.Current.Rewards;
         if (decision is null) return new SnapshotContract(phase) { Available = false };
@@ -570,15 +571,14 @@ internal static class Snapshotter
         {
             Player = FooterView(),
             Rewards = decision.Rewards
-                .Select(slot => Item(RewardView(slot.Reward, slot.Index))).ToArray(),
+                .Select(slot => Item(RewardView(slot.Reward), slot.Index)).ToArray(),
         };
     }
 
     // Shared reward-tile view — see the per-card views below for why both
     // boots build their snapshots through one shape.
-    private static object RewardView(Reward r, int i) => new
+    private static object RewardView(Reward r) => new
     {
-        idx = i,
         type = RewardType(r),
         amount = r is GoldReward g ? g.Amount : (int?)null,
         description = SafeText(r.Description),
@@ -594,7 +594,7 @@ internal static class Snapshotter
         _ => r.GetType().Name.ToLowerInvariant(),
     };
 
-    private static SnapshotContract CardRewardSnapshot(string phase)
+    private static SnapshotContract CardRewardSnapshot(Phase phase)
     {
         var decision = DecisionSurface.Current.CardReward;
         if (decision is null) return new SnapshotContract(phase) { Available = false };
@@ -602,14 +602,13 @@ internal static class Snapshotter
         {
             Player = FooterView(),
             Cards = decision.Cards
-                .Select((card, i) => Item(RewardCardView(card, i))).ToArray(),
+                .Select((card, i) => Item(RewardCardView(card), i)).ToArray(),
             // Non-card choices (skip, trade offers, …) — target of `skip`.
             Alternatives = decision.AlternativeTitles
                 .Select((title, i) => Item(new
                 {
-                    idx = i,
                     title = SafeText(title),
-                })).ToArray(),
+                }, i)).ToArray(),
         };
     }
 
@@ -629,12 +628,11 @@ internal static class Snapshotter
     // Shared per-card views — both boots build their snapshots through
     // these, so the shapes can't drift between modes (tests/parity.py
     // compares the key sets).
-    private static object RewardCardView(CardModel c, int i)
+    private static object RewardCardView(CardModel c)
     {
         var showText = ShouldShowCardText(c);
         return new
         {
-            idx = i,
             model = c.Id.Entry,
             title = c.Title,
             cost = c.EnergyCost.Canonical,
@@ -646,13 +644,12 @@ internal static class Snapshotter
         };
     }
 
-    private static object SelectCardView(CardModel c, int i, bool selected)
+    private static object SelectCardView(CardModel c, bool selected)
     {
         var showText = ShouldShowCardText(c);
         var preview = CardSpecifier.UpgradePreview(c);
         return new
         {
-            idx = i,
             model = c.Id.Entry,
             title = c.Title,
             cost = c.EnergyCost.Canonical,
@@ -671,13 +668,12 @@ internal static class Snapshotter
         };
     }
 
-    private static object HandCardView(CardModel? card, int i)
+    private static object HandCardView(CardModel? card)
     {
         var showText = card is not null
             && ShouldShowCardText(card, compactElides: true);
         return new
         {
-            idx = i,
             model = card?.Id.Entry,
             cost = card?.EnergyCost.GetAmountToSpend(),
             starCost = card is null ? null : CardSpecifier.StarCost(card),
@@ -690,7 +686,7 @@ internal static class Snapshotter
         };
     }
 
-    private static SnapshotContract MapSnapshot(string phase)
+    private static SnapshotContract MapSnapshot(Phase phase)
     {
         if (LocalRunContext.Current is not { } run)
             return new SnapshotContract(phase) { Available = false };
@@ -788,7 +784,7 @@ internal static class Snapshotter
         rs.Map is { SecondBossMapPoint: not null } map
         && rs.CurrentMapPoint is { } here && ReferenceEquals(here, map.BossMapPoint);
 
-    private static SnapshotContract EventSnapshot(string phase)
+    private static SnapshotContract EventSnapshot(Phase phase)
     {
         var ev = Screens.CurrentEvent();
         if (ev is null) return new SnapshotContract(phase) { Available = false };
@@ -805,7 +801,6 @@ internal static class Snapshotter
             {
                 var option = Item(new
                 {
-                    idx = i,
                     title = SafeText(o.Title, ev.DynamicVars.AddTo),
                     description = SafeText(o.Description, ev.DynamicVars.AddTo),
                     proceed = o.IsProceed,
@@ -822,7 +817,7 @@ internal static class Snapshotter
                         title = SafeText(r.Title),
                         description = SafeText(r.DynamicDescription),
                     } : null,
-                });
+                }, i);
                 option.Locked = o.IsLocked;
                 option.Chosen = o.WasChosen;
                 return option;
@@ -943,7 +938,7 @@ internal static class Snapshotter
     // The phase can flip to Combat before every singleton is wired
     // (act transitions). Return `available: false` instead of throwing
     // so the agent gets something it can poll on.
-    private static SnapshotContract CombatSnapshot(string phase)
+    private static SnapshotContract CombatSnapshot(Phase phase)
     {
         var combat = CombatManager.Instance;
         var state = combat?.DebugOnlyGetState();
@@ -1095,7 +1090,7 @@ internal static class Snapshotter
         catch { return null; }
     }
 
-    private static SnapshotContract CardSelectSnapshot(string phase)
+    private static SnapshotContract CardSelectSnapshot(Phase phase)
     {
         var decision = DecisionSurface.Current.CardSelect;
         if (decision is null) return new SnapshotContract(phase) { Available = false };
@@ -1105,7 +1100,7 @@ internal static class Snapshotter
             Cancelable = decision.Cancelable,
             Confirmable = decision.Confirmable,
             Cards = decision.Cards.Select((card, i) => Item(
-                SelectCardView(card, i, decision.Selected.Contains(card)))).ToArray(),
+                SelectCardView(card, decision.Selected.Contains(card)), i)).ToArray(),
         };
         snapshot.AddExtensions(new
         {
@@ -1119,14 +1114,14 @@ internal static class Snapshotter
     // Hand select runs inside the combat room — the hand flips into a
     // selection mode instead of pushing an overlay. Picked cards leave
     // ActiveHolders (into the selected row), so idx tracks what's on screen.
-    private static SnapshotContract HandSelectSnapshot(string phase)
+    private static SnapshotContract HandSelectSnapshot(Phase phase)
     {
         var decision = DecisionSurface.Current.HandSelect;
         if (decision is null) return new SnapshotContract(phase) { Available = false };
         var snapshot = new SnapshotContract(phase)
         {
             Confirmable = decision.Confirmable,
-            Cards = decision.Cards.Select((card, i) => Item(HandCardView(card, i))).ToArray(),
+            Cards = decision.Cards.Select((card, i) => Item(HandCardView(card), i)).ToArray(),
         };
         if (decision.IncludePlayer) snapshot.Player = FooterView();
         snapshot.AddExtensions(new

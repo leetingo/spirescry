@@ -110,7 +110,11 @@ public static class Signals
     // same serialized job as dispatch, never against a prior frame's cache.
     public static string RefreshRunIdentity()
     {
-        var runState = LocalRunContext.Current?.State;
+        // RunState identity exists before the local player seat is mounted.
+        // Using the player-gated context here would transiently publish
+        // run:none for the same RunState, then mint a second token once the
+        // player appeared.
+        var runState = LocalRunContext.StateOnly?.State;
         string? changedTo = null;
         lock (Gate)
         {

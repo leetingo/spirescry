@@ -170,7 +170,7 @@ public static class Handlers
         var result = await MainThreadPump.Instance!.Run(() =>
         {
             var runId = Signals.RefreshRunIdentity();
-            var phaseBefore = PhaseDetector.Current().AsString();
+            var phaseBefore = PhaseDetector.Current();
             var tickBefore = Signals.TickCount;
             if (ifRun is not null && ifRun != runId)
                 return (dispatch: DispatchResult.Reject(RejectionCodes.ExternalChange,
@@ -227,7 +227,7 @@ public static class Handlers
         string action,
         long startedRev,
         long acceptedRev,
-        string phaseBefore,
+        Phase phaseBefore,
         long acceptedTick,
         int timeoutMs,
         long? logEntryId)

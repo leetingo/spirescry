@@ -1,5 +1,8 @@
+using System.Text;
+using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Text.Json.Serialization;
 
 namespace Spirescry.State;
 
@@ -10,6 +13,15 @@ namespace Spirescry.State;
 // vocabulary instead of repeating stringly-typed shapes.
 internal sealed class SnapshotContract
 {
+    private static readonly JsonSerializerOptions ProjectionJson = new()
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+    };
+    private static readonly JsonSerializerOptions CanonicalJson = new()
+    {
+        Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
+    };
     private static readonly HashSet<string> ConsumedKeys = new(StringComparer.Ordinal)
     {
         "phase", "rev", "runId", "side", "actionsDisabled", "available",
@@ -20,22 +32,18 @@ internal sealed class SnapshotContract
     };
     private readonly JsonObject _wire;
 
-    internal SnapshotContract(string phase)
-        : this(new JsonObject { ["phase"] = phase })
+    internal SnapshotContract(Phase phase)
     {
+        Phase = phase;
+        _wire = new JsonObject
+        {
+            ["phase"] = ProtocolVocabulary.Phases.Name(phase),
+        };
     }
 
-    private SnapshotContract(JsonObject wire)
-    {
-        _wire = wire;
-        _ = Phase;
-    }
+    public Phase Phase { get; }
 
-    public string Phase
-    {
-        get => RequiredString("phase");
-        set => _wire["phase"] = value;
-    }
+    public string PhaseName => ProtocolVocabulary.Phases.Name(Phase);
 
     public long? Revision
     {
@@ -206,11 +214,70 @@ internal sealed class SnapshotContract
 
     internal JsonObject ToJsonObject() => (JsonObject)_wire.DeepClone();
 
-    internal string ToJsonString() => _wire.ToJsonString();
+    // The two consumers that need a stable representation (GUI settlement
+    // and replay attribution) deliberately share this named projection.
+    // Extension data is presentation-only: adding or renaming it cannot
+    // silently redefine settlement or replay semantics. Every projected
+    // value is reached through a typed property, so contract refactors make
+    // this seam fail at compile time instead of changing a hash by accident.
+    internal JsonObject ConsumerProjection() =>
+        JsonSerializer.SerializeToNode(new SnapshotConsumerProjection(
+            PhaseName,
+            Side,
+            ActionsDisabled,
+            Available,
+            ProceedAvailable,
+            ChestOpened,
+            Confirmable,
+            Cancelable,
+            HasTopLevelPotions,
+            Next.Select(item => item.ConsumerProjection()).ToArray(),
+            Hand.Select(item => item.ConsumerProjection()).ToArray(),
+            Potions.Select(item => item.ConsumerProjection()).ToArray(),
+            Options.Select(item => item.ConsumerProjection()).ToArray(),
+            Cards.Select(item => item.ConsumerProjection()).ToArray(),
+            Colorless.Select(item => item.ConsumerProjection()).ToArray(),
+            Relics.Select(item => item.ConsumerProjection()).ToArray(),
+            Rewards.Select(item => item.ConsumerProjection()).ToArray(),
+            Alternatives.Select(item => item.ConsumerProjection()).ToArray(),
+            Bundles.Select(item => item.ConsumerProjection()).ToArray(),
+            Cells.Select(item => item.ConsumerProjection()).ToArray(),
+            Player?.ConsumerProjection(),
+            CardRemoval?.ConsumerProjection(),
+            Legal), ProjectionJson)!.AsObject();
 
-    private string RequiredString(string property) =>
-        String(property)
-        ?? throw new InvalidOperationException($"snapshot has no '{property}' string");
+    internal string ConsumerStateKey() => ConsumerProjection().ToJsonString();
+
+    internal string ConsumerFingerprint()
+    {
+        var canonical = Canonicalize(ConsumerProjection())!;
+        var bytes = Encoding.UTF8.GetBytes(canonical.ToJsonString(CanonicalJson));
+        ulong hash = 14695981039346656037;
+        foreach (var value in bytes)
+        {
+            hash ^= value;
+            hash *= 1099511628211;
+        }
+        return hash.ToString("x16");
+    }
+
+    private static JsonNode? Canonicalize(JsonNode? node)
+    {
+        if (node is JsonObject obj)
+        {
+            var sorted = new JsonObject();
+            foreach (var pair in obj.OrderBy(pair => pair.Key, StringComparer.Ordinal))
+                sorted[pair.Key] = Canonicalize(pair.Value);
+            return sorted;
+        }
+        if (node is JsonArray array)
+        {
+            var result = new JsonArray();
+            foreach (var value in array) result.Add(Canonicalize(value));
+            return result;
+        }
+        return node is null ? null : JsonNode.Parse(node.ToJsonString());
+    }
 
     private string? String(string property) =>
         _wire[property] is JsonValue value && value.TryGetValue<string>(out var result)
@@ -244,11 +311,50 @@ internal sealed class SnapshotContract
             items.Select(item => (JsonNode)item.ToJsonObject()).ToArray());
 }
 
+internal sealed record SnapshotConsumerProjection(
+    string Phase,
+    string? Side,
+    bool? ActionsDisabled,
+    bool? Available,
+    bool? ProceedAvailable,
+    bool? ChestOpened,
+    bool? Confirmable,
+    bool? Cancelable,
+    bool HasTopLevelPotions,
+    SnapshotItemConsumerProjection[] Next,
+    SnapshotItemConsumerProjection[] Hand,
+    SnapshotItemConsumerProjection[] Potions,
+    SnapshotItemConsumerProjection[] Options,
+    SnapshotItemConsumerProjection[] Cards,
+    SnapshotItemConsumerProjection[] Colorless,
+    SnapshotItemConsumerProjection[] Relics,
+    SnapshotItemConsumerProjection[] Rewards,
+    SnapshotItemConsumerProjection[] Alternatives,
+    SnapshotItemConsumerProjection[] Bundles,
+    SnapshotItemConsumerProjection[] Cells,
+    SnapshotPlayerConsumerProjection? Player,
+    SnapshotItemConsumerProjection? CardRemoval,
+    string[] Legal);
+
+internal sealed record SnapshotItemConsumerProjection(
+    int? Index,
+    bool? Playable,
+    bool? Locked,
+    bool? Chosen,
+    bool? Enabled,
+    bool? Purchasable,
+    bool? Hidden,
+    SnapshotItemConsumerProjection[] Cards);
+
+internal sealed record SnapshotPlayerConsumerProjection(
+    SnapshotItemConsumerProjection[] Potions);
+
 internal sealed class SnapshotItemContract
 {
     private static readonly HashSet<string> ConsumedKeys = new(StringComparer.Ordinal)
     {
-        "playable", "locked", "chosen", "enabled", "purchasable", "hidden",
+        "idx", "playable", "locked", "chosen", "enabled", "purchasable", "hidden",
+        "cards",
     };
     private readonly JsonObject _wire;
 
@@ -317,7 +423,21 @@ internal sealed class SnapshotItemContract
         set => SetScalar("hidden", value);
     }
 
+    public SnapshotItemContract[] Cards
+    {
+        get => _wire["cards"] is JsonArray cards
+            ? cards.OfType<JsonObject>()
+                .Select(item => new SnapshotItemContract(item)).ToArray()
+            : [];
+        set => _wire["cards"] = new JsonArray(
+            value.Select(item => (JsonNode)item.ToJsonObject()).ToArray());
+    }
+
     internal JsonObject ToJsonObject() => (JsonObject)_wire.DeepClone();
+
+    internal SnapshotItemConsumerProjection ConsumerProjection() => new(
+        Index, Playable, Locked, Chosen, Enabled, Purchasable, Hidden,
+        Cards.Select(item => item.ConsumerProjection()).ToArray());
 
     private T? Scalar<T>(string property) where T : struct =>
         _wire[property] is JsonValue value && value.TryGetValue<T>(out var result)
@@ -369,4 +489,7 @@ internal sealed class SnapshotPlayerContract
     }
 
     internal JsonObject ToJsonObject() => (JsonObject)_wire.DeepClone();
+
+    internal SnapshotPlayerConsumerProjection ConsumerProjection() => new(
+        Potions.Select(item => item.ConsumerProjection()).ToArray());
 }

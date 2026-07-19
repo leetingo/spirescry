@@ -10,7 +10,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
 const DEFAULT_HTTP_TIMEOUT_MS: u64 = 70_000;
 const HTTP_TIMEOUT_GRACE_MS: u64 = 10_000;
@@ -640,8 +640,7 @@ fn replay_value(client: &impl ReplayTransport, log: &Value) -> CliResult<Value> 
 }
 
 fn state_fingerprint(value: &Value) -> String {
-    let mut stable = value.clone();
-    remove_volatile(&mut stable);
+    let stable = consumer_projection(value);
     let bytes = serde_json::to_vec(&stable).unwrap_or_default();
     let mut hash: u64 = 14_695_981_039_346_656_037;
     for byte in bytes {
@@ -651,21 +650,111 @@ fn state_fingerprint(value: &Value) -> String {
     format!("{hash:016x}")
 }
 
-fn remove_volatile(value: &mut Value) {
-    match value {
-        Value::Object(map) => {
-            map.remove("rev");
-            map.remove("runId");
-            for child in map.values_mut() {
-                remove_volatile(child);
-            }
-        }
-        Value::Array(items) => {
-            for child in items {
-                remove_volatile(child);
-            }
-        }
-        _ => {}
+// Keep this shape aligned with SnapshotContract.ConsumerProjection. It is a
+// deliberately small replay/settlement contract, not a hash of arbitrary
+// presentation extensions in /obs.
+fn consumer_projection(value: &Value) -> Value {
+    let mut result = Map::new();
+    result.insert(
+        "phase".into(),
+        value
+            .get("phase")
+            .and_then(Value::as_str)
+            .map_or(Value::Null, |phase| Value::String(phase.into())),
+    );
+    copy_string(value, &mut result, "side", "side");
+    for field in [
+        "actionsDisabled",
+        "available",
+        "proceedAvailable",
+        "chestOpened",
+        "confirmable",
+        "cancelable",
+    ] {
+        copy_bool(value, &mut result, field, field);
+    }
+    result.insert(
+        "hasTopLevelPotions".into(),
+        Value::Bool(value.get("potions").is_some_and(Value::is_array)),
+    );
+    for field in [
+        "next",
+        "hand",
+        "potions",
+        "options",
+        "cards",
+        "colorless",
+        "relics",
+        "rewards",
+        "alternatives",
+        "bundles",
+        "cells",
+    ] {
+        result.insert(field.into(), item_array(value.get(field)));
+    }
+    if let Some(player) = value.get("player").filter(|player| player.is_object()) {
+        let mut projected = Map::new();
+        projected.insert("potions".into(), item_array(player.get("potions")));
+        result.insert("player".into(), Value::Object(projected));
+    }
+    if let Some(removal) = value
+        .get("cardRemoval")
+        .filter(|removal| removal.is_object())
+    {
+        result.insert("cardRemoval".into(), item_projection(removal));
+    }
+    let legal = value
+        .get("legal")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(|verb| Value::String(verb.into()))
+        .collect();
+    result.insert("legal".into(), Value::Array(legal));
+    Value::Object(result)
+}
+
+fn item_array(value: Option<&Value>) -> Value {
+    Value::Array(
+        value
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|item| item.is_object())
+            .map(item_projection)
+            .collect(),
+    )
+}
+
+fn item_projection(value: &Value) -> Value {
+    let mut result = Map::new();
+    if let Some(index) = value.get("idx").and_then(Value::as_i64) {
+        result.insert("index".into(), Value::Number(index.into()));
+    }
+    for field in [
+        "playable",
+        "locked",
+        "chosen",
+        "enabled",
+        "purchasable",
+        "hidden",
+    ] {
+        copy_bool(value, &mut result, field, field);
+    }
+    result.insert("cards".into(), item_array(value.get("cards")));
+    Value::Object(result)
+}
+
+fn copy_string(source: &Value, target: &mut Map<String, Value>, source_key: &str, key: &str) {
+    if let Some(value) = source.get(source_key).and_then(Value::as_str) {
+        target.insert(key.into(), Value::String(value.into()));
+    }
+}
+
+fn copy_bool(source: &Value, target: &mut Map<String, Value>, source_key: &str, key: &str) {
+    if let Some(value) = source.get(source_key).and_then(Value::as_bool) {
+        target.insert(key.into(), Value::Bool(value));
     }
 }
 
@@ -1214,13 +1303,29 @@ mod tests {
     }
 
     #[test]
-    fn replay_fingerprint_ignores_revision_and_run_identity_only() {
-        let a = json!({"phase":"map", "rev":1, "runId":"source", "hp":[50, 80]});
-        let b = json!({"phase":"map", "rev":900, "runId":"replay", "hp":[50, 80]});
-        let changed = json!({"phase":"map", "rev":1, "runId":"source", "hp":[49, 80]});
+    fn replay_fingerprint_uses_the_named_consumer_projection() {
+        let a = json!({
+            "phase":"combat", "rev":1, "runId":"source", "decorativeFrame":"a",
+            "side":"player", "hand":[{"idx":0, "model":"STRIKE_R", "playable":true}],
+            "legal":["play", "end-turn"]
+        });
+        let extension_changed = json!({
+            "phase":"combat", "rev":900, "runId":"replay", "decorativeFrame":"b",
+            "side":"player", "hand":[{"idx":0, "model":"BASH", "playable":true}],
+            "legal":["play", "end-turn"]
+        });
+        let typed_state_changed = json!({
+            "phase":"combat", "rev":1, "runId":"source", "decorativeFrame":"a",
+            "side":"player", "hand":[{"idx":0, "model":"STRIKE_R", "playable":false}],
+            "legal":["play", "end-turn"]
+        });
 
-        assert_eq!(state_fingerprint(&a), state_fingerprint(&b));
-        assert_ne!(state_fingerprint(&a), state_fingerprint(&changed));
+        assert_eq!(state_fingerprint(&a), state_fingerprint(&extension_changed));
+        assert_ne!(
+            state_fingerprint(&a),
+            state_fingerprint(&typed_state_changed)
+        );
+        assert_eq!(state_fingerprint(&a), "8f0945d175edb49c");
     }
 
     #[test]

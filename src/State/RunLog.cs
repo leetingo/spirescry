@@ -1,5 +1,3 @@
-using System.Text;
-using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 
@@ -11,13 +9,6 @@ namespace Spirescry.State;
 // stop at the first divergence instead of compounding it.
 public static class RunLog
 {
-    private static readonly JsonSerializerOptions CanonicalJson = new()
-    {
-        // serde_json writes Unicode and HTML characters directly. Matching
-        // that byte representation is required because replay fingerprints
-        // are recomputed by the Rust CLI, including under zhs localization.
-        Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
-    };
     private static readonly object Gate = new();
     private static readonly List<RunLogEntry> Verbs = new();
     private static string _runId = "none";
@@ -31,7 +22,7 @@ public static class RunLog
         string action,
         JsonElement args,
         string runId,
-        string phaseBefore,
+        Phase phaseBefore,
         long startedRev,
         long acceptedRev)
     {
@@ -85,7 +76,7 @@ public static class RunLog
                 && CanAdopt(observedRunId))
                 AdoptRun(observedRunId, captureMetadata: false);
             entry.Outcome = outcome;
-            entry.PhaseAfter = observation.Phase;
+            entry.PhaseAfter = observation.PhaseName;
             // Engine faults during this verb's window: preserved in the
             // diagnostic recipe so a polluted run stays attributable even
             // after the host log rotates away.
@@ -163,7 +154,7 @@ public static class RunLog
         string runId,
         string action,
         JsonNode? arguments,
-        string phaseBefore,
+        Phase phaseBefore,
         long startedRevision,
         long acceptedRevision)
     {
@@ -171,7 +162,7 @@ public static class RunLog
         public string RunId { get; set; } = runId;
         public string Action { get; } = action;
         public JsonNode? Arguments { get; } = arguments;
-        public string PhaseBefore { get; } = phaseBefore;
+        public string PhaseBefore { get; } = ProtocolVocabulary.Phases.Name(phaseBefore);
         public long StartedRevision { get; } = startedRevision;
         public long AcceptedRevision { get; } = acceptedRevision;
         public SettlementOutcome? Outcome { get; set; }
@@ -205,38 +196,9 @@ public static class RunLog
         }
     }
 
-    // FNV-1a over the response's stable JSON ordering. Revisions and RunIds
-    // are deliberately removed: a reconstruction is a different run.
+    // FNV-1a over the explicit typed consumer projection. Presentation-only
+    // extension fields never redefine replay compatibility; revisions and
+    // RunIds are absent because a reconstruction is a different run.
     internal static string Fingerprint(SnapshotContract observation)
-    {
-        var canonical = Canonicalize(observation.ToJsonObject())!;
-        var bytes = Encoding.UTF8.GetBytes(canonical.ToJsonString(CanonicalJson));
-        ulong hash = 14695981039346656037;
-        foreach (var b in bytes)
-        {
-            hash ^= b;
-            hash *= 1099511628211;
-        }
-        return hash.ToString("x16");
-    }
-
-    private static JsonNode? Canonicalize(JsonNode? node)
-    {
-        if (node is JsonObject obj)
-        {
-            var sorted = new JsonObject();
-            foreach (var pair in obj
-                .Where(pair => pair.Key is not ("rev" or "runId"))
-                .OrderBy(pair => pair.Key, StringComparer.Ordinal))
-                sorted[pair.Key] = Canonicalize(pair.Value);
-            return sorted;
-        }
-        if (node is JsonArray array)
-        {
-            var result = new JsonArray();
-            foreach (var value in array) result.Add(Canonicalize(value));
-            return result;
-        }
-        return node is null ? null : JsonNode.Parse(node.ToJsonString());
-    }
+        => observation.ConsumerFingerprint();
 }

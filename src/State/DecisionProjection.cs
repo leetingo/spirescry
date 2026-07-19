@@ -7,22 +7,21 @@ internal static class DecisionProjection
 {
     public static string[] LegalVerbs(SnapshotContract snapshot, bool runActive)
     {
-        var phase = snapshot.Phase;
         var legal = new List<string>();
         void Add(string verb)
         {
             if (!legal.Contains(verb, StringComparer.Ordinal)) legal.Add(verb);
         }
 
-        switch (phase)
+        switch (snapshot.Phase)
         {
-            case "main_menu":
+            case Phase.MainMenu:
                 if (!runActive) Add("new-run");
                 break;
-            case "map":
+            case Phase.Map:
                 if (snapshot.Next.Length > 0) Add("map-move");
                 break;
-            case "combat":
+            case Phase.Combat:
                 if (snapshot.Side == "player" && snapshot.ActionsDisabled != true)
                 {
                     if (snapshot.Hand.Any(card => card.Playable == true))
@@ -31,23 +30,23 @@ internal static class DecisionProjection
                     if (snapshot.Potions.Length > 0) Add("potion-use");
                 }
                 break;
-            case "event":
+            case Phase.Event:
                 if (snapshot.Available == false) break;
                 if (snapshot.Options.Any(option =>
                     option.Locked != true && option.Chosen != true))
                     Add("option");
                 Add("proceed");
                 break;
-            case "rest_site":
+            case Phase.RestSite:
                 if (snapshot.Options.Any(option => option.Enabled == true))
                     Add("option");
                 if (snapshot.ProceedAvailable == true) Add("proceed");
                 break;
-            case "shop":
+            case Phase.Shop:
                 if (ShopHasPurchase(snapshot)) Add("buy");
                 if (snapshot.Available != false) Add("leave");
                 break;
-            case "treasure":
+            case Phase.Treasure:
                 if (snapshot.Relics.Length > 0)
                 {
                     Add("pick-relic");
@@ -62,37 +61,37 @@ internal static class DecisionProjection
                     Add("pick-relic");
                 if (snapshot.ProceedAvailable == true) Add("proceed");
                 break;
-            case "rewards":
+            case Phase.Rewards:
                 if (snapshot.Available == false) break;
                 if (snapshot.Rewards.Length > 0) Add("pick-reward");
                 Add("proceed");
                 break;
-            case "card_reward":
+            case Phase.CardReward:
                 if (snapshot.Cards.Length > 0) Add("pick-card");
                 if (snapshot.Alternatives.Length > 0) Add("skip");
                 break;
-            case "relic_reward":
+            case Phase.RelicReward:
                 if (snapshot.Relics.Length > 0)
                 {
                     Add("pick-relic");
                     Add("skip");
                 }
                 break;
-            case "card_select":
+            case Phase.CardSelect:
                 if (snapshot.Cards.Length > 0) Add("pick-card");
                 if (snapshot.Confirmable == true) Add("confirm");
                 if (snapshot.Cancelable == true) Add("skip");
                 break;
-            case "hand_select":
+            case Phase.HandSelect:
                 if (snapshot.Cards.Length > 0) Add("pick-card");
                 if (snapshot.Confirmable == true) Add("confirm");
                 break;
-            case "bundle_select":
+            case Phase.BundleSelect:
                 if (snapshot.Bundles.Length > 0) Add("pick-card");
                 if (snapshot.Confirmable == true) Add("confirm");
                 if (snapshot.Cancelable == true) Add("skip");
                 break;
-            case "crystal_sphere":
+            case Phase.CrystalSphere:
                 if (snapshot.Available != false)
                 {
                     if (snapshot.Cells.Any(cell => cell.Hidden == true))
