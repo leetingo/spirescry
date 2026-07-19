@@ -178,6 +178,67 @@ internal static class Tests
         Equal(60, snapshot.Sum());
     }
 
+    public static void CollectionSnapshotRetriesATransientLiveMutation()
+    {
+        var attempts = 0;
+
+        var snapshot = CollectionSnapshot.ReadStable(
+            "power semantic state",
+            () =>
+            {
+                attempts++;
+                if (attempts == 1) throw CollectionMutation();
+                return new[] { "STRENGTH" };
+            });
+
+        Equal(2, attempts);
+        Equal("STRENGTH", snapshot.Single());
+    }
+
+    public static void CollectionSnapshotPropagatesPersistentLiveMutation()
+    {
+        var attempts = 0;
+
+        var error = Capture<InvalidOperationException>(() =>
+            CollectionSnapshot.ReadStable<int[]>(
+                "intent semantic state",
+                () =>
+                {
+                    attempts++;
+                    throw CollectionMutation();
+                }));
+
+        Equal(3, attempts);
+        True(error.Message.Contains("intent semantic state"));
+        True(error.InnerException is InvalidOperationException);
+    }
+
+    public static void CollectionSnapshotDoesNotRetryOtherFailures()
+    {
+        var attempts = 0;
+
+        var error = Capture<InvalidOperationException>(() =>
+            CollectionSnapshot.ReadStable<int[]>(
+                "card dynamic vars",
+                () =>
+                {
+                    attempts++;
+                    throw new ArgumentException("broken model");
+                }));
+
+        Equal(1, attempts);
+        True(error.Message.Contains("card dynamic vars"));
+        True(error.InnerException is ArgumentException);
+    }
+
+    public static void CollectionSnapshotPreservesAValidEmptyRead()
+    {
+        var snapshot = CollectionSnapshot.ReadStable(
+            "power semantic state", Array.Empty<string>);
+
+        Equal(0, snapshot.Length);
+    }
+
     public static void SettlementReturnsImmediateQuietBoundary()
     {
         var clock = new FakeSettlementClock();
@@ -1288,6 +1349,8 @@ internal static class Tests
 
         throw new InvalidOperationException($"expected {typeof(T).Name}");
     }
+    private static InvalidOperationException CollectionMutation() => new(
+        "Collection was modified; enumeration operation may not execute.");
 }
 
 internal static class PatchIdentityProbe

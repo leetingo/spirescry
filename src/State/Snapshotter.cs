@@ -130,7 +130,7 @@ internal static class Snapshotter
 
     private static string CardStateToken(CardModel card, bool liveCost = false)
     {
-        var variables = CardSpecifier.DynamicVars(card)?
+        var variables = CardSpecifier.SemanticDynamicVars(card)?
             .OrderBy(pair => pair.Key, StringComparer.Ordinal)
             .Select(pair => new object[] { pair.Key, pair.Value })
             .ToArray() ?? [];
@@ -138,7 +138,7 @@ internal static class Snapshotter
             "card",
             CardSpecifier.From(card),
             liveCost ? card.EnergyCost.GetAmountToSpend() : card.EnergyCost.Canonical,
-            CardSpecifier.StarCost(card),
+            CardSpecifier.SemanticStarCost(card),
             card.Keywords.Contains(CardKeyword.Unplayable),
             variables);
     }
@@ -159,16 +159,12 @@ internal static class Snapshotter
             .ToArray();
 
     private static string[] PowerState(Creature creature)
-    {
-        try
-        {
-            return creature.Powers
+        => CollectionSnapshot.ReadStable(
+            "power semantic state",
+            () => creature.Powers
                 .Select(power => SemanticToken("power", power.Id.Entry, power.Amount))
                 .OrderBy(token => token, StringComparer.Ordinal)
-                .ToArray();
-        }
-        catch { return []; }
-    }
+                .ToArray());
 
     // Bundle offers: pick one pack of cards (Neow's Scroll Boxes, …).
     private static SnapshotContract BundleSelectSnapshot(Phase phase)
@@ -1414,10 +1410,9 @@ internal static class Snapshotter
     }
 
     private static string[] IntentState(CombatState state, Creature enemy)
-    {
-        try
-        {
-            return (enemy.Monster?.NextMove.Intents ?? [])
+        => CollectionSnapshot.ReadStable(
+            "intent semantic state",
+            () => (enemy.Monster?.NextMove.Intents ?? [])
                 .Select((intent, index) => SemanticToken(
                     "intent",
                     index,
@@ -1429,10 +1424,7 @@ internal static class Snapshotter
                         ? (int?)(int)calc()
                         : null,
                     intent is AttackIntent repeated ? repeated.Repeats : null))
-                .ToArray();
-        }
-        catch { return []; }
-    }
+                .ToArray());
 
     private static string? IntentTip(AbstractIntent i, CombatState state, Creature enemy)
     {

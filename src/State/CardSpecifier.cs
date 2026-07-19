@@ -82,22 +82,40 @@ internal static class CardSpecifier
     {
         try
         {
-            var variables = new Dictionary<string, decimal>();
-            foreach (var variable in card.DynamicVars.Values)
-                variables[variable.Name] = variable.PreviewValue;
-            return variables.Count == 0 ? null : variables;
+            return ReadDynamicVars(card);
         }
         catch { return null; }
     }
+
+    internal static Dictionary<string, decimal>? SemanticDynamicVars(CardModel card) =>
+        CollectionSnapshot.ReadStable(
+            "card dynamic vars semantic state", () => ReadDynamicVars(card));
 
     internal static int? StarCost(CardModel card)
     {
         try
         {
-            var cost = card.GetStarCostWithModifiers();
-            return cost >= 0 ? cost : null;
+            return ReadStarCost(card);
         }
         catch { return null; }
+    }
+
+    internal static int? SemanticStarCost(CardModel card) =>
+        CollectionSnapshot.ReadStable(
+            "card star cost semantic state", () => ReadStarCost(card));
+
+    private static Dictionary<string, decimal>? ReadDynamicVars(CardModel card)
+    {
+        var variables = new Dictionary<string, decimal>();
+        foreach (var variable in card.DynamicVars.Values)
+            variables[variable.Name] = variable.PreviewValue;
+        return variables.Count == 0 ? null : variables;
+    }
+
+    private static int? ReadStarCost(CardModel card)
+    {
+        var cost = card.GetStarCostWithModifiers();
+        return cost >= 0 ? cost : null;
     }
 
     // Upgrades mutate dynamic vars in place, so render a throwaway canonical
