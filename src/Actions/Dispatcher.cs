@@ -74,7 +74,7 @@ public static class Dispatcher
         "goto", "gold", "heal", "hp", "wound-enemies", "event", "combat",
         "card", "card-upgraded", "relic", "potion", "stars", "energy",
         "async-fault", "engine-error", "engine-error-delayed",
-        "event-fault-delayed",
+        "event-fault-delayed", "event-fault-late",
     };
 
     public static DispatchResult Dispatch(string action, JsonElement args) => action switch
@@ -124,6 +124,7 @@ public static class Dispatcher
             "engine-error" => CheatEngineError(),
             "engine-error-delayed" => CheatEngineErrorDelayed(),
             "event-fault-delayed" => CheatEventFaultDelayed(),
+            "event-fault-late" => CheatEventFaultLate(),
             var n => DispatchResult.Reject(RejectionCodes.BadRequest,
                 $"unknown cheat '{n}' (supported: {string.Join(", ", Cheats)})"),
         };
@@ -173,14 +174,62 @@ public static class Dispatcher
     // engine-error-delayed covers the flat fire-and-forget kind.
     private static DispatchResult CheatEventFaultDelayed()
     {
-        if (RequirePhase(Phase.Event) is { } err) return err;
-        if (RunManager.Instance?.EventSynchronizer is not { } sync
-            || Reflect.FieldValue(sync, "_pendingOptionTasks") is not List<Task> pending)
+        // Any phase: a delivered Chosen() can run synchronously into a
+        // picker or combat before the sweep's next look, so the sweep
+        // must find tasks regardless of the visible phase — the test
+        // injects from those phases too.
+        if (RunManager.Instance?.EventSynchronizer is not { } sync)
             return DispatchResult.Reject(
+                RejectionCodes.BadState, "no event synchronizer");
+        return EventSync.InjectTask(
+            sync, MegaCrit.Sts2.Core.Helpers.TaskHelper.RunSafely(DelayedEventOptionFault()))
+            ? DispatchResult.Success()
+            : DispatchResult.Reject(
                 RejectionCodes.Internal, "event synchronizer pending list not found");
-        pending.Add(
-            MegaCrit.Sts2.Core.Helpers.TaskHelper.RunSafely(DelayedEventOptionFault()));
+    }
+
+    // The full client-window shape: a local shared vote leaves no task
+    // behind (only a pending vote slot); the deciding vote arrives by
+    // network message ~600ms later, appending the RunSafely task that
+    // then faults. The originating follow must stay open across the
+    // whole gap — vote-pending first, then the swept task — and carry
+    // the fault. Everything runs through the same EventSync adapter and
+    // main-thread pump the real delivery path uses.
+    private static DispatchResult CheatEventFaultLate()
+    {
+        if (RequirePhase(Phase.Event) is { } err) return err;
+        if (RunManager.Instance?.EventSynchronizer is not { } sync)
+            return DispatchResult.Reject(
+                RejectionCodes.BadState, "no event synchronizer");
+        if (!EventSync.InjectVote(sync))
+            return DispatchResult.Reject(
+                RejectionCodes.Internal, "event synchronizer vote list not found");
+        // Deliberately untracked, like the network layer it simulates:
+        // during the 600ms gap only the pending vote may hold the
+        // window — that is the semantics under test.
+        _ = DeliverLateEventFault(sync).ContinueWith(
+            t =>
+            {
+                if (t.Exception is { } ex)
+                    SafeLog.Error("event-fault-late delivery", ex.InnerException ?? ex);
+            },
+            TaskContinuationOptions.OnlyOnFaulted);
         return DispatchResult.Success();
+    }
+
+    private static async Task DeliverLateEventFault(
+        MegaCrit.Sts2.Core.Multiplayer.Game.EventSynchronizer sync)
+    {
+        await Task.Delay(600).ConfigureAwait(false);
+        // Deliveries mutate synchronizer state on the main thread only.
+        await Threading.MainThreadPump.Instance!.Run(() =>
+        {
+            EventSync.ClearVotes(sync);
+            EventSync.InjectTask(
+                sync, MegaCrit.Sts2.Core.Helpers.TaskHelper.RunSafely(
+                    DelayedEventOptionFault()));
+            return true;
+        });
     }
 
     private static async Task DelayedEventOptionFault()
@@ -978,7 +1027,7 @@ public static class Dispatcher
         // upgrade, …) awaits a card selection with no screen to serve it —
         // Around pre-arms the deferred picker for that.
         var sync = RunManager.Instance!.EventSynchronizer;
-        var before = PendingOptionTaskCount(sync);
+        var before = EventSync.PendingTaskCount(sync);
         HeadlessPicker.Around(() => sync.ChooseLocalOption(idx));
         TrackPendingEventOptions(sync, before);
         return DispatchResult.Success();
@@ -995,17 +1044,10 @@ public static class Dispatcher
     // tasks appended outside any dispatch (a client's vote delivered by
     // a network message). Shared dispatcher code — GUI boots get the
     // same settlement coverage as the pure host.
-    private static int PendingOptionTaskCount(
-        MegaCrit.Sts2.Core.Multiplayer.Game.EventSynchronizer sync) =>
-        Reflect.FieldValue(sync, "_pendingOptionTasks") is List<Task> pending
-            ? pending.Count
-            : 0;
-
     private static void TrackPendingEventOptions(
         MegaCrit.Sts2.Core.Multiplayer.Game.EventSynchronizer sync, int before)
     {
-        if (Reflect.FieldValue(sync, "_pendingOptionTasks") is not List<Task> pending)
-            return;
+        if (EventSync.PendingTasks(sync) is not { } pending) return;
         // A canonical-event change inside the dispatch clears the list;
         // a shrunken count means the prefix is gone, so track everything.
         var start = pending.Count < before ? 0 : before;

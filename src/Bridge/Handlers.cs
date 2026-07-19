@@ -370,7 +370,15 @@ public static class Handlers
             var combatLive = MegaCrit.Sts2.Core.Combat.CombatManager.Instance
                 is { IsInProgress: true };
             var pending = Signals.PendingSnapshot();
-            var eventOptionExecuting = pending.EventOptions > 0
+            // A shared-event vote on a multiplayer client owes option
+            // work before any task exists — the resolution arrives by
+            // network message, possibly seconds later. The pending vote
+            // holds this verb's window open until the delivered tasks
+            // take over (the Tick sweep picks them up), so a late fault
+            // still lands in the response that caused it.
+            var optionWorkOwed = pending.EventOptions > 0
+                || EventSync.SharedVotePending(rm?.EventSynchronizer);
+            var eventOptionExecuting = optionWorkOwed
                 && !combatLive && !parkedDecision;
             var busy = pending.Other > 0
                 || eventOptionExecuting

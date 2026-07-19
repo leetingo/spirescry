@@ -595,6 +595,27 @@ def p14():
     )
     assert any("delayed event-option failure" in e
                for e in entry.get("errors", [])), entry
+
+    # The full client window: the cheat leaves only a pending vote —
+    # NO task exists — and the "network" delivers the faulting task
+    # ~600ms later. Nothing but the vote can hold the follow open
+    # through the gap, so this fails if quiet frames close the response
+    # before delivery.
+    late = run("cheat", "event-fault-late", "--follow", "8000",
+               allow_errors=True)
+    assert late["settled"] is True, late
+    assert any(
+        error.startswith("async_fault:event-option:")
+        and "delayed event-option failure" in error
+        for error in late["errors"]
+    ), late["errors"]
+    entry = next(
+        v for v in reversed(run("runlog")["verbs"])
+        if v["action"] == "cheat"
+        and v.get("args", {}).get("name") == "event-fault-late"
+    )
+    assert any("delayed event-option failure" in e
+               for e in entry.get("errors", [])), entry
     to_menu()
 
 
@@ -1632,6 +1653,43 @@ def e2():
     models = [c["model"] for c in obs()["player"]["deck"]]
     assert models.count("DEFEND_IRONCLAD") == models0.count("DEFEND_IRONCLAD") - 2, \
         (models0, models)
+    to_menu()
+
+
+@case("E4 tasks appearing outside the event phase are still swept")
+def e4():
+    # A delivered Chosen() can synchronously open a picker before the
+    # sweep's next look — the sweep must find tasks by list state, not
+    # by the visible phase. Park the Amalgamator's combine picker
+    # (phase card_select), inject the fault task there, then resolve the
+    # picks: the final follow must span both the combine's own delay and
+    # the injected fault, and report both effects.
+    to_map(seed="CIAMALG")
+    run("cheat", "event", "AMALGAMATOR")
+    d = bridge.wait_phase("event")
+    combine = next(
+        o for o in d["options"]
+        if "defend" in ((o.get("title") or "") + (o.get("description") or "")).lower()
+        and not o.get("locked"))
+    picking = run("option", str(combine["idx"]), "--follow", "5000")
+    assert picking["obs"]["phase"] == "card_select", picking["obs"]["phase"]
+
+    run("cheat", "event-fault-delayed", allow_errors=True)  # injected mid-picker
+    first = run("pick-card", "0", "--follow", "5000", allow_errors=True)
+    done = run("pick-card", "1", "--follow", "8000", allow_errors=True)
+
+    # The async_fault:event-option prefix exists only for swept/tracked
+    # tasks — its presence in either pick window proves the sweep found
+    # the task despite the non-event phase (window attribution precision
+    # is P14's job; the fault's 250ms timer races the two picks).
+    seen = (first.get("errors") or []) + (done.get("errors") or [])
+    assert any(
+        error.startswith("async_fault:event-option:")
+        and "delayed event-option failure" in error
+        for error in seen
+    ), seen
+    deck_after = done["obs"]["player"]["deck"]
+    assert any(key.startswith("ULTIMATE_DEFEND") for key in deck_after), deck_after
     to_menu()
 
 

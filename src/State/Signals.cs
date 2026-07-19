@@ -63,15 +63,16 @@ public static class Signals
     // Option tasks can enter the synchronizer's list outside any
     // dispatch: a shared choice appends one RunSafely(Chosen()) task per
     // player, and a multiplayer client's vote lands later via a network
-    // message. Sweep the list on every event-phase tick — both boots run
-    // Tick, so GUI clients get the same coverage — and let the
-    // membership gate in TrackAsync make re-scans idempotent. Main
-    // thread only, like every other engine read here.
+    // message. Sweep the list on EVERY tick — not just event frames: a
+    // delivered Chosen() runs synchronously to its first await and can
+    // open a picker or a combat before the next tick, and the task must
+    // still be found. Both boots run Tick, so GUI clients get the same
+    // coverage; the membership gate in TrackAsync makes re-scans
+    // idempotent. Main thread only, like every other engine read here.
     private static void SweepPendingEventOptions()
     {
-        if (RunManager.Instance?.EventSynchronizer is not { } sync) return;
-        if (Reflect.FieldValue(sync, "_pendingOptionTasks")
-            is not List<Task> pending) return;
+        if (EventSync.PendingTasks(RunManager.Instance?.EventSynchronizer)
+            is not { } pending) return;
         foreach (var task in pending)
             if (task is { IsCompleted: false })
                 TrackAsync(task, "event-option", TrackedKind.EventOption);
@@ -231,7 +232,7 @@ public static class Signals
         WatchExecutor();
         RefreshRunIdentity();
         var phase = PhaseDetector.Current().AsString();
-        if (phase == "event") SweepPendingEventOptions();
+        SweepPendingEventOptions();
         if (phase != _lastPhase)
         {
             var from = _lastPhase;
