@@ -105,14 +105,10 @@ public static class Snapshotter
 
     // The crystal-sphere event minigame: a cell grid, a divination tool,
     // and a fixed number of reveals. map-move clicks a cell, option picks
-    // the tool, proceed leaves. GUI-only — the screen owns the minigame.
+    // the tool, proceed leaves.
     private static object CrystalSphereSnapshot(string phase)
     {
-        var entity = RunMode.IsHeadless
-            ? HeadlessCrystal.Entity
-            : Screens.Crystal() is { } screen
-                ? Screens.CrystalEntity(screen)
-                : null;
+        var entity = DecisionSurface.Current.Crystal;
         if (entity is null) return new { phase, available = false };
 
         var grid = entity.GridSize;
@@ -468,15 +464,14 @@ public static class Snapshotter
 
     private static object RestSiteSnapshot(string phase)
     {
-        var options = Screens.RestOptions();
-        if (options is null) return new { phase, available = false };
+        var decision = DecisionSurface.Current.RestSite;
+        if (decision is null) return new { phase, available = false };
         return new
         {
             phase,
             player = FooterView(),
-            proceedAvailable = RunMode.IsHeadless
-                || NRestSiteRoom.Instance?.ProceedButton is { Visible: true },
-            options = options.Select((o, i) => new
+            proceedAvailable = decision.ProceedAvailable,
+            options = decision.Options.Select((o, i) => new
             {
                 idx = i,
                 id = o.OptionId.ToString(),
@@ -494,29 +489,17 @@ public static class Snapshotter
     // an empty relics array with an open chest is a resolved offer.
     private static object TreasureSnapshot(string phase)
     {
-        var room = NRun.Instance?.TreasureRoom;
-        var opened = room is not null && Screens.ChestOpened(room);
-        var sync = RunManager.Instance?.TreasureRoomRelicSynchronizer;
-
-        var relics = sync?.CurrentRelics;
-        // Headless has no chest-flag node: the offer being visible marks
-        // the chest open, and HeadlessTreasure keeps it open after a
-        // pick/skip empties the offer (relics resolve; the chest doesn't
-        // close again).
-        var headlessOpened = RunMode.IsHeadless && ReferenceEquals(
-            HeadlessTreasure.OpenedRoom,
-            RunManager.Instance?.DebugOnlyGetState()?.CurrentRoom);
+        var decision = DecisionSurface.Current.Treasure;
         return new
         {
             phase,
-            chestOpened = opened || headlessOpened || relics is { Count: > 0 },
+            chestOpened = decision.ChestOpened,
             // Headless can always leave the room (proceed declines a
             // pending offer first); the GUI gates leaving on resolving
             // the chest.
-            proceedAvailable = RunMode.IsHeadless
-                || NRun.Instance?.TreasureRoom?.ProceedButton is { Visible: true },
+            proceedAvailable = decision.ProceedAvailable,
             player = FooterView(),
-            relics = (relics ?? []).Select(RelicView).ToArray(),
+            relics = decision.Relics.Select(RelicView).ToArray(),
         };
     }
 
@@ -548,24 +531,15 @@ public static class Snapshotter
     // stay stable; we just omit them from the snapshot.
     private static object RewardsSnapshot(string phase)
     {
-        if (RunMode.IsHeadless)
-            return new
-            {
-                phase,
-                player = FooterView(),
-                rewards = HeadlessRewards.Slotted()
-                    .Select(s => RewardView(s.reward, s.idx)).ToList(),
-            };
-
-        var screen = Screens.Top<NRewardsScreen>();
-        var buttons = screen is null ? null : Screens.RewardButtons(screen);
-        if (buttons is null) return new { phase, available = false };
-
-        var rewards = new List<object>();
-        for (var i = 0; i < buttons.Count; i++)
-            if (Screens.ClaimableReward(buttons[i]) is { } btn)
-                rewards.Add(RewardView(btn.Reward!, i));
-        return new { phase, player = FooterView(), rewards };
+        var decision = DecisionSurface.Current.Rewards;
+        if (decision is null) return new { phase, available = false };
+        return new
+        {
+            phase,
+            player = FooterView(),
+            rewards = decision.Rewards
+                .Select(slot => RewardView(slot.Reward, slot.Index)).ToList(),
+        };
     }
 
     // Shared reward-tile view — see the per-card views below for why both
@@ -590,44 +564,19 @@ public static class Snapshotter
 
     private static object CardRewardSnapshot(string phase)
     {
-        if (RunMode.IsHeadless)
-        {
-            var offered = HeadlessRewards.ActiveCardPick?.Cards?.ToList();
-            if (offered is null) return new { phase, available = false };
-            return new
-            {
-                phase,
-                player = FooterView(),
-                cards = offered.Select(RewardCardView).ToArray(),
-                alternatives = HeadlessRewards.Alternatives()
-                    .Select((a, i) => (object)new { idx = i, title = SafeText(a.Title) })
-                    .ToArray(),
-            };
-        }
-
-        var screen = Screens.Top<NCardRewardSelectionScreen>();
-        var holders = screen is null ? null : Screens.CardHolders(screen);
-        if (holders is null || holders.Count == 0)
-            return new { phase, available = false };
-        var cardViews = new List<object>(holders.Count);
-        for (var i = 0; i < holders.Count; i++)
-        {
-            if (holders[i].CardModel is not { } card)
-                return new { phase, available = false };
-            cardViews.Add(RewardCardView(card, i));
-        }
-
+        var decision = DecisionSurface.Current.CardReward;
+        if (decision is null) return new { phase, available = false };
         return new
         {
             phase,
             player = FooterView(),
-            cards = cardViews.ToArray(),
+            cards = decision.Cards.Select(RewardCardView).ToArray(),
             // Non-card choices (skip, trade offers, …) — target of `skip`.
-            alternatives = Screens.ExtraOptions(screen!)
-                .Select((o, i) => new
+            alternatives = decision.AlternativeTitles
+                .Select((title, i) => new
                 {
                     idx = i,
-                    title = SafeText(Reflect.PropertyValue(o, "Title") as LocString),
+                    title = SafeText(title),
                 }).ToArray(),
         };
     }
@@ -1103,100 +1052,21 @@ public static class Snapshotter
         catch { return null; }
     }
 
-    // Every grid picker (deck removal / upgrade / transform / enchant,
-    // combat pile selects) shares one base: cards behind an NCardGrid,
-    // toggled via OnCardClicked, bounded by CardSelectorPrefs.
-    // Headless: card_select and hand_select both read the deferred picker.
-    // Key sets mirror the GUI snapshots (prompt is unknown here — the
-    // engine doesn't pass it through ICardSelector; skip always cancels,
-    // so cancelable is true).
-    private static object PickerSnapshot(string phase, bool handSelect)
-    {
-        if (!HeadlessPicker.IsActive) return new { phase, available = false };
-        var picked = HeadlessPicker.Picked;
-        if (handSelect)
-            return new
-            {
-                phase,
-                prompt = "",
-                min = HeadlessPicker.MinSelect,
-                max = HeadlessPicker.MaxSelect,
-                confirmable = picked.Count >= HeadlessPicker.MinSelect,
-                selected = picked.Select(c => c.Id.Entry).ToArray(),
-                cards = HeadlessPicker.Candidates
-                    .Select((c, i) => HandCardView(c, i)).ToArray(),
-            };
-        return new
-        {
-            phase,
-            player = FooterView(),
-            prompt = "",
-            min = HeadlessPicker.MinSelect,
-            max = HeadlessPicker.MaxSelect,
-            cancelable = true,
-            confirmable = picked.Count >= HeadlessPicker.MinSelect,
-            cards = HeadlessPicker.Candidates
-                .Select((c, i) => SelectCardView(c, i, picked.Contains(c))).ToArray(),
-        };
-    }
-
     private static object CardSelectSnapshot(string phase)
     {
-        if (RunMode.IsHeadless) return PickerSnapshot(phase, handSelect: false);
-
-        // Choose-a-card overlays (Discovery, event card offers): a card
-        // row, pick one, done — no confirm step.
-        if (Screens.Top<NChooseACardSelectionScreen>() is { } choose)
-        {
-            var chooseHolders = Screens.CardHolders(choose);
-            if (chooseHolders is null || chooseHolders.Count == 0)
-                return new { phase, available = false };
-            var chooseCards = new List<object>(chooseHolders.Count);
-            for (var i = 0; i < chooseHolders.Count; i++)
-            {
-                if (chooseHolders[i].CardModel is not { } card)
-                    return new { phase, available = false };
-                chooseCards.Add(SelectCardView(card, i, false));
-            }
-            return new
-            {
-                phase,
-                player = FooterView(),
-                prompt = "",
-                min = 1,
-                max = 1,
-                cancelable = Screens.ChooseSkipEnabled(choose),
-                confirmable = false,
-                cards = chooseCards.ToArray(),
-            };
-        }
-
-        var screen = Screens.Top<NCardGridSelectionScreen>();
-        var cards = screen is null ? null : Screens.GridCards(screen);
-        if (screen is null || cards is null || cards.Count == 0)
-            return new { phase, available = false };
-
-        var prefs = Screens.Prefs(screen);
-        var selected = Screens.SelectedCards(screen).ToHashSet();
-        var selectedCount = selected.Count;
-        var confirmable = screen switch
-        {
-            NSimpleCardSelectScreen or NCombatPileCardSelectScreen =>
-                Reflect.Field<NClickableControl>(screen, "_confirmButton") is { IsEnabled: true },
-            NDeckTransformSelectScreen => selectedCount >= prefs.MinSelect,
-            NDeckCardSelectScreen => selectedCount >= prefs.MinSelect,
-            _ => selectedCount >= prefs.MaxSelect,
-        };
+        var decision = DecisionSurface.Current.CardSelect;
+        if (decision is null) return new { phase, available = false };
         return new
         {
             phase,
             player = FooterView(),
-            prompt = SafeText(prefs.Prompt),
-            min = prefs.MinSelect,
-            max = prefs.MaxSelect,
-            cancelable = prefs.Cancelable,
-            confirmable,
-            cards = cards.Select((c, i) => SelectCardView(c, i, selected.Contains(c))).ToArray(),
+            prompt = SafeText(decision.Prompt),
+            min = decision.MinSelect,
+            max = decision.MaxSelect,
+            cancelable = decision.Cancelable,
+            confirmable = decision.Confirmable,
+            cards = decision.Cards.Select((card, i) =>
+                SelectCardView(card, i, decision.Selected.Contains(card))).ToArray(),
         };
     }
 
@@ -1205,27 +1075,19 @@ public static class Snapshotter
     // ActiveHolders (into the selected row), so idx tracks what's on screen.
     private static object HandSelectSnapshot(string phase)
     {
-        if (RunMode.IsHeadless) return PickerSnapshot(phase, handSelect: true);
-
-        var hand = NPlayerHand.Instance;
-        if (hand is null) return new { phase, available = false };
-
-        var prefs = Screens.Prefs(hand);
-        var selected = Screens.SelectedCards(hand);
-        var confirmable = Reflect.Field<NClickableControl>(
-            hand, "_selectModeConfirmButton") is { IsEnabled: true };
-        return new
+        var decision = DecisionSurface.Current.HandSelect;
+        if (decision is null) return new { phase, available = false };
+        var snapshot = new Dictionary<string, object?>
         {
-            phase,
-            player = FooterView(),
-            prompt = SafeText(prefs.Prompt),
-            min = prefs.MinSelect,
-            max = prefs.MaxSelect,
-            confirmable,
-            selected = selected.Select(c => c.Id.Entry).ToArray(),
-            cards = hand.ActiveHolders.Select((h, i) =>
-                HandCardView(h.CardNode?.Model, i))
-                .ToArray(),
+            ["phase"] = phase,
         };
+        if (decision.IncludePlayer) snapshot["player"] = FooterView();
+        snapshot["prompt"] = SafeText(decision.Prompt);
+        snapshot["min"] = decision.MinSelect;
+        snapshot["max"] = decision.MaxSelect;
+        snapshot["confirmable"] = decision.Confirmable;
+        snapshot["selected"] = decision.Selected.Select(c => c.Id.Entry).ToArray();
+        snapshot["cards"] = decision.Cards.Select(HandCardView).ToArray();
+        return snapshot;
     }
 }
