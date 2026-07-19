@@ -19,7 +19,7 @@ internal sealed class RevisionJournal(int capacity)
         _entries.Where(entry => entry.Revision > revision).ToArray();
 
     public string[] TypesSince(long revision) =>
-        _entries.Where(entry => entry.Revision > revision)
+        Since(revision)
             .Select(entry => entry.Type)
             .ToArray();
 }

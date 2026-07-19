@@ -14,6 +14,14 @@ namespace Spirescry.State;
 // carries the new revision plus the named events behind it.
 public static class Signals
 {
+    private sealed class WaitClock
+    {
+        public long Revision { get; private set; }
+        public List<TaskCompletionSource<bool>> Waiters { get; } = new();
+
+        public void Advance() => Revision++;
+    }
+
     private const int LogCap = 64;
     private const int RetiredLogCorrelationMs = 50;
     // Errors are rarer and heavier than events; a run that produces more
@@ -25,12 +33,10 @@ public static class Signals
     private static readonly RevisionJournal ErrorJournal = new(ErrorCap);
     private static readonly EventOptionTracker EventOptions = new();
     private static readonly EngineLogCorrelation EngineLogs = new();
-    private static readonly List<TaskCompletionSource<bool>> Waiters = new();
-    private static readonly List<TaskCompletionSource<bool>> WorkWaiters = new();
+    private static readonly WaitClock PublicClock = new();
+    private static readonly WaitClock SettlementClock = new();
     private static readonly List<TaskCompletionSource<bool>> TickWaiters = new();
     private static readonly HashSet<Task> PendingFireAndForget = new();
-    private static long _revision;
-    private static long _workRevision;
     private static long _tickCount;
     private static string _lastPhase = "";
     private static object? _runStateRef;
@@ -52,9 +58,12 @@ public static class Signals
     private static CombatManager? _combat;
     private static NOverlayStack? _stack;
 
-    public static long Revision { get { lock (Gate) return _revision; } }
+    public static long Revision { get { lock (Gate) return PublicClock.Revision; } }
 
-    public static long WorkRevision { get { lock (Gate) return _workRevision; } }
+    public static long WorkRevision
+    {
+        get { lock (Gate) return SettlementClock.Revision; }
+    }
 
     public static long TickCount { get { lock (Gate) return _tickCount; } }
 
@@ -241,8 +250,8 @@ public static class Signals
             lock (Gate)
             {
                 PendingFireAndForget.Remove(task);
-                _workRevision++;
-                wake = DrainWaitersLocked(WorkWaiters);
+                SettlementClock.Advance();
+                wake = DrainWaitersLocked(SettlementClock.Waiters);
             }
             Wake(wake);
         }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously,
@@ -318,12 +327,13 @@ public static class Signals
 
     private static List<TaskCompletionSource<bool>>? RecordBumpLocked(string type)
     {
-        _revision++;
-        _workRevision++;
-        EventJournal.Add(_revision, type);
+        PublicClock.Advance();
+        SettlementClock.Advance();
+        EventJournal.Add(PublicClock.Revision, type);
         if (ErrorEvents.IsError(type))
-            ErrorJournal.Add(_revision, type);
-        return DrainWaitersLocked(Waiters, WorkWaiters);
+            ErrorJournal.Add(PublicClock.Revision, type);
+        return DrainWaitersLocked(
+            PublicClock.Waiters, SettlementClock.Waiters);
     }
 
     private static void Wake(List<TaskCompletionSource<bool>>? waiters)
@@ -354,32 +364,29 @@ public static class Signals
 
     // True when the revision moved past `since`; false on timeout.
     public static Task<bool> WaitForChange(long since, int timeoutMs) =>
-        WaitForCounterChange(since, timeoutMs, workClock: false);
+        WaitForCounterChange(since, timeoutMs, PublicClock);
 
     // Follow observes both public revision changes and silent changes to
     // tracked-work membership. Keeping this clock separate preserves the
     // /obs?since contract: a correlation-only wake never claims the public
     // state revision moved.
     public static Task<bool> WaitForWorkChange(long since, int timeoutMs) =>
-        WaitForCounterChange(since, timeoutMs, workClock: true);
+        WaitForCounterChange(since, timeoutMs, SettlementClock);
 
     private static async Task<bool> WaitForCounterChange(
-        long since, int timeoutMs, bool workClock)
+        long since, int timeoutMs, WaitClock clock)
     {
         TaskCompletionSource<bool> tcs;
-        List<TaskCompletionSource<bool>> waiters;
         lock (Gate)
         {
-            var current = workClock ? _workRevision : _revision;
-            if (current > since) return true;
+            if (clock.Revision > since) return true;
             tcs = new TaskCompletionSource<bool>(
                 TaskCreationOptions.RunContinuationsAsynchronously);
-            waiters = workClock ? WorkWaiters : Waiters;
-            waiters.Add(tcs);
+            clock.Waiters.Add(tcs);
         }
         try { return await tcs.Task.WaitAsync(TimeSpan.FromMilliseconds(timeoutMs)); }
         catch (TimeoutException) { return false; }
-        finally { lock (Gate) waiters.Remove(tcs); }
+        finally { lock (Gate) clock.Waiters.Remove(tcs); }
     }
 
     // GUI callbacks do not all expose a Task or an engine event. Follow
