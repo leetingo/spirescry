@@ -1,5 +1,8 @@
+using MegaCrit.Sts2.Core.Combat;
+using MegaCrit.Sts2.Core.Models.Relics;
 using MegaCrit.Sts2.Core.Nodes;
 using MegaCrit.Sts2.Core.Rooms;
+using MegaCrit.Sts2.Core.Runs;
 
 namespace Spirescry.State;
 
@@ -18,7 +21,11 @@ public static class PhaseDetector
         var stateOnly = LocalRunContext.StateOnly;
         var rm = stateOnly?.Manager;
         var menuVisible = NGame.Instance?.MainMenu is { Visible: true };
-        if (rm is not null && (rm.IsGameOver || rm.IsAbandoned) && !menuVisible)
+        var revivalPending = stateOnly is { } terminalRun
+            && RevivalPending(terminalRun.State);
+        if (rm is not null
+            && (rm.IsAbandoned || (rm.IsGameOver && !revivalPending))
+            && !menuVisible)
             return Phase.GameOver;
 
         if (menuVisible)
@@ -46,4 +53,17 @@ public static class PhaseDetector
             _ => Phase.Unknown,
         };
     }
+
+    // CurrentHp reaches zero before ShouldDie/AfterPreventingDeath finish.
+    // RunState consequently reports game-over for a short interval even
+    // though an unused Lizard Tail has already won the death-prevention
+    // decision. Keep that engine-internal edge off the public phase stream;
+    // the relic hook will either revive and consume the tail or the next
+    // observation will publish the genuine terminal result.
+    private static bool RevivalPending(RunState state) =>
+        CombatManager.Instance is { IsInProgress: true }
+        && state.Players.Any(player =>
+            player.Creature.IsDead
+            && player.Relics.Any(relic =>
+                relic is LizardTail && !relic.IsUsedUp));
 }

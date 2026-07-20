@@ -95,7 +95,8 @@ public sealed class HttpBridge
                 ("GET", "/obs") => await Handlers.Obs(
                     req.QueryString["since"], req.QueryString["wait"],
                     req.QueryString["compact"], req.QueryString["decision"],
-                    req.QueryString.GetValues("known")),
+                    req.QueryString.GetValues("known"),
+                    req.QueryString["semanticState"]),
                 ("POST", "/step") => await Handlers.Step(body),
                 _ => Response.Error(RejectionCodes.NotFound, $"no route {req.HttpMethod} {path}", 404),
             };

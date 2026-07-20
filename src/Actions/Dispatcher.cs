@@ -112,6 +112,7 @@ public static class Dispatcher
             "async-fault" => CheatAsyncFault(),
             "engine-error" => CheatEngineError(),
             "engine-error-delayed" => CheatEngineErrorDelayed(),
+            "observation-fault" => CheatObservationFault(),
             "event-fault-delayed" => EventOptionCheats.FaultDelayed(),
             "event-fault-late" => EventOptionCheats.FaultLate(),
             "event-complete-late" => EventOptionCheats.CompleteLate(),
@@ -150,6 +151,12 @@ public static class Dispatcher
     {
         DecisionSurfaceActions.Track(
             DelayedEngineError(), "engine-error-delayed");
+        return DispatchResult.Success();
+    }
+
+    private static DispatchResult CheatObservationFault()
+    {
+        SettlementObservationCapture.ForceNextFailure();
         return DispatchResult.Success();
     }
 
@@ -1027,17 +1034,19 @@ public static class Dispatcher
         // AND stars, ally requirements, hooks, card logic. Without it a
         // star-starved play is accepted, then PlayCardAction silently
         // cancels: card stays, nothing spends, no error.
-        if (!card.CanPlay(out var reason, out var preventer))
+        var playability = CardPlayabilityGate.Evaluate(card);
+        if (!playability.Playable)
         {
-            var code = reason.HasFlag(UnplayableReason.StarCostTooHigh) ? RejectionCodes.NotEnoughStars
-                : reason.HasFlag(UnplayableReason.EnergyCostTooHigh) ? RejectionCodes.NotEnoughEnergy
-                : RejectionCodes.NotPlayable;
-            var detail = reason.HasFlag(UnplayableReason.StarCostTooHigh)
+            var detail = playability.Failure == CardPlayabilityFailure.NotEnoughStars
                     ? $" (needs {card.GetStarCostWithModifiers()} stars, have {pcs.Stars})"
-                : reason.HasFlag(UnplayableReason.EnergyCostTooHigh)
+                : playability.Failure == CardPlayabilityFailure.NotEnoughEnergy
                     ? $" (needs {card.EnergyCost.GetAmountToSpend()} energy, have {pcs.Energy})"
-                : preventer is null ? "" : $" (blocked by {preventer.Id.Entry})";
-            return DispatchResult.Reject(code, $"{card.Id.Entry}: {reason}{detail}");
+                : playability.Preventer is null
+                    ? ""
+                    : $" (blocked by {playability.Preventer})";
+            return DispatchResult.Reject(
+                playability.RejectionCode ?? RejectionCodes.NotPlayable,
+                $"{card.Id.Entry}: {playability.UnplayableReason}{detail}");
         }
 
         var (target, err) = ResolveTarget(card.TargetType, args, state, player);

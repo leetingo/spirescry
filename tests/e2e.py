@@ -627,6 +627,59 @@ def p13():
         error.startswith("engine_error:") and "delayed engine log error" in error
         for error in delayed["errors"]
     ), delayed["errors"]
+
+    # The delayed error is forced after the verb was accepted. One read-only
+    # command must retain its complete forensic trail before abandon destroys
+    # the run-scoped bridge journals.
+    bundle = run("fault-bundle")
+    sections = bundle["sections"]
+    source_run_id = sections["run"]["value"]["runId"]
+    assert bundle["kind"] == "spirescry_fault_bundle", bundle
+    assert bundle["readOnly"] is True, bundle
+    assert bundle["revision"]["unchanged"] is True, bundle["revision"]
+    assert all(sections[name]["available"] for name in (
+        "runLog", "observation", "health", "recentEvents", "recentErrors",
+        "identity", "run", "lastAcceptedVerb",
+    )), sections
+    assert sections["run"]["value"]["seed"] == "CIENGERR", sections["run"]
+    assert sections["lastAcceptedVerb"]["value"]["args"]["name"] \
+        == "engine-error-delayed", sections["lastAcceptedVerb"]
+    assert any("delayed engine log error" in event["type"]
+               for event in sections["recentErrors"]["value"]), \
+        sections["recentErrors"]
+
+    to_menu()
+    assert obs()["runId"] == "none"
+    assert sections["runLog"]["value"]["runId"] == source_run_id
+    assert sections["lastAcceptedVerb"]["value"]["args"]["name"] \
+        == "engine-error-delayed"
+
+
+@case("P13b accepted observation faults retain a typed action outcome")
+def p13b():
+    launch(seed="CIOBSFAULT")
+
+    completed = bridge.cli(
+        "cheat", "observation-fault", "--follow", "5000")
+    assert completed.returncode == 0, completed.stderr
+    faulted = json.loads(completed.stdout)
+
+    assert faulted["outcome"] == "fault" and faulted["settled"] is True, faulted
+    assert faulted["action"] == "cheat" and faulted["enqueued"] == "cheat", faulted
+    assert isinstance(faulted["acceptedRev"], int), faulted
+    assert faulted["runId"] not in (None, "none"), faulted
+    assert faulted["observationAvailable"] is False and faulted["obs"] is None, faulted
+    assert any(
+        error.startswith("async_fault:observation:InvalidOperationException:")
+        and "forced post-acceptance observation failure" in error
+        for error in faulted["errors"]
+    ), faulted["errors"]
+    assert "do not retry it blindly" in completed.stderr, completed.stderr
+
+    entry = latest_runlog_entry("cheat", cheat="observation-fault")
+    assert entry["outcome"] == "fault" and "fingerprint" not in entry, entry
+    assert entry["acceptedRev"] == faulted["acceptedRev"], (entry, faulted)
+    assert entry["errors"] == faulted["errors"], (entry, faulted)
     to_menu()
 
 
@@ -757,6 +810,8 @@ def p14():
         description="dynamic event to mount",
         after_rev=before,
     )
+    assert "semanticState" not in event, event
+    event = run("obs", "--semantic-state")
     variables = [
         token for token in event.get("semanticState", [])
         if token.startswith("eventVar:")
@@ -1476,6 +1531,8 @@ def k2():
                          if r["model"] == "HAPPY_FLOWER")
     assert isinstance(combat_flower["counter"], int), \
         f"combat relic counter missing: {combat_flower}"
+    assert combat_flower["usedUp"] is False, \
+        f"fresh combat relic marked used-up: {combat_flower}"
     to_menu()
 
 
@@ -1519,6 +1576,194 @@ def k3():
     to_menu()
 
 
+@case("K4 Necrobinder combat exposes Osty as structured state")
+def k4():
+    absent = into_combat(seed="CIOSTYABSENT", character="IRONCLAD")
+    assert "osty" in absent["you"] and absent["you"]["osty"] is None, \
+        absent["you"]
+    to_menu()
+
+    d = into_combat(seed="CIOSTYSTATE", character="NECROBINDER")
+    summoned = d["you"]["osty"]
+    assert summoned["model"] == "OSTY" and summoned["title"], summoned
+    assert summoned["hp"] == [1, 1], summoned
+
+    d = bridge.follow("cheat", "card", "BODYGUARD")
+    bodyguard = next(card for card in d["hand"]
+                     if card["model"] == "BODYGUARD")
+    d = bridge.follow("play", bodyguard.get("selector") or "BODYGUARD")
+    osty = d["you"]["osty"]
+    assert osty["model"] == "OSTY" and osty["title"] is None, osty
+    assert osty["hp"] == [6, 6] and osty["block"] == 0, osty
+    assert osty["alive"] is True and isinstance(osty["powers"], list), osty
+
+    full = run("obs")["you"]["osty"]
+    assert full["title"] and all(power["description"]
+                                 for power in full["powers"]), full
+
+    compact = run("obs", "--compact")["you"]["osty"]
+    assert compact["hp"] == osty["hp"] and compact["block"] == osty["block"], \
+        compact
+    assert compact["alive"] is True and compact["title"] is None, compact
+    assert all(power.get("description") is None for power in compact["powers"]), \
+        compact
+
+    # Give Osty enough health to survive a real enemy attack, then compare
+    # the structured ledger with Unleash's Osty-dependent preview.
+    bridge.follow("cheat", "energy", "99")
+    for _ in range(4):
+        d = bridge.follow("cheat", "card", "BODYGUARD")
+        bodyguard = next(card for card in d["hand"]
+                         if card["model"] == "BODYGUARD")
+        d = bridge.follow("play", bodyguard.get("selector") or "BODYGUARD")
+    grown = d["you"]["osty"]
+    assert grown["hp"] == [26, 26], grown
+
+    d = bridge.follow("cheat", "card", "UNLEASH")
+    unleash = next(card for card in d["hand"] if card["model"] == "UNLEASH")
+    preview_before_damage = unleash["vars"]["CalculatedDamage"]
+    player_hp_before_damage = d["you"]["hp"][0]
+
+    damaged = None
+    for _ in range(6):
+        d = bridge.follow("end-turn", timeout_ms=30000)
+        if not (d.get("phase") == PHASE.COMBAT and d.get("side") == "player"):
+            d = bridge.wait_until(
+                lambda snapshot: snapshot.get("phase") == PHASE.COMBAT
+                and snapshot.get("side") == "player",
+                timeout=30,
+                description="Osty damage absorption player turn",
+                after_rev=d.get("rev"),
+            )
+        candidate = d["you"]["osty"]
+        if candidate["alive"] and candidate["hp"][0] < grown["hp"][0]:
+            damaged = candidate
+            break
+    assert damaged is not None, d
+    assert d["you"]["hp"][0] == player_hp_before_damage, d["you"]
+
+    d = bridge.follow("cheat", "card", "UNLEASH")
+    unleash = next(card for card in d["hand"] if card["model"] == "UNLEASH")
+    preview_after_damage = unleash["vars"]["CalculatedDamage"]
+    assert preview_after_damage < preview_before_damage, unleash
+
+    before_heal = damaged["hp"]
+    bridge.follow("cheat", "energy", "99")
+    d = bridge.follow("cheat", "card", "SPUR")
+    spur = next(card for card in d["hand"] if card["model"] == "SPUR")
+    d = bridge.follow("play", spur.get("selector") or "SPUR")
+    healed = d["you"]["osty"]
+    assert healed["hp"][0] > before_heal[0], healed
+    assert healed["hp"][1] == before_heal[1] + 3, healed
+    healed_fingerprint = latest_runlog_entry("play")["fingerprint"]
+
+    d = bridge.follow("cheat", "card", "SACRIFICE")
+    sacrifice = next(card for card in d["hand"]
+                     if card["model"] == "SACRIFICE")
+    d = bridge.follow("play", sacrifice.get("selector") or "SACRIFICE")
+    dead = d["you"]["osty"]
+    assert dead["hp"][0] == 0 and dead["alive"] is False, dead
+    death_fingerprint = latest_runlog_entry("play")["fingerprint"]
+    assert healed_fingerprint != death_fingerprint, \
+        (healed_fingerprint, death_fingerprint)
+
+    d = bridge.follow("cheat", "card", "UNLEASH")
+    unleash = next(card for card in d["hand"] if card["model"] == "UNLEASH")
+    assert unleash["vars"]["CalculatedDamage"] \
+        == unleash["vars"]["CalculationBase"], unleash
+    to_menu()
+
+
+@case("K5 Lizard Tail revival never publishes a transient game_over")
+def k5():
+    def settle_to_player_or_terminal(snapshot, event_log):
+        if snapshot.get("phase") == PHASE.GAME_OVER or (
+                snapshot.get("phase") == PHASE.COMBAT
+                and snapshot.get("side") == "player"):
+            return snapshot
+
+        def record(observation):
+            event_log.extend(observation.get("events", []))
+
+        return bridge.wait_until(
+            lambda observation: observation.get("phase") == PHASE.GAME_OVER
+            or (observation.get("phase") == PHASE.COMBAT
+                and observation.get("side") == "player"),
+            timeout=30,
+            description="next combat decision or terminal outcome",
+            on_obs=record,
+            after_rev=snapshot.get("rev"),
+        )
+
+    d = to_map(seed="CIREVIVAL")
+    d = bridge.follow("cheat", "relic", "LIZARD_TAIL")
+    tail = next(relic for relic in d["player"]["relicStates"]
+                if relic["model"] == "LIZARD_TAIL")
+    assert tail["usedUp"] is False, tail
+
+    monster = next(node for node in d["next"] if node["type"] == "monster")
+    run("map-move", str(monster["col"]), str(monster["row"]))
+    d = bridge.wait_until(
+        lambda snapshot: snapshot.get("phase") == PHASE.COMBAT
+        and snapshot.get("side") == "player",
+        timeout=30,
+        description="Lizard Tail test combat",
+    )
+    combat_tail = next(relic for relic in d["you"]["relics"]
+                       if relic["model"] == "LIZARD_TAIL")
+    assert combat_tail["usedUp"] is False, combat_tail
+
+    first_death = None
+    first_events = []
+    for _ in range(20):
+        d = bridge.follow("cheat", "hp", "1")
+        first_death = run("end-turn", "--follow", "30000")
+        first_events.extend(first_death["events"])
+        d = first_death["obs"]
+        d = settle_to_player_or_terminal(d, first_events)
+        assert d["phase"] != PHASE.GAME_OVER, d
+        assert not any("game_over" in event["type"]
+                       for event in first_events), first_events
+        combat_tail = next(relic for relic in d["you"]["relics"]
+                           if relic["model"] == "LIZARD_TAIL")
+        if combat_tail["usedUp"]:
+            break
+    assert first_death is not None and combat_tail["usedUp"] is True, d
+    assert d["phase"] == PHASE.COMBAT and d["you"]["hp"][0] > 0, d
+    revival_fingerprint = latest_runlog_entry("end-turn")["fingerprint"]
+    assert revival_fingerprint, latest_runlog_entry("end-turn")
+
+    second_death = None
+    game_over_events = []
+    for _ in range(20):
+        d = bridge.follow("cheat", "hp", "1")
+        second_death = run("end-turn", "--follow", "30000")
+        game_over_events.extend(
+            event for event in second_death["events"]
+            if "game_over" in event["type"]
+        )
+        d = second_death["obs"]
+        later_events = []
+        d = settle_to_player_or_terminal(d, later_events)
+        game_over_events.extend(
+            event for event in later_events if "game_over" in event["type"]
+        )
+        if d["phase"] == PHASE.GAME_OVER:
+            break
+    assert second_death is not None and d["phase"] == PHASE.GAME_OVER, d
+    assert d["outcome"] == "defeat", d
+    defeat_fingerprint = latest_runlog_entry("end-turn")["fingerprint"]
+    assert defeat_fingerprint and defeat_fingerprint != revival_fingerprint, \
+        (revival_fingerprint, defeat_fingerprint)
+    game_over_event_ids = {
+        (event["rev"], event["type"]) for event in game_over_events
+    }
+    assert len(game_over_event_ids) == 1, game_over_events
+
+    stable = run("obs", "--since", str(d["rev"]), "--wait", "500")
+    assert stable.get("changed") is False and stable.get("events") == [], stable
+    to_menu()
+
 @case("C4 DECIMILLIPEDE last segment dies to end-turn Lightning")
 def c4():
     # Exact #67/#68 regression: ReattachPower owns the segmented death
@@ -1552,9 +1797,10 @@ def c4():
             "fight ended before the orb-passive lethal"
 
     assert len(alive) == 1 and alive[0]["hp"][0] == 1, alive
-    result = run("end-turn")
-    assert result.get("ok") is True, result
-    bridge.wait_phase(PHASE.REWARDS, timeout=25)
+    result = run("end-turn", "--follow", "25000", timeout=30)
+    assert result.get("ok") is True and result.get("errors") == [], result
+    assert result.get("observationAvailable") is True, result
+    assert result.get("obs", {}).get("phase") == PHASE.REWARDS, result
     status, health = http("GET", "/health")
     assert status == 200 and all(q["depth"] == 0 for q in health["queues"]), health
     assert health["executorStuckMs"] < 8000, health
@@ -1771,6 +2017,102 @@ def c11():
     assert owner["title"] in power["description"], (owner, power)
     assert f"[blue]{power['amount']}[/blue]" in power["description"], power
     assert "{OwnerName}" not in power["description"], power
+    to_menu()
+
+
+@case("C12 Queen BOUND cards expose the final hook-aware play gate")
+def c12():
+    d = to_map(seed="CIBOUND")
+    before_rev = d["rev"]
+    run("cheat", "combat", "QUEEN_BOSS")
+    d = bridge.wait_until(
+        lambda snapshot: snapshot.get("phase") == PHASE.COMBAT
+        and snapshot.get("side") == "player",
+        description="Queen player turn",
+        after_rev=before_rev,
+        timeout=30,
+    )
+    for _ in range(8):
+        bound = [card for card in d["hand"]
+                 if card.get("affliction") == "BOUND"]
+        if len(bound) == 3:
+            break
+        bridge.follow("cheat", "heal")
+        turn = d["turn"]
+        before_rev = d["rev"]
+        run("end-turn")
+        d = bridge.wait_until(
+            lambda snapshot: snapshot.get("phase") != PHASE.COMBAT
+            or (snapshot.get("side") == "player"
+                and snapshot.get("turn", turn) > turn),
+            description="Queen next player turn",
+            after_rev=before_rev,
+            timeout=30,
+        )
+    else:
+        bound = []
+    assert len(bound) == 3, f"Queen did not bind the first three draws: {d['hand']}"
+
+    first = next((card for card in bound if card.get("playable")), None)
+    assert first, f"no first BOUND play was available: {bound}"
+    args = ["play", first["selector"]]
+    if first["target"] == "anyenemy":
+        args += ["--target", str(alive_enemy(d)["id"])]
+    before_rev = d["rev"]
+    copies = sum(card.get("selector") == first["selector"] for card in d["hand"])
+    run(*args)
+    d = bridge.wait_until(
+        lambda snapshot: snapshot.get("phase") != PHASE.COMBAT
+        or sum(card.get("selector") == first["selector"]
+               for card in snapshot.get("hand", [])) < copies,
+        description="first BOUND card to leave the hand",
+        after_rev=before_rev,
+    )
+
+    remaining = [card for card in d["hand"]
+                 if card.get("affliction") == "BOUND"]
+    assert len(remaining) == 2, remaining
+    for card in remaining:
+        assert card["playable"] is False, card
+        assert card["unplayableReason"] == "BlockedByHook", card
+        assert card["unplayablePreventer"] == "CHAINS_OF_BINDING_POWER", card
+    assert any(card.get("playable")
+               for card in d["hand"] if card.get("affliction") != "BOUND"), d["hand"]
+    decision = run("obs", "--decision")
+    assert "play" in decision["legal"], decision["legal"]
+    reject(["play", remaining[0]["selector"]], REJECTION.NOT_PLAYABLE)
+    to_menu()
+
+
+@case("C13 lethal played card crosses power teardown cleanly")
+def c13():
+    into_combat(seed="CISEMTEAR")
+    bridge.follow("cheat", "card", "RUPTURE")
+    bridge.follow("cheat", "energy", "99")
+    powered = bridge.follow("play", "RUPTURE")
+    assert any(power["id"] == "RUPTURE_POWER"
+               for power in powered["you"]["powers"]), powered["you"]
+    normal_decision = run("obs", "--decision")
+    assert "semanticState" not in json.dumps(normal_decision), normal_decision
+    diagnostic = run("obs", "--decision", "--semantic-state")
+    assert diagnostic.get("semanticState"), diagnostic
+    assert any(card.get("semanticState") for card in diagnostic["hand"]), \
+        diagnostic["hand"]
+
+    wounded = bridge.follow("cheat", "wound-enemies")
+    bridge.follow("cheat", "energy", "99")
+    attack = next(card for card in wounded["hand"]
+                  if card.get("playable") and card.get("target") == "anyenemy")
+    target = alive_enemy(wounded)["id"]
+    result = run(
+        "play", attack["selector"], "--target", str(target),
+        "--follow", "25000", timeout=30)
+
+    assert result.get("outcome") in ("settled", "next_decision"), result
+    assert result.get("errors") == [], result
+    assert result.get("observationAvailable") is True, result
+    assert result.get("obs", {}).get("phase") == PHASE.REWARDS, result
+    assert "semanticState" not in json.dumps(result["obs"]), result["obs"]
     to_menu()
 
 

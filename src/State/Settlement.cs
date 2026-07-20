@@ -24,7 +24,8 @@ internal sealed record SettlementRequest(
     long StartedRevision,
     long AcceptedRevision,
     long AcceptedTick,
-    int TimeoutMs);
+    int TimeoutMs,
+    string AcceptedRunId = "none");
 
 internal sealed record SettlementProbe(
     long Tick,
@@ -32,7 +33,8 @@ internal sealed record SettlementProbe(
     bool RequiresFrameStability,
     SettlementActivity Activity,
     SnapshotContract Observation,
-    IReadOnlyList<string> Errors)
+    IReadOnlyList<string> Errors,
+    bool ObservationAvailable = true)
 {
     public bool OptionExecuting => Activity.EventOptionExecuting;
 
@@ -136,7 +138,15 @@ internal sealed class SettlementModule
 
         while (true)
         {
-            var probe = await _ticks.Capture(request.StartedRevision);
+            SettlementProbe probe;
+            try
+            {
+                probe = await _ticks.Capture(request.StartedRevision);
+            }
+            catch (Exception exception)
+            {
+                return FaultResult(request, "observation", exception);
+            }
             var outcome = CandidateOutcome(
                 probe, request.PhaseBefore, request.AcceptedRevision);
             if (outcome is { } candidate)
@@ -175,11 +185,39 @@ internal sealed class SettlementModule
             if (remaining == 0)
                 return new SettlementResult(SettlementOutcome.Timeout, probe);
 
-            if (probe.RequiresFrameStability && outcome is not null)
-                await _ticks.WaitForTick(probe.Tick, remaining);
-            else
-                await _ticks.WaitForChange(probe.WorkRevision, remaining);
+            try
+            {
+                if (probe.RequiresFrameStability && outcome is not null)
+                    await _ticks.WaitForTick(probe.Tick, remaining);
+                else
+                    await _ticks.WaitForChange(probe.WorkRevision, remaining);
+            }
+            catch (Exception exception)
+            {
+                return FaultResult(request, "settlement", exception);
+            }
         }
+    }
+
+    private static SettlementResult FaultResult(
+        SettlementRequest request, string label, Exception exception)
+    {
+        var observation = new SnapshotContract(request.PhaseBefore)
+        {
+            Revision = request.AcceptedRevision,
+            RunId = request.AcceptedRunId,
+            Legal = [],
+        };
+        var probe = new SettlementProbe(
+            request.AcceptedTick,
+            WorkRevision: request.AcceptedRevision,
+            RequiresFrameStability: false,
+            new SettlementActivity(0, false, false, 0),
+            observation,
+            [ErrorEvents.FromAsyncFault(
+                label, exception.GetType().Name, exception.Message)],
+            ObservationAvailable: false);
+        return new SettlementResult(SettlementOutcome.Fault, probe);
     }
 
     public SettlementWatchdogResult ObserveWatchdogs(SettlementWatchdogProbe probe)

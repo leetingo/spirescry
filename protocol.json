@@ -1,5 +1,5 @@
 {
-  "protocolVersion": 3,
+  "protocolVersion": 4,
   "rejectionCodes": [
     "bad_request",
     "bad_phase",
@@ -176,6 +176,10 @@
     },
     {
       "name": "engine-error-delayed",
+      "arguments": []
+    },
+    {
+      "name": "observation-fault",
       "arguments": []
     },
     {

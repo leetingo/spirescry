@@ -68,12 +68,14 @@ public static class Handlers
         string? waitStr,
         string? compactStr = null,
         string? decisionStr = null,
-        string[]? knownCards = null)
+        string[]? knownCards = null,
+        string? semanticStateStr = null)
     {
         var since = long.TryParse(sinceStr, out var s) ? s : -1;
         var wait = int.TryParse(waitStr, out var w) ? Math.Clamp(w, 0, 60_000) : 0;
         var compact = compactStr is "1" or "true";
         var decision = decisionStr is "1" or "true";
+        var includeSemanticState = semanticStateStr is "1" or "true";
         if (since >= 0 && wait > 0)
             await Signals.WaitForChange(since, wait);
 
@@ -86,7 +88,7 @@ public static class Handlers
             snapshot.RunId = runId;
             if (decision)
                 snapshot.Legal = DecisionProjection.LegalVerbs(snapshot, runId != "none");
-            var node = snapshot.ToJsonObject();
+            var node = snapshot.ToAgentJsonObject(includeSemanticState);
             if (since >= 0)
             {
                 node["changed"] = revision > since;
@@ -110,6 +112,7 @@ public static class Handlers
         long? ifRev = null;
         string? ifRun = null;
         int? followMs = null;
+        var includeSemanticState = false;
         string? parseError = null;
         try
         {
@@ -159,6 +162,15 @@ public static class Handlers
                     else
                         followMs = parsedFollow;
                 }
+                if (doc.RootElement.TryGetProperty(
+                    "includeSemanticState", out var semanticEl))
+                {
+                    if (semanticEl.ValueKind is not (
+                        JsonValueKind.True or JsonValueKind.False))
+                        parseError ??= "'includeSemanticState' must be a boolean";
+                    else
+                        includeSemanticState = semanticEl.GetBoolean();
+                }
             }
         }
         catch (JsonException ex)
@@ -185,12 +197,14 @@ public static class Handlers
                     $"run {ifRun} is gone — the live run is {runId}"),
                     rev: Signals.Revision, runId, phaseBefore,
                     startedRev: Signals.Revision, startedTick: tickBefore,
+                    acceptedRunId: runId,
                     logEntryId: (long?)null);
             if (ifRev is { } expectedRev && Signals.Revision != expectedRev)
                 return (dispatch: DispatchResult.Reject(RejectionCodes.StaleState,
                     $"rev moved {expectedRev}->{Signals.Revision} since you scried — rescry and decide again"),
                     rev: Signals.Revision, runId, phaseBefore,
                     startedRev: Signals.Revision, startedTick: tickBefore,
+                    acceptedRunId: runId,
                     logEntryId: (long?)null);
             var runIdBefore = runId;
             var before = Signals.Revision;
@@ -203,14 +217,15 @@ public static class Handlers
                 Signals.Bump($"step:{action}");
             runId = Signals.RefreshRunIdentity();
             long? logEntryId = null;
+            var acceptedRunId = action == "new-run" ? runId : runIdBefore;
             if (r.Ok)
             {
-                var attributedRunId = action == "new-run" ? runId : runIdBefore;
                 logEntryId = RunLog.RecordAccepted(
-                    action, args, attributedRunId, phaseBefore, before, Signals.Revision);
+                    action, args, acceptedRunId, phaseBefore, before, Signals.Revision);
             }
             return (dispatch: r, rev: Signals.Revision, runId, phaseBefore,
-                startedRev: before, startedTick: tickBefore, logEntryId);
+                startedRev: before, startedTick: tickBefore,
+                acceptedRunId, logEntryId);
         });
         if (!result.dispatch.Ok)
             return Response.Error(
@@ -220,7 +235,8 @@ public static class Handlers
         if (followMs is { } follow)
             return await Follow(
                 action, result.startedRev, result.rev, result.phaseBefore,
-                result.startedTick, follow, result.logEntryId);
+                result.startedTick, follow, result.acceptedRunId, result.logEntryId,
+                includeSemanticState);
 
         // A success Msg is a note (e.g. "settled with victory cleanup").
         return result.dispatch.Msg is null
@@ -238,24 +254,30 @@ public static class Handlers
         Phase phaseBefore,
         long acceptedTick,
         int timeoutMs,
-        long? logEntryId)
+        string acceptedRunId,
+        long? logEntryId,
+        bool includeSemanticState)
     {
         var result = await Settlement.Current.Follow(new SettlementRequest(
             phaseBefore,
             startedRev,
             acceptedRev,
             acceptedTick,
-            timeoutMs));
+            timeoutMs,
+            acceptedRunId));
         return FollowResponse(
-            action, startedRev, acceptedRev, result, logEntryId);
+            action, startedRev, acceptedRev, acceptedRunId,
+            result, logEntryId, includeSemanticState);
     }
 
     private static Response FollowResponse(
         string action,
         long startedRev,
         long acceptedRev,
+        string acceptedRunId,
         SettlementResult result,
-        long? logEntryId)
+        long? logEntryId,
+        bool includeSemanticState)
     {
         var outcome = result.Outcome;
         var probe = result.Probe;
@@ -263,23 +285,72 @@ public static class Handlers
         // says what the one settlement module observed; retain the detailed
         // tokens so callers and the run log can attribute the engine failure.
         var errors = probe.Errors.ToArray();
-        if (logEntryId is { } id)
-            RunLog.RecordOutcome(id, outcome, probe.Observation, errors);
-        var node = new JsonObject
+        try
         {
-            ["ok"] = true,
-            ["enqueued"] = action,
-            ["startedRev"] = startedRev,
-            ["acceptedRev"] = acceptedRev,
-            ["rev"] = probe.Revision,
-            ["runId"] = probe.RunId,
-            ["settled"] = outcome.ReachedBoundary(),
-            ["outcome"] = outcome.WireName(),
-            ["errors"] = JsonSerializer.SerializeToNode(errors),
-            ["events"] = JsonSerializer.SerializeToNode(Signals.EventsSince(startedRev)),
-            ["obs"] = probe.Observation.ToJsonObject(),
-        };
-        return new Response { Body = node.ToJsonString() };
+            var observation = probe.ObservationAvailable
+                ? probe.Observation.ToAgentJsonObject(includeSemanticState)
+                : null;
+            var events = Signals.EventsSince(startedRev);
+            if (logEntryId is { } id)
+                RunLog.RecordOutcome(id, outcome, probe.Observation, errors);
+            var node = new JsonObject
+            {
+                ["ok"] = true,
+                ["action"] = action,
+                ["enqueued"] = action,
+                ["startedRev"] = startedRev,
+                ["acceptedRev"] = acceptedRev,
+                ["acceptedRunId"] = acceptedRunId,
+                ["rev"] = probe.Revision,
+                ["runId"] = probe.RunId,
+                ["settled"] = outcome.ReachedBoundary(),
+                ["outcome"] = outcome.WireName(),
+                ["observationAvailable"] = probe.ObservationAvailable,
+                ["errors"] = JsonSerializer.SerializeToNode(errors),
+                ["events"] = JsonSerializer.SerializeToNode(events),
+                ["obs"] = observation,
+            };
+            return new Response { Body = node.ToJsonString() };
+        }
+        catch (Exception exception)
+        {
+            var responseErrors = errors
+                .Append(ErrorEvents.FromAsyncFault(
+                    "response", exception.GetType().Name, exception.Message))
+                .ToArray();
+            var fallback = new SnapshotContract(probe.Observation.Phase)
+            {
+                Revision = acceptedRev,
+                RunId = acceptedRunId,
+                Legal = [],
+            };
+            if (logEntryId is { } id)
+            {
+                try
+                {
+                    RunLog.RecordOutcome(
+                        id, SettlementOutcome.Fault, fallback, responseErrors);
+                }
+                catch { }
+            }
+            return Response.Json(new
+            {
+                ok = true,
+                action,
+                enqueued = action,
+                startedRev,
+                acceptedRev,
+                acceptedRunId,
+                rev = acceptedRev,
+                runId = acceptedRunId,
+                settled = true,
+                outcome = SettlementOutcome.Fault.WireName(),
+                observationAvailable = false,
+                errors = responseErrors,
+                events = Array.Empty<object>(),
+                obs = (object?)null,
+            });
+        }
     }
 
     // The registry the cheats validate against, enumerable — sweeps drive

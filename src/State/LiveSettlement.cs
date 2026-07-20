@@ -16,14 +16,18 @@ internal sealed class LiveSettlementTickSource : ISettlementTickSource
     public async Task<SettlementProbe> Capture(long startedRevision) =>
         await MainThreadPump.Instance!.Run(() =>
         {
-            var runId = Signals.RefreshRunIdentity();
-            var snapshot = Snapshotter.ForCurrentPhase(
-                compact: false, decision: true, knownCardTexts: []);
-            var revision = Signals.Revision;
-            snapshot.Revision = revision;
-            snapshot.RunId = runId;
-            snapshot.Legal = DecisionProjection.LegalVerbs(
-                snapshot, runId != "none");
+            var captured = SettlementObservationCapture.Capture(
+                PhaseDetector.Current,
+                () => Snapshotter.ForCurrentPhase(
+                    compact: false, decision: true, knownCardTexts: []),
+                () => Signals.Revision,
+                Signals.RefreshRunIdentity);
+            var snapshot = captured.Observation;
+            var revision = snapshot.Revision ?? Signals.Revision;
+            var runId = snapshot.RunId ?? Signals.RunId;
+            if (captured.ObservationAvailable)
+                snapshot.Legal = DecisionProjection.LegalVerbs(
+                    snapshot, runId != "none");
 
             // Settlement can begin during lifecycle edges before the local
             // player is attached. The explicit state-only view preserves the
@@ -69,7 +73,11 @@ internal sealed class LiveSettlementTickSource : ISettlementTickSource
                 DecisionSurface.Current.RequiresSettlementFrameStability,
                 activity,
                 snapshot,
-                Signals.ErrorsSince(startedRevision));
+                [
+                    .. Signals.ErrorsSince(startedRevision),
+                    .. captured.Errors,
+                ],
+                captured.ObservationAvailable);
         });
 
     public async Task WaitForChange(long afterWorkRevision, int timeoutMs) =>

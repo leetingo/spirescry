@@ -44,8 +44,11 @@ damage × hits), potions, and pile contents; every out-of-combat phase
 carries a `player` footer (hp, gold, potions, relics, relicStates, deck);
 `player.relics` remains the stable ID-string list while `relicStates` adds
 `{model, counter, usedUp, description}` (`description` is `null` in compact
-mode). Combat's `you.relics` carries `{model, counter}` so every-N counters
-are visible where they tick. The map gets
+mode). Combat's `you.relics` carries `{model, counter, usedUp}` so every-N counters
+are visible where they tick and one-shot relics cannot look
+available after consumption. Necrobinder combat also exposes `you.osty` as
+either `null` or structured model/title, hp, block, alive, and powers state.
+The map gets
 reachable nodes, the whole act graph, and the run seed; `game_over`
 reports outcome / seed / hp / gold plus where the run ended: `actNumber`
 (1-based), `actFloor` (within the act), `mapCoord` (`{col, row}`), and
@@ -61,6 +64,16 @@ deduplicates card prose across every visible card surface. Each card has
 a stable `textKey` that includes upgrade, enchantment, and affliction;
 pass cached keys back as repeatable `--known-card <key>` flags to omit
 their prose without any process-global or read-order-dependent state.
+Expanded internal `semanticState` token arrays are omitted from normal and
+followed decision payloads so response size does not grow with every card in
+the piles. Settlement and replay still consume the full typed projection
+inside the host; `obs --semantic-state` (HTTP `?semanticState=1`) exposes it
+explicitly for diagnostics.
+
+Combat card `playable` values use the same final hook-aware gate as dispatch.
+When a hook blocks a card, `unplayableReason` and, when available,
+`unplayablePreventer` name the machine-readable reason and model. `legal`
+advertises `play` only when at least one visible card passes that same gate.
 
 <!-- protocol:phases:start -->
 Phases: `main_menu`, `map`, `combat`, `event`, `shop`, `rest_site`,
@@ -84,7 +97,12 @@ surface appears. The response carries one of the typed settlement outcomes:
 `settled`, `next_decision`, `fault`, `timeout`.
 <!-- protocol:settlement-outcomes:end -->
 It includes resolution events plus a fresh decision `obs`; `fault` also keeps
-the engine error tokens in `errors`. GUI callbacks that do not return a task must expose the
+the engine error tokens in `errors`. If an accepted mutation is followed by an
+observation or response-construction failure, the bridge still returns this
+typed envelope with `action`, `acceptedRev`, `runId`,
+`observationAvailable: false`, and `obs: null`; the matching run-log entry is
+faulted and never replayable. The CLI preserves the JSON and explicitly warns
+not to retry the accepted action blindly. GUI callbacks that do not return a task must expose the
 same boundary across three consecutive frames; guard checks still happen
 atomically before dispatch. This is a bounded settlement signal for work the
 bridge can observe, not a claim that every opaque engine continuation has
@@ -176,6 +194,13 @@ side on stderr; both stamp the same UTC clock, so the two logs line up.
 `build.sh` boots keep their output in `$TMPDIR/spirescry-host.log`
 (engine-headless: `spirescry-headless.log`), foreground included; the
 previous boot's log survives at `.log.1`.
+
+`spirescry fault-bundle` is the first read-only forensic step after an
+ambiguous followed verb. One invocation captures health, observation, run
+log, recent events/errors, build/protocol identity, run ID/seed, and the last
+accepted verb without advancing or abandoning the run. Each section marks
+partial-capture failures explicitly, so the bundle remains useful when the
+observation endpoint itself is what failed.
 
 The pure host also records why it exits: clean process shutdowns,
 SIGINT/SIGTERM/SIGHUP/SIGQUIT, boot failures, and unhandled managed
@@ -280,6 +305,7 @@ picks), and text comes from tables extracted out of your local install's
   | `async-fault` | — |
   | `engine-error` | — |
   | `engine-error-delayed` | — |
+  | `observation-fault` | — |
   | `event-fault-delayed` | — |
   | `event-fault-late` | — |
   | `event-complete-late` | — |
