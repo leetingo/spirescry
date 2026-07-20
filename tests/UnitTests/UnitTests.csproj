@@ -22,6 +22,7 @@
     <Compile Include="../../src/State/DecisionProjection.cs" Link="DecisionProjection.cs" />
     <Compile Include="../../src/State/ErrorEvents.cs" Link="ErrorEvents.cs" />
     <Compile Include="../../src/State/EngineLogCorrelation.cs" Link="EngineLogCorrelation.cs" />
+    <Compile Include="../../src/State/EventOptionTracker.cs" Link="EventOptionTracker.cs" />
     <Compile Include="../../src/State/RevisionJournal.cs" Link="RevisionJournal.cs" />
     <Compile Include="../../src/State/TaskFault.cs" Link="TaskFault.cs" />
     <Compile Include="../../headless/Host/FirstChanceFilter.cs" Link="FirstChanceFilter.cs" />

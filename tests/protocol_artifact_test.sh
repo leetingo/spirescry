@@ -46,4 +46,12 @@ if dotnet msbuild "$repo/headless/Host/Host.csproj" \
     exit 1
 fi
 
+if dotnet msbuild "$repo/src/Spirescry.csproj" \
+    -target:EmitProtocolArtifact \
+    -property:ProtocolArtifactSource="$tmp/drifted.json" \
+    -property:ProtocolArtifactOutput="$tmp/build/protocol.json"; then
+    echo "mod build target accepted a drifted artifact" >&2
+    exit 1
+fi
+
 echo "ok - protocol artifact generation, build emission, and drift check"

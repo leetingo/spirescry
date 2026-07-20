@@ -655,7 +655,15 @@ fn state_fingerprint(value: &Value) -> String {
 // Rust build fails instead of silently narrowing replay/settlement semantics.
 macro_rules! require_projection_fields {
     ($($field:ident),* $(,)?) => {
-        $(const _: ProjectionField = $field;)*
+        #[allow(dead_code)]
+        mod consumed_projection_field_uniqueness {
+            $(const $field: () = ();)*
+        }
+        const CONSUMED_PROJECTION_FIELDS: &[ProjectionField] = &[$($field),*];
+        const _: () = assert!(
+            CONSUMED_PROJECTION_FIELDS.len() == PROJECTION_FIELD_COUNT,
+            "projection field list must include every generated projection field",
+        );
     };
 }
 
