@@ -1,9 +1,5 @@
-using System.Text;
-using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Nodes;
-using MegaCrit.Sts2.Core.Context;
-using MegaCrit.Sts2.Core.Runs;
 
 namespace Spirescry.State;
 
@@ -13,15 +9,8 @@ namespace Spirescry.State;
 // stop at the first divergence instead of compounding it.
 public static class RunLog
 {
-    private static readonly JsonSerializerOptions CanonicalJson = new()
-    {
-        // serde_json writes Unicode and HTML characters directly. Matching
-        // that byte representation is required because replay fingerprints
-        // are recomputed by the Rust CLI, including under zhs localization.
-        Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
-    };
     private static readonly object Gate = new();
-    private static readonly List<JsonObject> Verbs = new();
+    private static readonly List<RunLogEntry> Verbs = new();
     private static string _runId = "none";
     private static string? _seed;
     private static string? _character;
@@ -33,7 +22,7 @@ public static class RunLog
         string action,
         JsonElement args,
         string runId,
-        string phaseBefore,
+        Phase phaseBefore,
         long startedRev,
         long acceptedRev)
     {
@@ -56,44 +45,45 @@ public static class RunLog
                 }
             }
             var id = ++_nextEntryId;
-            var entry = new JsonObject
-            {
-                ["id"] = id,
-                ["runId"] = runId,
-                ["action"] = action,
-                ["phaseBefore"] = phaseBefore,
-                ["startedRev"] = startedRev,
-                ["acceptedRev"] = acceptedRev,
-            };
-            if (args.ValueKind is not (JsonValueKind.Undefined or JsonValueKind.Null))
-                entry["args"] = JsonNode.Parse(args.GetRawText());
+            var entry = new RunLogEntry(
+                id,
+                runId,
+                action,
+                args.ValueKind is JsonValueKind.Undefined or JsonValueKind.Null
+                    ? null
+                    : JsonNode.Parse(args.GetRawText()),
+                phaseBefore,
+                startedRev,
+                acceptedRev);
             Verbs.Add(entry);
             return id;
         }
     }
 
-    public static void RecordOutcome(
-        long entryId, string outcome, JsonObject observation, string[]? errors = null)
+    internal static void RecordOutcome(
+        long entryId,
+        SettlementOutcome outcome,
+        SnapshotContract observation,
+        string[]? errors = null)
     {
         lock (Gate)
         {
-            var entry = Verbs.FirstOrDefault(v => v["id"]?.GetValue<long>() == entryId);
+            var entry = Verbs.FirstOrDefault(verb => verb.Id == entryId);
             if (entry is null) return;
-            var observedRunId = observation["runId"]?.GetValue<string>();
-            if (entry["action"]?.GetValue<string>() == "new-run"
+            var observedRunId = observation.RunId;
+            if (entry.Action == "new-run"
                 && observedRunId is not (null or "none")
                 && CanAdopt(observedRunId))
                 AdoptRun(observedRunId, captureMetadata: false);
-            entry["outcome"] = outcome;
-            entry["phaseAfter"] = observation["phase"]?.GetValue<string>();
+            entry.Outcome = outcome;
+            entry.PhaseAfter = observation.PhaseName;
             // Engine faults during this verb's window: preserved in the
             // diagnostic recipe so a polluted run stays attributable even
             // after the host log rotates away.
             if (errors is { Length: > 0 })
-                entry["errors"] = new JsonArray(
-                    errors.Select(e => (JsonNode)e).ToArray());
-            if (outcome != "timeout")
-                entry["fingerprint"] = Fingerprint(observation);
+                entry.Errors = errors.ToArray();
+            if (outcome.IsReplayable())
+                entry.Fingerprint = Fingerprint(observation);
         }
     }
 
@@ -106,15 +96,16 @@ public static class RunLog
             if (_runId == liveRunId && liveRunId != "none" && _seed is null)
                 CaptureMetadata();
             var verbs = Verbs
-                .Select(v => (JsonObject)JsonNode.Parse(v.ToJsonString())!)
+                .Select(verb => verb.ToJson())
                 .ToArray();
             var coherent = _runId != "none"
                 && verbs.Length > 0
-                && verbs[0]["action"]?.GetValue<string>() == "new-run"
-                && verbs.All(v => v["runId"]?.GetValue<string>() == _runId);
-            var verified = verbs.All(v =>
-                v["outcome"]?.GetValue<string>() is "settled" or "next_decision"
-                && !string.IsNullOrWhiteSpace(v["fingerprint"]?.GetValue<string>()));
+                && Verbs[0].Action == "new-run"
+                && Verbs.All(verb => verb.RunId == _runId);
+            var verified = Verbs.All(verb =>
+                verb.Outcome is { } outcome
+                && outcome.IsReplayable()
+                && !string.IsNullOrWhiteSpace(verb.Fingerprint));
             return new
             {
                 ok = true,
@@ -136,8 +127,9 @@ public static class RunLog
 
     private static void CaptureMetadata()
     {
-        var state = RunManager.Instance?.DebugOnlyGetState();
-        var player = state is null ? null : LocalContext.GetMe(state);
+        var run = LocalRunContext.Current;
+        var state = run?.State;
+        var player = run?.Player;
         _seed = state?.Rng?.StringSeed;
         _character = player?.Character?.Id.Entry;
         _ascension = state?.AscensionLevel;
@@ -147,48 +139,66 @@ public static class RunLog
         runId != "none"
         && _runId == "none"
         && Verbs.Count > 0
-        && Verbs[0]["action"]?.GetValue<string>() == "new-run"
-        && Verbs.All(v => v["runId"]?.GetValue<string>() == "none");
+        && Verbs[0].Action == "new-run"
+        && Verbs.All(verb => verb.RunId == "none");
 
     private static void AdoptRun(string runId, bool captureMetadata)
     {
         _runId = runId;
-        foreach (var verb in Verbs) verb["runId"] = runId;
+        foreach (var verb in Verbs) verb.RunId = runId;
         if (captureMetadata) CaptureMetadata();
     }
 
-    // FNV-1a over the response's stable JSON ordering. Revisions and RunIds
-    // are deliberately removed: a reconstruction is a different run.
-    internal static string Fingerprint(JsonObject observation)
+    private sealed class RunLogEntry(
+        long id,
+        string runId,
+        string action,
+        JsonNode? arguments,
+        Phase phaseBefore,
+        long startedRevision,
+        long acceptedRevision)
     {
-        var canonical = Canonicalize(observation)!;
-        var bytes = Encoding.UTF8.GetBytes(canonical.ToJsonString(CanonicalJson));
-        ulong hash = 14695981039346656037;
-        foreach (var b in bytes)
+        public long Id { get; } = id;
+        public string RunId { get; set; } = runId;
+        public string Action { get; } = action;
+        public JsonNode? Arguments { get; } = arguments;
+        public string PhaseBefore { get; } = ProtocolVocabulary.Phases.Name(phaseBefore);
+        public long StartedRevision { get; } = startedRevision;
+        public long AcceptedRevision { get; } = acceptedRevision;
+        public SettlementOutcome? Outcome { get; set; }
+        public string? PhaseAfter { get; set; }
+        public string[]? Errors { get; set; }
+        public string? Fingerprint { get; set; }
+
+        public JsonObject ToJson()
         {
-            hash ^= b;
-            hash *= 1099511628211;
+            var node = new JsonObject
+            {
+                ["id"] = Id,
+                ["runId"] = RunId,
+                ["action"] = Action,
+                ["phaseBefore"] = PhaseBefore,
+                ["startedRev"] = StartedRevision,
+                ["acceptedRev"] = AcceptedRevision,
+            };
+            if (Arguments is not null)
+                node["args"] = Arguments.DeepClone();
+            if (Outcome is { } outcome)
+                node["outcome"] = outcome.WireName();
+            if (PhaseAfter is not null)
+                node["phaseAfter"] = PhaseAfter;
+            if (Errors is { Length: > 0 })
+                node["errors"] = new JsonArray(
+                    Errors.Select(error => (JsonNode)error).ToArray());
+            if (Fingerprint is not null)
+                node["fingerprint"] = Fingerprint;
+            return node;
         }
-        return hash.ToString("x16");
     }
 
-    private static JsonNode? Canonicalize(JsonNode? node)
-    {
-        if (node is JsonObject obj)
-        {
-            var sorted = new JsonObject();
-            foreach (var pair in obj
-                .Where(pair => pair.Key is not ("rev" or "runId"))
-                .OrderBy(pair => pair.Key, StringComparer.Ordinal))
-                sorted[pair.Key] = Canonicalize(pair.Value);
-            return sorted;
-        }
-        if (node is JsonArray array)
-        {
-            var result = new JsonArray();
-            foreach (var value in array) result.Add(Canonicalize(value));
-            return result;
-        }
-        return node is null ? null : JsonNode.Parse(node.ToJsonString());
-    }
+    // FNV-1a over the explicit typed consumer projection. Presentation-only
+    // extension fields never redefine replay compatibility; revisions and
+    // RunIds are absent because a reconstruction is a different run.
+    internal static string Fingerprint(SnapshotContract observation)
+        => observation.ConsumerFingerprint();
 }

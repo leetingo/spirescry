@@ -16,10 +16,12 @@ internal readonly record struct EngineLogCorrelationKey(
 }
 
 internal sealed class PendingEngineLog(
-    string text, bool combatInProgress, ManagedThreadId thread)
+    string text, bool combatInProgress, bool headlessHost,
+    ManagedThreadId thread)
 {
     public string Text { get; } = text;
     public bool CombatInProgress { get; } = combatInProgress;
+    public bool HeadlessHost { get; } = headlessHost;
     public ManagedThreadId Thread { get; } = thread;
     public TaskCompletionSource<EngineLogDisposition> Resolution { get; } =
         new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -35,9 +37,11 @@ internal sealed class EngineLogCorrelation
     private readonly List<PendingEngineLog> _pending = new();
 
     public PendingEngineLog Register(
-        string text, bool combatInProgress, ManagedThreadId thread)
+        string text, bool combatInProgress, bool headlessHost,
+        ManagedThreadId thread)
     {
-        var pending = new PendingEngineLog(text, combatInProgress, thread);
+        var pending = new PendingEngineLog(
+            text, combatInProgress, headlessHost, thread);
         _pending.Add(pending);
         return pending;
     }

@@ -1,4 +1,7 @@
 using System.Reflection;
+using System.Text.Json;
+using System.Text.Json.Nodes;
+using System.Text.Json.Serialization;
 using Spirescry;
 using Spirescry.Host;
 using Spirescry.State;
@@ -36,14 +39,477 @@ return failures == 0 ? 0 : 1;
 
 internal static class Tests
 {
+    public static void RequiredHostPatchFailureStopsBootWithMethodAndCause()
+    {
+        var cause = new InvalidOperationException("Harmony JIT exploded");
+        var result = new HostPatchBatchResult(
+            MatchedCount: 1,
+            PatchedCount: 0,
+            Failures:
+            [
+                new HostPatchFailure(
+                    "Spirescry.Host.PatchIdentityProbe.Apply(System.Int32,System.String)",
+                    cause),
+            ]);
+        var reports = new List<(string message, Exception cause)>();
+
+        var thrown = Capture<InvalidOperationException>(() => result.Enforce(
+            "combat queue shim",
+            HostPatchFailurePolicy.Required,
+            (message, error) => reports.Add((message, error))));
+
+        True(thrown.Message.Contains("combat queue shim", StringComparison.Ordinal));
+        True(thrown.Message.Contains("PatchIdentityProbe.Apply", StringComparison.Ordinal));
+        Equal(1, reports.Count);
+        True(reports[0].message.Contains(
+            "Spirescry.Host.PatchIdentityProbe.Apply(System.Int32,System.String)",
+            StringComparison.Ordinal));
+        Equal(cause, reports[0].cause);
+    }
+
+    public static void PresentationHostPatchFailureIsReportedAndContinues()
+    {
+        var cause = new InvalidOperationException("presentation method would not JIT");
+        var result = new HostPatchBatchResult(
+            MatchedCount: 1,
+            PatchedCount: 0,
+            Failures: [new HostPatchFailure("Example.Vfx.Play()", cause)]);
+        var reports = new List<(string message, Exception cause)>();
+
+        result.Enforce(
+            "VFX finalizers",
+            HostPatchFailurePolicy.PresentationOnly,
+            (message, error) => reports.Add((message, error)));
+
+        Equal(1, reports.Count);
+        True(reports[0].message.Contains("Example.Vfx.Play()", StringComparison.Ordinal));
+        Equal(cause, reports[0].cause);
+    }
+
+    public static void RequiredHostPatchSetCannotSilentlyMatchNothing()
+    {
+        var result = new HostPatchBatchResult(
+            MatchedCount: 0,
+            PatchedCount: 0,
+            Failures: []);
+        var reports = new List<(string message, Exception cause)>();
+
+        var thrown = Capture<InvalidOperationException>(() => result.Enforce(
+            "custom reward completion",
+            HostPatchFailurePolicy.Required,
+            (message, error) => reports.Add((message, error))));
+
+        True(thrown.Message.Contains("matched no methods", StringComparison.Ordinal));
+        Equal(1, reports.Count);
+        True(reports[0].message.Contains("matched no methods", StringComparison.Ordinal));
+        True(reports[0].cause is MissingMethodException);
+    }
+
+    public static void HostPatchFailureIdentityIncludesTheOverloadSignature()
+    {
+        var method = typeof(PatchIdentityProbe).GetMethod(
+            nameof(PatchIdentityProbe.Apply),
+            [typeof(int), typeof(string)])!;
+
+        var failure = HostPatchFailure.From(
+            method, new InvalidOperationException("failure"));
+
+        Equal(
+            "PatchIdentityProbe.Apply(System.Int32,System.String)",
+            failure.MethodIdentity);
+    }
+
+    public static void ProtocolVocabularyExposesTheCompleteWireContract()
+    {
+        var artifact = JsonNode.Parse(ProtocolVocabulary.CreateArtifactJson())!.AsObject();
+
+        Equal(ProtocolVocabulary.ProtocolVersion,
+            artifact["protocolVersion"]!.GetValue<int>());
+        Equal(ProtocolVocabulary.Rejections.All.Count,
+            artifact["rejectionCodes"]!.AsArray().Count);
+        Equal(ProtocolVocabulary.Phases.All.Count,
+            artifact["phases"]!.AsArray().Count);
+        Equal(ProtocolVocabulary.SettlementOutcomes.All.Count,
+            artifact["settlementOutcomes"]!.AsArray().Count);
+        Equal(ProtocolVocabulary.FaultEvents.All.Count,
+            artifact["faultEventTokens"]!.AsObject().Count);
+        Equal(ProtocolVocabulary.Cheats.All.Count,
+            artifact["cheatArgumentShapes"]!.AsArray().Count);
+    }
+
+    public static void ProtocolVersionCoversSemanticReplayFingerprints()
+    {
+        // v3 is the first version whose replay fingerprint includes the
+        // typed semanticState projection. A v2 CLI must reject a v3 host
+        // before it can silently hash the same observation differently.
+        Equal(3, ProtocolVocabulary.ProtocolVersion);
+    }
+
+    public static void ProtocolArtifactPublishesConsumerProjectionSchema()
+    {
+        var artifact = JsonNode.Parse(ProtocolVocabulary.CreateArtifactJson())!.AsObject();
+        var projection = artifact["consumerProjection"]!.AsObject();
+
+        JsonObject Field(string group, string symbol) => projection[group]!.AsArray()
+            .Select(node => node!.AsObject())
+            .Single(field => field["symbol"]!.GetValue<string>() == symbol);
+
+        Equal("phase", Field("top", "phase")["wire"]!.GetValue<string>());
+        Equal("phase", Field("top", "phase")["output"]!.GetValue<string>());
+        Equal("requiredString", Field("top", "phase")["kind"]!.GetValue<string>());
+        Equal("potions", Field("top", "hasTopLevelPotions")["wire"]!.GetValue<string>());
+        Equal("hasTopLevelPotions",
+            Field("top", "hasTopLevelPotions")["output"]!.GetValue<string>());
+        Equal("presenceBoolean",
+            Field("top", "hasTopLevelPotions")["kind"]!.GetValue<string>());
+        Equal("idx", Field("item", "index")["wire"]!.GetValue<string>());
+        Equal("index", Field("item", "index")["output"]!.GetValue<string>());
+        Equal("model", Field("enemy", "model")["wire"]!.GetValue<string>());
+        Equal("energy", Field("combatant", "energy")["wire"]!.GetValue<string>());
+        Equal("gold", Field("player", "gold")["wire"]!.GetValue<string>());
+    }
+
+    public static void ConsumerProjectionOutputPropertiesUseThePublishedSchema()
+    {
+        var groups = new (Type Type, IReadOnlyList<ConsumerProjectionField> Fields)[]
+        {
+            (typeof(SnapshotConsumerProjection), SnapshotConsumerSchema.Top.Fields),
+            (typeof(SnapshotItemConsumerProjection), SnapshotConsumerSchema.Item.Fields),
+            (typeof(SnapshotCombatantConsumerProjection), SnapshotConsumerSchema.Combatant.Fields),
+            (typeof(SnapshotEnemyConsumerProjection), SnapshotConsumerSchema.Enemy.Fields),
+            (typeof(SnapshotPlayerConsumerProjection), SnapshotConsumerSchema.Player.Fields),
+        };
+
+        foreach (var (type, fields) in groups)
+        {
+            var properties = type.GetProperties(
+                BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly);
+            Equal(fields.Count, properties.Length);
+            foreach (var field in fields)
+            {
+                var propertyName = char.ToUpperInvariant(field.Symbol[0]) + field.Symbol[1..];
+                var property = type.GetProperty(propertyName)
+                    ?? throw new Exception($"{type.Name} is missing {propertyName}");
+                var attribute = property.GetCustomAttribute<JsonPropertyNameAttribute>()
+                    ?? throw new Exception($"{type.Name}.{propertyName} has no JsonPropertyName");
+                Equal(field.Output, attribute.Name);
+            }
+        }
+    }
+
+    public static void ProtocolVocabularyMapsEveryPhaseAndUnknownValues()
+    {
+        var mapped = Enum.GetValues<Phase>()
+            .Select(ProtocolVocabulary.Phases.Name).ToArray();
+
+        True(mapped.SequenceEqual(ProtocolVocabulary.Phases.All));
+        Equal(ProtocolVocabulary.Phases.Unknown,
+            ProtocolVocabulary.Phases.Name((Phase)999));
+    }
+
+    public static void ProtocolVocabularyMapsEverySettlementOutcome()
+    {
+        var mapped = Enum.GetValues<SettlementOutcome>()
+            .Select(ProtocolVocabulary.SettlementOutcomes.Name).ToArray();
+
+        True(mapped.SequenceEqual(ProtocolVocabulary.SettlementOutcomes.All));
+        Equal("settled", SettlementOutcome.Settled.WireName());
+        Equal("next_decision", SettlementOutcome.NextDecision.WireName());
+        Equal("fault", SettlementOutcome.Fault.WireName());
+        Equal("timeout", SettlementOutcome.Timeout.WireName());
+    }
+
+    public static void CollectionSnapshotMaterializesALiveSourceOnlyOnce()
+    {
+        var live = new OneShotEnumerable<int>([1, 2, 3]);
+
+        var snapshot = CollectionSnapshot.Once(live.Select(value => value * 10));
+
+        Equal(1, live.EnumerationCount);
+        Equal(3, snapshot.Length);
+        Equal(60, snapshot.Sum());
+        Equal(60, snapshot.Sum());
+    }
+
+    public static void CollectionSnapshotRetriesATransientLiveMutation()
+    {
+        var attempts = 0;
+
+        var snapshot = CollectionSnapshot.ReadStable(
+            "power semantic state",
+            () =>
+            {
+                attempts++;
+                if (attempts == 1) throw CollectionMutation();
+                return new[] { "STRENGTH" };
+            });
+
+        Equal(2, attempts);
+        Equal("STRENGTH", snapshot.Single());
+    }
+
+    public static void CollectionSnapshotPropagatesPersistentLiveMutation()
+    {
+        var attempts = 0;
+
+        var error = Capture<InvalidOperationException>(() =>
+            CollectionSnapshot.ReadStable<int[]>(
+                "intent semantic state",
+                () =>
+                {
+                    attempts++;
+                    throw CollectionMutation();
+                }));
+
+        Equal(3, attempts);
+        True(error.Message.Contains("intent semantic state"));
+        True(error.InnerException is InvalidOperationException);
+    }
+
+    public static void CollectionSnapshotDoesNotRetryOtherFailures()
+    {
+        var attempts = 0;
+
+        var error = Capture<InvalidOperationException>(() =>
+            CollectionSnapshot.ReadStable<int[]>(
+                "card dynamic vars",
+                () =>
+                {
+                    attempts++;
+                    throw new ArgumentException("broken model");
+                }));
+
+        Equal(1, attempts);
+        True(error.Message.Contains("card dynamic vars"));
+        True(error.InnerException is ArgumentException);
+    }
+
+    public static void CollectionSnapshotPreservesAValidEmptyRead()
+    {
+        var snapshot = CollectionSnapshot.ReadStable(
+            "power semantic state", Array.Empty<string>);
+
+        Equal(0, snapshot.Length);
+    }
+
+    public static void ConsumerCardPlayableDistinguishesFalseFromReadFailure()
+    {
+        var playable = ConsumerSemanticRead.CardPlayable(() => false);
+
+        False(playable);
+        var error = Capture<InvalidOperationException>(() =>
+            ConsumerSemanticRead.CardPlayable(
+                () => throw new ArgumentException("broken CanPlay")));
+        True(error.Message.Contains("card playable semantic state"));
+        True(error.InnerException is ArgumentException);
+    }
+
+    public static void ConsumerMapMarkersDistinguishEmptyFromReadFailure()
+    {
+        var markers = ConsumerSemanticRead.MapMarkerIdentities(
+            "map marker semantic state at 2,3", Array.Empty<string>);
+
+        Equal(0, markers.Length);
+        var error = Capture<InvalidOperationException>(() =>
+            ConsumerSemanticRead.MapMarkerIdentities(
+                "map marker semantic state at 2,3",
+                () => throw new ArgumentException("broken quest collection")));
+        True(error.Message.Contains("map marker semantic state at 2,3"));
+        True(error.InnerException is ArgumentException);
+    }
+
+    public static void SettlementReturnsImmediateQuietBoundary()
+    {
+        var clock = new FakeSettlementClock();
+        var ticks = new FakeSettlementTicks(clock,
+            Probe(revision: 4, tick: 2, busy: false));
+        var module = new SettlementModule(ticks, clock);
+
+        var result = module.Follow(Request(timeoutMs: 100)).GetAwaiter().GetResult();
+
+        Equal(SettlementOutcome.Settled, result.Outcome);
+        Equal(1, ticks.Captures);
+        Equal(0, ticks.ChangeWaits + ticks.TickWaits);
+    }
+
+    public static void SettlementBusyAccountingIncludesEveryWorkChannel()
+    {
+        var activities = new[]
+        {
+            new SettlementActivity(
+                FireAndForgetCount: 1, EventOptionExecuting: false,
+                ExecutorRunning: false, QueuedActionCount: 0),
+            new SettlementActivity(
+                FireAndForgetCount: 0, EventOptionExecuting: true,
+                ExecutorRunning: false, QueuedActionCount: 0),
+            new SettlementActivity(
+                FireAndForgetCount: 0, EventOptionExecuting: false,
+                ExecutorRunning: true, QueuedActionCount: 0),
+            new SettlementActivity(
+                FireAndForgetCount: 0, EventOptionExecuting: false,
+                ExecutorRunning: false, QueuedActionCount: 1),
+        };
+
+        foreach (var activity in activities)
+        {
+            var clock = new FakeSettlementClock();
+            var ticks = new FakeSettlementTicks(clock, 5,
+                Probe(activity: activity, hasDecision: false));
+            var module = new SettlementModule(ticks, clock);
+
+            var result = module.Follow(Request(timeoutMs: 5))
+                .GetAwaiter().GetResult();
+
+            Equal(SettlementOutcome.Timeout, result.Outcome);
+            Equal(1, ticks.ChangeWaits);
+        }
+    }
+
+    public static void SettlementWaitsOutAnExecutingEventOptionEffect()
+    {
+        // An executing option effect must hold settlement open even though
+        // a decision is on screen and the phase moved — the transient page
+        // is not the boundary; the task must park or complete first.
+        var clock = new FakeSettlementClock();
+        var executing = new SettlementActivity(
+            FireAndForgetCount: 0, EventOptionExecuting: true,
+            ExecutorRunning: false, QueuedActionCount: 0);
+        var ticks = new FakeSettlementTicks(clock,
+            Probe(phase: Phase.Event, hasDecision: true, activity: executing),
+            Probe(revision: 6, tick: 3, busy: false));
+        var module = new SettlementModule(ticks, clock);
+
+        var result = module.Follow(Request(timeoutMs: 100))
+            .GetAwaiter().GetResult();
+
+        Equal(SettlementOutcome.Settled, result.Outcome);
+        Equal(2, ticks.Captures);
+        Equal(1, ticks.ChangeWaits);
+    }
+
+    public static void SettlementPreservesSamePhaseEventDecisionSemantics()
+    {
+        var clock = new FakeSettlementClock();
+        var ticks = new FakeSettlementTicks(clock,
+            Probe(revision: 11, tick: 2, phase: Phase.Event,
+                busy: true, hasDecision: true));
+        var module = new SettlementModule(ticks, clock);
+
+        var result = module.Follow(Request(
+            phaseBefore: Phase.Event, acceptedRevision: 10, timeoutMs: 100))
+            .GetAwaiter().GetResult();
+
+        Equal(SettlementOutcome.NextDecision, result.Outcome);
+    }
+
+    public static void SettlementRequiresThreeStableDistinctFramesWhenRequested()
+    {
+        var clock = new FakeSettlementClock();
+        var ticks = new FakeSettlementTicks(clock, 1,
+            Probe(revision: 4, tick: 1, busy: false,
+                requiresFrameStability: true, stateKey: "same"),
+            Probe(revision: 4, tick: 2, busy: false,
+                requiresFrameStability: true, stateKey: "same"),
+            Probe(revision: 4, tick: 3, busy: false,
+                requiresFrameStability: true, stateKey: "same"));
+        var module = new SettlementModule(ticks, clock);
+
+        var result = module.Follow(Request(timeoutMs: 100)).GetAwaiter().GetResult();
+
+        Equal(SettlementOutcome.Settled, result.Outcome);
+        Equal(3, ticks.Captures);
+        Equal(2, ticks.TickWaits);
+        Equal(0, ticks.ChangeWaits);
+    }
+
+    public static void SettlementTimesOutThroughInjectedClock()
+    {
+        var clock = new FakeSettlementClock();
+        var ticks = new FakeSettlementTicks(clock, 5,
+            Probe(revision: 4, tick: 1, busy: true, hasDecision: false));
+        var module = new SettlementModule(ticks, clock);
+
+        var result = module.Follow(Request(timeoutMs: 5)).GetAwaiter().GetResult();
+
+        Equal(SettlementOutcome.Timeout, result.Outcome);
+        Equal(1, ticks.ChangeWaits);
+    }
+
+    public static void SettlementClassifiesObservedErrorAsFaultWithoutFrameDelay()
+    {
+        var clock = new FakeSettlementClock();
+        var ticks = new FakeSettlementTicks(clock,
+            Probe(revision: 5, tick: 1, busy: true,
+                requiresFrameStability: true,
+                errors: ["async_fault:test:TestException:kaboom"]));
+        var module = new SettlementModule(ticks, clock);
+
+        var result = module.Follow(Request(timeoutMs: 100)).GetAwaiter().GetResult();
+
+        Equal(SettlementOutcome.Fault, result.Outcome);
+        True(result.Outcome.ReachedBoundary());
+        False(result.Outcome.IsReplayable());
+        Equal(0, ticks.TickWaits + ticks.ChangeWaits);
+    }
+
+    public static void SettlementExecutorWatchdogUsesInjectedClockAndFiresOnce()
+    {
+        var clock = new FakeSettlementClock();
+        var module = new SettlementModule(
+            new FakeSettlementTicks(clock, Probe()), clock);
+        var action = new object();
+        var probe = Watchdog(action, "PlayCardAction");
+
+        Equal(0, module.ObserveWatchdogs(probe).Events.Count);
+        clock.Advance(SettlementModule.WedgeTimeoutMs);
+        Equal(0, module.ObserveWatchdogs(probe).Events.Count);
+        clock.Advance(1);
+        var wedged = module.ObserveWatchdogs(probe);
+        Equal("wedge:PlayCardAction", string.Join(',', wedged.Events));
+        Equal(SettlementModule.WedgeTimeoutMs + 1L, wedged.ExecutorStuckMs);
+        clock.Advance(1000);
+        Equal(0, module.ObserveWatchdogs(probe).Events.Count);
+    }
+
+    public static void SettlementDeadBoardWatchdogUsesInjectedClockAndFiresOnce()
+    {
+        var clock = new FakeSettlementClock();
+        var module = new SettlementModule(
+            new FakeSettlementTicks(clock, Probe()), clock);
+        var deadBoard = Watchdog(
+            action: null,
+            actionName: null,
+            combatInProgress: true,
+            queuesEmpty: true,
+            allEnemiesDead: true);
+
+        Equal(0, module.ObserveWatchdogs(deadBoard).Events.Count);
+        clock.Advance(SettlementModule.WedgeTimeoutMs + 1);
+        Equal("wedge:DeadBoard", string.Join(',',
+            module.ObserveWatchdogs(deadBoard).Events));
+        clock.Advance(1000);
+        Equal(0, module.ObserveWatchdogs(deadBoard).Events.Count);
+    }
+
+    public static void HealthCapabilitiesAdvertiseCheatArgumentShapes()
+    {
+        var capabilities = JsonSerializer.SerializeToNode(
+            ProtocolCapabilities.Create([]))!.AsObject();
+        var names = capabilities["cheats"]!.AsArray()
+            .Select(item => item!.GetValue<string>());
+        var shapes = capabilities["cheatArgumentShapes"]!.AsArray();
+        var artifactShapes = JsonNode.Parse(
+            ProtocolVocabulary.CreateArtifactJson())!["cheatArgumentShapes"];
+
+        Equal(string.Join(',', ProtocolVocabulary.Cheats.All.Select(shape => shape.Name)),
+            string.Join(',', names));
+        True(JsonNode.DeepEquals(artifactShapes, shapes));
+    }
+
     public static void RejectionCodesExposeTheCompleteDispatcherGrammar()
     {
-        Equal("bad_request", RejectionCodes.BadRequest);
-        Equal("bad_request,bad_phase,bad_index,bad_target,bad_state,not_ready,not_playable,"
-            + "not_enough_gold,not_enough_energy,not_enough_stars,run_exists,"
-            + "stale_state,external_change,resolution_partial,resolution_failed,"
-            + "not_found,internal",
-            string.Join(',', RejectionCodes.All));
+        Equal(ProtocolVocabulary.Rejections.BadRequest, RejectionCodes.BadRequest);
+        True(RejectionCodes.All.SequenceEqual(ProtocolVocabulary.Rejections.All));
     }
 
     public static void FieldValueFindsPrivateFieldsDeclaredOnBaseTypes()
@@ -154,81 +620,102 @@ internal static class Tests
 
     public static void MissingQueuePopIsSettledOnlyAfterCombatTeardown()
     {
+        var clock = new FakeSettlementClock();
+        var settlement = new SettlementModule(
+            new FakeSettlementTicks(clock, Probe()), clock);
         var pop = new InvalidOperationException(
             "Tried to pop action EndPlayerTurnAction, but we didn't find it in any queue!");
 
-        Equal(InlineFaultKind.VictorySettled, ResolutionGuards.ClassifyInlineFault(
+        Equal(InlineFaultKind.VictorySettled, settlement.ClassifyInlineFault(
             pop, "EndPlayerTurnAction", combatInProgress: false, revisionChanged: true));
-        Equal(InlineFaultKind.Partial, ResolutionGuards.ClassifyInlineFault(
+        Equal(InlineFaultKind.Partial, settlement.ClassifyInlineFault(
             pop, "EndPlayerTurnAction", combatInProgress: true, revisionChanged: true));
-        Equal(InlineFaultKind.Partial, ResolutionGuards.ClassifyInlineFault(
+        Equal(InlineFaultKind.Partial, settlement.ClassifyInlineFault(
             pop, "PlayCardAction", combatInProgress: false, revisionChanged: true));
-        Equal(InlineFaultKind.Failed, ResolutionGuards.ClassifyInlineFault(
+        Equal(InlineFaultKind.Failed, settlement.ClassifyInlineFault(
             new InvalidOperationException("some other queue failure"),
             "EndPlayerTurnAction", combatInProgress: false, revisionChanged: false));
 
-        Equal(InlineFaultKind.VictorySettled, ResolutionGuards.ClassifyInlineFault(
+        Equal(InlineFaultKind.VictorySettled, settlement.ClassifyInlineFault(
             new AggregateException(pop),
             "EndPlayerTurnAction", combatInProgress: false, revisionChanged: false));
-        Equal(InlineFaultKind.Failed, ResolutionGuards.ClassifyInlineFault(
+        Equal(InlineFaultKind.Failed, settlement.ClassifyInlineFault(
             new AggregateException(new InvalidOperationException("some other queue failure")),
             "EndPlayerTurnAction", combatInProgress: false, revisionChanged: false));
     }
 
     public static void InlineFaultClassificationDistinguishesPartialFromFailed()
     {
+        var clock = new FakeSettlementClock();
+        var settlement = new SettlementModule(
+            new FakeSettlementTicks(clock, Probe()), clock);
         var fault = new MissingMethodException("missing Godot API");
 
-        Equal(InlineFaultKind.Partial, ResolutionGuards.ClassifyInlineFault(
+        Equal(InlineFaultKind.Partial, settlement.ClassifyInlineFault(
             fault, "PlayCardAction", combatInProgress: true, revisionChanged: true));
-        Equal(InlineFaultKind.Failed, ResolutionGuards.ClassifyInlineFault(
+        Equal(InlineFaultKind.Failed, settlement.ClassifyInlineFault(
             fault, "PlayCardAction", combatInProgress: true, revisionChanged: false));
     }
 
     public static void EndingCombatIsNotADeadBoardWedge()
     {
-        False(ResolutionGuards.IsDeadBoardCandidate(
-            actionRunning: false,
-            pickerActive: false,
-            combatInProgress: true,
-            combatIsEnding: true,
-            queuesEmpty: true,
-            allEnemiesDead: true));
-        False(ResolutionGuards.IsDeadBoardCandidate(
-            actionRunning: false,
-            pickerActive: false,
-            combatInProgress: true,
-            combatIsEnding: false,
-            queuesEmpty: false,
-            allEnemiesDead: true));
-        True(ResolutionGuards.IsDeadBoardCandidate(
-            actionRunning: false,
-            pickerActive: false,
-            combatInProgress: true,
-            combatIsEnding: false,
-            queuesEmpty: true,
-            allEnemiesDead: true));
+        var clock = new FakeSettlementClock();
+        var module = new SettlementModule(
+            new FakeSettlementTicks(clock, Probe()), clock);
+        var ending = Watchdog(null, null, combatInProgress: true,
+            combatIsEnding: true, queuesEmpty: true, allEnemiesDead: true);
+        var queued = Watchdog(null, null, combatInProgress: true,
+            queuesEmpty: false, allEnemiesDead: true);
+
+        Equal(0, module.ObserveWatchdogs(ending).Events.Count);
+        clock.Advance(SettlementModule.WedgeTimeoutMs + 1);
+        Equal(0, module.ObserveWatchdogs(ending).Events.Count);
+        Equal(0, module.ObserveWatchdogs(queued).Events.Count);
     }
 
-    public static void DecisionCardTextKeySeparatesEveryTextChangingModifier()
+    public static void CardIdentityGrammarProducesBareSelectorAndTextKeyTogether()
     {
-        Equal("BASH+0", DecisionProjection.CardTextKey("BASH", 0, null, null));
-        Equal("BASH+1", DecisionProjection.CardTextKey("BASH", 1, null, null));
-        Equal("BASH+1@SELF_HELP!CURSED",
-            DecisionProjection.CardTextKey("BASH", 1, "SELF_HELP", "CURSED"));
+        var identity = CardSpecifier.Encode("BASH", false, 0, null, null);
+
+        Equal("BASH", identity.Selector);
+        Equal("BASH+0", identity.TextKey);
+    }
+
+    public static void CardIdentityGrammarSharesModifierOrderAcrossBothFormats()
+    {
+        var identity = CardSpecifier.Encode(
+            "BASH", true, 2, "SELF_HELP", "CURSED");
+
+        Equal("BASH+@SELF_HELP!CURSED", identity.Selector);
+        Equal("BASH+2@SELF_HELP!CURSED", identity.TextKey);
+    }
+
+    public static void CardIdentityGrammarPreservesModifiersOnBareCopies()
+    {
+        var identity = CardSpecifier.Encode(
+            "BASH", false, 0, "SELF_HELP", "CURSED");
+
+        Equal("BASH@SELF_HELP!CURSED", identity.Selector);
+        Equal("BASH+0@SELF_HELP!CURSED", identity.TextKey);
+    }
+
+    public static void CardIdentityGrammarPreservesDistinctEngineUpgradeSignals()
+    {
+        var identity = CardSpecifier.Encode("BASH", true, 0, null, null);
+
+        Equal("BASH+", identity.Selector);
+        Equal("BASH+0", identity.TextKey);
     }
 
     public static void DecisionLegalVerbsComeFromVisibleTargetsAndGates()
     {
-        var snapshot = System.Text.Json.Nodes.JsonNode.Parse("""
-            {
-              "phase":"card_select",
-              "cards":[{"idx":0}],
-              "confirmable":false,
-              "cancelable":true,
-              "player":{"potions":[]}
-            }
-            """)!.AsObject();
+        var snapshot = new SnapshotContract(Phase.CardSelect)
+        {
+            Cards = [new SnapshotItemContract { Index = 0 }],
+            Confirmable = false,
+            Cancelable = true,
+            Player = new SnapshotPlayerContract { Potions = [] },
+        };
 
         var legal = DecisionProjection.LegalVerbs(snapshot, runActive: true);
 
@@ -290,6 +777,44 @@ internal static class Tests
             combatInProgress: false)));
     }
 
+    public static void ErrorEventsDowngradeOnlyExactHeadlessCompletionNoise()
+    {
+        var headlessCompletionNoise = new[]
+        {
+            "Act 4 is not yet implemented.",
+            "EpochModel was not found :(",
+            "System.InvalidOperationException: Tried to set event options after event was finished!\n"
+                + "   at MegaCrit.Sts2.Core.Models.EventModel.SetEventState(LocString description, IEnumerable`1 eventOptions)\n"
+                + "   at MegaCrit.Sts2.Core.Models.EventModel.SetEventFinished(LocString description)",
+        };
+
+        foreach (var line in headlessCompletionNoise)
+        {
+            var note = ErrorEvents.FromLogLine(
+                line, combatInProgress: true, headlessHost: true);
+            True(note.StartsWith("engine_note:", StringComparison.Ordinal));
+            False(ErrorEvents.IsError(note));
+
+            // The same engine error in the GUI remains actionable.
+            True(ErrorEvents.IsError(ErrorEvents.FromLogLine(
+                line, combatInProgress: true, headlessHost: false)));
+        }
+
+        // Exact messages from another call path remain actionable even in
+        // the host: only the known completion-tail stack is presentation
+        // noise.
+        True(ErrorEvents.IsError(ErrorEvents.FromLogLine(
+            "EpochModel was not found :(\n   at Some.Other.Frame()",
+            combatInProgress: false, headlessHost: true)));
+        // Soul Nexus is repaired at host composition so its death hook can
+        // finish. If that NRE ever reaches the error channel, keep failing:
+        // downgrading it here would leave PlayCardAction permanently busy.
+        True(ErrorEvents.IsError(ErrorEvents.FromLogLine(
+            "System.NullReferenceException: Object reference not set to an instance of an object.\n"
+                + "   at MegaCrit.Sts2.Core.Models.Monsters.SoulNexus.AfterDeath(Creature _)",
+            combatInProgress: false, headlessHost: true)));
+    }
+
     public static void EngineLogsRequireTaskIdentityBeforeRetiredSuppression()
     {
         const string duplicate =
@@ -297,7 +822,7 @@ internal static class Tests
         var correlation = new EngineLogCorrelation();
         var directCurrentLog = correlation.Register(
             duplicate, combatInProgress: false,
-            thread: new ManagedThreadId(7));
+            headlessHost: false, thread: new ManagedThreadId(7));
 
         // A current Error line with the same type/message as some retired
         // task has no completing-task identity. It must time out to Publish,
@@ -308,7 +833,7 @@ internal static class Tests
 
         var retiredLog = correlation.Register(
             duplicate, combatInProgress: false,
-            thread: new ManagedThreadId(7));
+            headlessHost: false, thread: new ManagedThreadId(7));
         var retiredTask = Task.FromException(
             new InvalidOperationException("duplicate failure"));
         True(correlation.ResolveForTask(
@@ -318,7 +843,7 @@ internal static class Tests
 
         var currentTaskLog = correlation.Register(
             duplicate, combatInProgress: false,
-            thread: new ManagedThreadId(7));
+            headlessHost: false, thread: new ManagedThreadId(7));
         var currentTask = Task.FromException(
             new InvalidOperationException("duplicate failure"));
         True(correlation.ResolveForTask(
@@ -331,9 +856,9 @@ internal static class Tests
         // Resolve the most recent matching same-thread line, leaving the
         // current marker to expire conservatively to Publish.
         var collidingCurrent = correlation.Register(
-            duplicate + " [current marker]", false, new ManagedThreadId(11));
+            duplicate + " [current marker]", false, false, new ManagedThreadId(11));
         var collidingRetired = correlation.Register(
-            duplicate, false, new ManagedThreadId(11));
+            duplicate, false, false, new ManagedThreadId(11));
         True(correlation.ResolveForTask(
             retiredTask, new ManagedThreadId(11),
             EngineLogDisposition.Suppress));
@@ -364,30 +889,26 @@ internal static class Tests
         // pick-relic is the verb that opens the chest — omitting it left
         // "proceed" as the only advertised action and a legal-verbs-only
         // agent had to walk past every treasure room.
-        var headless = System.Text.Json.Nodes.JsonNode.Parse("""
-            {
-              "phase":"treasure",
-              "chestOpened":false,
-              "proceedAvailable":true,
-              "relics":[],
-              "player":{"potions":[]}
-            }
-            """)!.AsObject();
+        var headless = new SnapshotContract(Phase.Treasure)
+        {
+            ChestOpened = false,
+            ProceedAvailable = true,
+            Relics = [],
+            Player = new SnapshotPlayerContract { Potions = [] },
+        };
 
         Equal("pick-relic,proceed,abandon", string.Join(',',
             DecisionProjection.LegalVerbs(headless, runActive: true)));
 
         // GUI closed chest: the proceed button hides until the chest is
         // resolved, so opening is the only advertised move.
-        var gui = System.Text.Json.Nodes.JsonNode.Parse("""
-            {
-              "phase":"treasure",
-              "chestOpened":false,
-              "proceedAvailable":false,
-              "relics":[],
-              "player":{"potions":[]}
-            }
-            """)!.AsObject();
+        var gui = new SnapshotContract(Phase.Treasure)
+        {
+            ChestOpened = false,
+            ProceedAvailable = false,
+            Relics = [],
+            Player = new SnapshotPlayerContract { Potions = [] },
+        };
 
         Equal("pick-relic,abandon", string.Join(',',
             DecisionProjection.LegalVerbs(gui, runActive: true)));
@@ -395,30 +916,26 @@ internal static class Tests
 
     public static void DecisionOpenChestOffersPickAndSkipThenOnlyProceed()
     {
-        var offering = System.Text.Json.Nodes.JsonNode.Parse("""
-            {
-              "phase":"treasure",
-              "chestOpened":true,
-              "proceedAvailable":true,
-              "relics":[{"idx":0}],
-              "player":{"potions":[]}
-            }
-            """)!.AsObject();
+        var offering = new SnapshotContract(Phase.Treasure)
+        {
+            ChestOpened = true,
+            ProceedAvailable = true,
+            Relics = [new SnapshotItemContract { Index = 0 }],
+            Player = new SnapshotPlayerContract { Potions = [] },
+        };
 
         Equal("pick-relic,skip,proceed,abandon", string.Join(',',
             DecisionProjection.LegalVerbs(offering, runActive: true)));
 
         // Resolved offer: the chest stays open and empty — pick-relic must
         // not be advertised again (the dispatcher would reject it).
-        var resolved = System.Text.Json.Nodes.JsonNode.Parse("""
-            {
-              "phase":"treasure",
-              "chestOpened":true,
-              "proceedAvailable":true,
-              "relics":[],
-              "player":{"potions":[]}
-            }
-            """)!.AsObject();
+        var resolved = new SnapshotContract(Phase.Treasure)
+        {
+            ChestOpened = true,
+            ProceedAvailable = true,
+            Relics = [],
+            Player = new SnapshotPlayerContract { Potions = [] },
+        };
 
         Equal("proceed,abandon", string.Join(',',
             DecisionProjection.LegalVerbs(resolved, runActive: true)));
@@ -426,22 +943,544 @@ internal static class Tests
 
     public static void DecisionUnavailableTransitionsDoNotAdvertiseActions()
     {
-        foreach (var phase in new[] { "event", "rewards" })
+        foreach (var phase in new[] { Phase.Event, Phase.Rewards })
         {
-            var snapshot = System.Text.Json.Nodes.JsonNode.Parse($$"""
-                {
-                  "phase":"{{phase}}",
-                  "available":false,
-                  "options":[{"idx":0}],
-                  "rewards":[{"idx":0}]
-                }
-                """)!.AsObject();
+            var snapshot = new SnapshotContract(phase)
+            {
+                Available = false,
+                Options = [new SnapshotItemContract { Index = 0 }],
+                Rewards = [new SnapshotItemContract { Index = 0 }],
+            };
 
             var legal = DecisionProjection.LegalVerbs(snapshot, runActive: false);
 
             Equal("", string.Join(',', legal));
         }
     }
+
+    public static void DecisionPotionVisibilityPreservesTopLevelPrecedence()
+    {
+        var inventoryPotion = new SnapshotItemContract { Index = 0 };
+        var shop = new SnapshotContract(Phase.Shop)
+        {
+            Potions = [],
+            Player = new SnapshotPlayerContract { Potions = [inventoryPotion] },
+        };
+        var map = new SnapshotContract(Phase.Map)
+        {
+            Player = new SnapshotPlayerContract { Potions = [inventoryPotion] },
+        };
+
+        Equal("leave,abandon", string.Join(',',
+            DecisionProjection.LegalVerbs(shop, runActive: true)));
+        Equal("potion-discard,abandon", string.Join(',',
+            DecisionProjection.LegalVerbs(map, runActive: true)));
+    }
+
+    public static void SnapshotContractPreservesUnconsumedProducerFields()
+    {
+        var card = new SnapshotItemContract
+        {
+            Index = 0,
+            Model = "STRIKE_R",
+            Playable = true,
+        };
+        var player = new SnapshotPlayerContract { Hp = [40, 80], Potions = [] };
+        var snapshot = new SnapshotContract(Phase.Combat)
+        {
+            Side = "player",
+            ActionsDisabled = false,
+            Hand = [card],
+            Player = player,
+        };
+
+        snapshot.AddExtensions(new
+        {
+            phaseSpecific = new { value = 7, missing = (string?)null },
+        });
+
+        var wire = snapshot.ToJsonObject();
+        Equal(Phase.Combat, snapshot.Phase);
+        Equal("player", snapshot.Side);
+        True(snapshot.Hand.Single().Playable == true);
+        Equal("STRIKE_R", wire["hand"]![0]!["model"]!.GetValue<string>());
+        Equal(7, wire["phaseSpecific"]!["value"]!.GetValue<int>());
+        True(wire["phaseSpecific"]!["missing"] is null);
+    }
+
+    public static void SnapshotContractOwnsFollowAndAttributionMetadata()
+    {
+        var snapshot = new SnapshotContract(Phase.Event)
+        {
+            Revision = 42,
+            RunId = "run-7",
+            Legal = ["option", "proceed"],
+        };
+
+        Equal(42L, snapshot.Revision);
+        Equal("run-7", snapshot.RunId);
+        Equal("option,proceed", string.Join(',', snapshot.Legal));
+        var wire = snapshot.ToJsonObject();
+        Equal("event", wire["phase"]!.GetValue<string>());
+        Equal(42L, wire["rev"]!.GetValue<long>());
+        Equal("run-7", wire["runId"]!.GetValue<string>());
+    }
+
+    public static void SnapshotConsumerFingerprintTracksCardIdentityNotExtensions()
+    {
+        SnapshotContract Build(string model, string decorativeFrame)
+        {
+            var card = new SnapshotItemContract
+            {
+                Index = 0,
+                Model = model,
+                Playable = true,
+            };
+            var snapshot = new SnapshotContract(Phase.Combat)
+            {
+                Revision = 7,
+                RunId = "source",
+                Side = "player",
+                Hand = [card],
+                Legal = ["play", "end-turn"],
+            };
+            snapshot.AddExtensions(new { decorativeFrame });
+            return snapshot;
+        }
+
+        var original = Build("STRIKE_R", "ornate");
+        var extensionChanged = Build("STRIKE_R", "plain");
+        var cardChanged = Build("BASH", "ornate");
+
+        Equal(original.ConsumerStateKey(), extensionChanged.ConsumerStateKey());
+        False(original.ConsumerFingerprint() == cardChanged.ConsumerFingerprint());
+        False(original.ConsumerProjection().ContainsKey("decorativeFrame"));
+        Equal("STRIKE_R", original.ConsumerProjection()["hand"]![0]!["model"]!.GetValue<string>());
+    }
+
+    public static void SnapshotConsumerFingerprintTracksMapTargetCoordinates()
+    {
+        SnapshotContract Build(int col, int row, string type) => new(Phase.Map)
+        {
+            Next =
+            [
+                new SnapshotItemContract
+                {
+                    Index = 0,
+                    Col = col,
+                    Row = row,
+                    Type = type,
+                },
+            ],
+            Legal = ["map-move", "abandon"],
+        };
+
+        var original = Build(2, 3, "monster");
+
+        False(original.ConsumerFingerprint() == Build(3, 3, "monster").ConsumerFingerprint());
+        False(original.ConsumerFingerprint() == Build(2, 4, "monster").ConsumerFingerprint());
+        False(original.ConsumerFingerprint() == Build(2, 3, "elite").ConsumerFingerprint());
+    }
+
+    public static void SnapshotConsumerFingerprintTracksEnemyIdentityAndHp()
+    {
+        SnapshotContract Build(uint id, string model, int hp) => new(Phase.Combat)
+        {
+            Enemies =
+            [
+                new SnapshotEnemyContract
+                {
+                    Id = id,
+                    Model = model,
+                    Hp = [hp, 40],
+                    Alive = true,
+                },
+            ],
+            Legal = ["play", "end-turn"],
+        };
+
+        var original = Build(7, "CULTIST", 30);
+
+        False(original.ConsumerFingerprint() == Build(8, "CULTIST", 30).ConsumerFingerprint());
+        False(original.ConsumerFingerprint() == Build(7, "LOUSE", 30).ConsumerFingerprint());
+        False(original.ConsumerFingerprint() == Build(7, "CULTIST", 29).ConsumerFingerprint());
+    }
+
+    public static void SnapshotConsumerFingerprintTracksPlayerHpAndGold()
+    {
+        SnapshotContract Build(int hp, int gold)
+        {
+            var player = new SnapshotPlayerContract
+            {
+                Hp = [hp, 80],
+                Gold = gold,
+                Potions = [],
+            };
+            player.AddExtensions(new { description = $"{hp}/{gold}" });
+            return new SnapshotContract(Phase.Map)
+            {
+                Player = player,
+                Legal = ["map-move", "abandon"],
+            };
+        }
+
+        var original = Build(60, 100);
+
+        False(original.ConsumerFingerprint() == Build(59, 100).ConsumerFingerprint());
+        False(original.ConsumerFingerprint() == Build(60, 101).ConsumerFingerprint());
+    }
+
+    public static void SnapshotConsumerFingerprintTracksCombatResources()
+    {
+        SnapshotContract Build(int hp, int block, int energy, int stars) =>
+            new(Phase.Combat)
+            {
+                You = new SnapshotCombatantContract
+                {
+                    Hp = [hp, 80],
+                    Block = block,
+                    Energy = [energy, 3],
+                    Stars = stars,
+                },
+                Legal = ["play", "end-turn"],
+            };
+
+        var original = Build(60, 5, 2, 1);
+
+        False(original.ConsumerFingerprint() == Build(59, 5, 2, 1).ConsumerFingerprint());
+        False(original.ConsumerFingerprint() == Build(60, 6, 2, 1).ConsumerFingerprint());
+        False(original.ConsumerFingerprint() == Build(60, 5, 1, 1).ConsumerFingerprint());
+        False(original.ConsumerFingerprint() == Build(60, 5, 2, 2).ConsumerFingerprint());
+    }
+
+    public static void SnapshotConsumerFingerprintTracksCurrentMapPosition()
+    {
+        SnapshotContract Build(int act, int col, int row) => new(Phase.Map)
+        {
+            Act = act,
+            Current = [col, row],
+            Legal = ["map-move", "abandon"],
+        };
+
+        var original = Build(0, 2, 3);
+
+        False(original.ConsumerFingerprint() == Build(1, 2, 3).ConsumerFingerprint());
+        False(original.ConsumerFingerprint() == Build(0, 3, 3).ConsumerFingerprint());
+        False(original.ConsumerFingerprint() == Build(0, 2, 4).ConsumerFingerprint());
+    }
+
+    public static void SnapshotConsumerFingerprintTracksTopLevelShopGold()
+    {
+        SnapshotContract Build(int gold) => new(Phase.Shop)
+        {
+            Gold = gold,
+            Legal = ["buy", "leave", "abandon"],
+        };
+
+        False(Build(100).ConsumerFingerprint() == Build(99).ConsumerFingerprint());
+    }
+
+    public static void SnapshotConsumerFingerprintTracksRelicIdentity()
+    {
+        SnapshotContract Build(string model) => new(Phase.RelicReward)
+        {
+            Relics = [new SnapshotItemContract { Index = 0, Model = model }],
+            Legal = ["pick-relic", "skip", "abandon"],
+        };
+
+        False(Build("VAJRA").ConsumerFingerprint()
+            == Build("ANCHOR").ConsumerFingerprint());
+    }
+
+    public static void SnapshotConsumerFingerprintHasCrossLanguageFixture()
+    {
+        var snapshot = new SnapshotContract(Phase.Combat)
+        {
+            Act = 1,
+            Current = [2, 3],
+            Gold = 100,
+            SemanticState = ["pile:draw:STRIKE_R"],
+            Selected = ["STRIKE_R"],
+            Side = "player",
+            Next =
+            [
+                new SnapshotItemContract
+                {
+                    Index = 0, Id = "PATH_A", Col = 3, Row = 4,
+                    Type = "monster",
+                },
+            ],
+            Hand =
+            [
+                new SnapshotItemContract
+                {
+                    Index = 0, Model = "STRIKE_R", Playable = true,
+                    Selected = false, SemanticState = ["cost:1"],
+                },
+            ],
+            Relics = [new SnapshotItemContract { Index = 0, Model = "VAJRA" }],
+            You = new SnapshotCombatantContract
+            {
+                Hp = [60, 80], Block = 5, Energy = [2, 3], Stars = 1,
+                SemanticState = ["power:STRENGTH:1"],
+            },
+            Enemies =
+            [
+                new SnapshotEnemyContract
+                {
+                    Id = 7, Model = "CULTIST", Hp = [30, 40], Block = 0,
+                    Alive = true, SemanticState = ["intent:attack:6:1"],
+                },
+            ],
+            Player = new SnapshotPlayerContract
+            {
+                Hp = [60, 80], Gold = 100, Potions = [],
+                SemanticState = ["deck:STRIKE_R"],
+            },
+            Legal = ["play", "end-turn"],
+        };
+
+        Equal("d4c312db8769179e", snapshot.ConsumerFingerprint());
+    }
+
+    public static void SnapshotConsumerFingerprintTracksActionTargetGrammar()
+    {
+        SnapshotContract Build(
+            int turn, string eventId, string selector, int slot, string target) =>
+            new(Phase.Combat)
+            {
+                Turn = turn,
+                Id = eventId,
+                Hand =
+                [
+                    new SnapshotItemContract
+                    {
+                        Index = 0,
+                        Model = "BASH",
+                        Selector = selector,
+                        Slot = slot,
+                        Target = target,
+                    },
+                ],
+                Legal = ["play", "end-turn"],
+            };
+
+        var original = Build(2, "BIG_FISH", "BASH+", 1, "anyenemy");
+
+        False(original.ConsumerFingerprint()
+            == Build(3, "BIG_FISH", "BASH+", 1, "anyenemy").ConsumerFingerprint());
+        False(original.ConsumerFingerprint()
+            == Build(2, "SCRAP_OOZE", "BASH+", 1, "anyenemy").ConsumerFingerprint());
+        False(original.ConsumerFingerprint()
+            == Build(2, "BIG_FISH", "BASH", 1, "anyenemy").ConsumerFingerprint());
+        False(original.ConsumerFingerprint()
+            == Build(2, "BIG_FISH", "BASH+", 2, "anyenemy").ConsumerFingerprint());
+        False(original.ConsumerFingerprint()
+            == Build(2, "BIG_FISH", "BASH+", 1, "self").ConsumerFingerprint());
+    }
+
+    public static void SnapshotConsumerFingerprintTracksGameOverOutcomeAndHp()
+    {
+        SnapshotContract Build(string outcome, int hp) => new(Phase.GameOver)
+        {
+            Outcome = outcome,
+            Hp = [hp, 80],
+            Gold = 100,
+        };
+
+        var original = Build("victory", 20);
+
+        False(original.ConsumerFingerprint() == Build("defeat", 20).ConsumerFingerprint());
+        False(original.ConsumerFingerprint() == Build("victory", 0).ConsumerFingerprint());
+        Equal("c02643081d2c619c", original.ConsumerFingerprint());
+    }
+
+    public static void SnapshotConsumerFingerprintTracksTypedSemanticState()
+    {
+        SnapshotContract Build(string top, string item, string player,
+            string you, string enemy, bool selected) => new(Phase.Combat)
+        {
+            SemanticState = [top],
+            Selected = ["BASH+"],
+            Hand =
+            [
+                new SnapshotItemContract
+                {
+                    Index = 0,
+                    Model = "BASH",
+                    Selector = "BASH+",
+                    Selected = selected,
+                    SemanticState = [item],
+                },
+            ],
+            Player = new SnapshotPlayerContract
+            {
+                Hp = [60, 80],
+                Gold = 100,
+                Potions = [],
+                SemanticState = [player],
+            },
+            You = new SnapshotCombatantContract
+            {
+                Hp = [60, 80],
+                Energy = [2, 3],
+                SemanticState = [you],
+            },
+            Enemies =
+            [
+                new SnapshotEnemyContract
+                {
+                    Id = 7,
+                    Model = "CULTIST",
+                    Hp = [30, 40],
+                    SemanticState = [enemy],
+                },
+            ],
+            Legal = ["play", "end-turn"],
+        };
+
+        var original = Build("pile:draw:BASH+", "cost:2", "deck:BASH+",
+            "power:STRENGTH:1", "intent:attack:6:1", selected: false);
+
+        False(original.ConsumerFingerprint() == Build("pile:draw:STRIKE_R",
+            "cost:2", "deck:BASH+", "power:STRENGTH:1",
+            "intent:attack:6:1", selected: false).ConsumerFingerprint());
+        False(original.ConsumerFingerprint() == Build("pile:draw:BASH+",
+            "cost:1", "deck:BASH+", "power:STRENGTH:1",
+            "intent:attack:6:1", selected: false).ConsumerFingerprint());
+        False(original.ConsumerFingerprint() == Build("pile:draw:BASH+",
+            "cost:2", "deck:STRIKE_R", "power:STRENGTH:1",
+            "intent:attack:6:1", selected: false).ConsumerFingerprint());
+        False(original.ConsumerFingerprint() == Build("pile:draw:BASH+",
+            "cost:2", "deck:BASH+", "power:WEAK:1",
+            "intent:attack:6:1", selected: false).ConsumerFingerprint());
+        False(original.ConsumerFingerprint() == Build("pile:draw:BASH+",
+            "cost:2", "deck:BASH+", "power:STRENGTH:1",
+            "intent:attack:12:1", selected: false).ConsumerFingerprint());
+        False(original.ConsumerFingerprint() == Build("pile:draw:BASH+",
+            "cost:2", "deck:BASH+", "power:STRENGTH:1",
+            "intent:attack:6:1", selected: true).ConsumerFingerprint());
+        False(original.ConsumerStateKey() == Build("pile:draw:STRIKE_R",
+            "cost:2", "deck:BASH+", "power:STRENGTH:1",
+            "intent:attack:6:1", selected: false).ConsumerStateKey());
+    }
+
+    public static void SnapshotPlayerHpPreservesNullWireShape()
+    {
+        var player = new SnapshotPlayerContract
+        {
+            Hp = null,
+            Gold = 100,
+            Potions = [],
+        };
+
+        var wire = player.ToJsonObject();
+
+        True(wire.ContainsKey("hp"));
+        True(wire["hp"] is null);
+    }
+
+    public static void SnapshotConsumerFingerprintIgnoresPresentationAtEveryTypedLayer()
+    {
+        SnapshotContract Build(string presentation)
+        {
+            var item = new SnapshotItemContract
+            {
+                Model = "BASH",
+                SemanticState = ["cost:2"],
+            };
+            item.AddExtensions(new { title = presentation });
+            var player = new SnapshotPlayerContract
+            {
+                Hp = [60, 80],
+                Potions = [],
+                SemanticState = ["deck:BASH"],
+            };
+            player.AddExtensions(new { deckDescription = presentation });
+            var you = new SnapshotCombatantContract
+            {
+                Hp = [60, 80],
+                Energy = [2, 3],
+                SemanticState = ["power:STRENGTH:1"],
+            };
+            you.AddExtensions(new { powerDescription = presentation });
+            var enemy = new SnapshotEnemyContract
+            {
+                Id = 7,
+                Model = "CULTIST",
+                Hp = [30, 40],
+                SemanticState = ["intent:attack:6:1"],
+            };
+            enemy.AddExtensions(new { title = presentation });
+            var snapshot = new SnapshotContract(Phase.Combat)
+            {
+                Hand = [item],
+                Player = player,
+                You = you,
+                Enemies = [enemy],
+                SemanticState = ["pile:draw:BASH"],
+            };
+            snapshot.AddExtensions(new { decorativeFrame = presentation });
+            return snapshot;
+        }
+
+        Equal(Build("ornate").ConsumerFingerprint(),
+            Build("plain").ConsumerFingerprint());
+    }
+
+    private static SettlementRequest Request(
+        Phase phaseBefore = Phase.Map,
+        long startedRevision = 3,
+        long acceptedRevision = 4,
+        long acceptedTick = 0,
+        int timeoutMs = 100) => new(
+            phaseBefore,
+            startedRevision,
+            acceptedRevision,
+            acceptedTick,
+            timeoutMs);
+
+    private static SettlementProbe Probe(
+        long revision = 4,
+        long tick = 1,
+        long workRevision = 0,
+        Phase phase = Phase.Map,
+        bool requiresFrameStability = false,
+        bool busy = false,
+        bool hasDecision = false,
+        string stateKey = "state",
+        string[]? errors = null,
+        SettlementActivity? activity = null) => new(
+            tick,
+            workRevision,
+            requiresFrameStability,
+            activity ?? new SettlementActivity(
+                busy ? 1 : 0, EventOptionExecuting: false,
+                ExecutorRunning: false, QueuedActionCount: 0),
+            new SnapshotContract(phase)
+            {
+                Revision = revision,
+                RunId = "run",
+                Side = stateKey,
+                Legal = hasDecision ? ["option"] : [],
+            },
+            errors ?? []);
+
+    private static SettlementWatchdogProbe Watchdog(
+        object? action,
+        string? actionName,
+        bool pickerActive = false,
+        bool combatInProgress = false,
+        bool combatIsEnding = false,
+        bool queuesEmpty = false,
+        bool allEnemiesDead = false) => new(
+            action,
+            actionName,
+            pickerActive,
+            combatInProgress,
+            combatIsEnding,
+            queuesEmpty,
+            allEnemiesDead);
 
     private static void Equal(object? expected, object? actual)
     {
@@ -474,6 +1513,27 @@ internal static class Tests
 
         throw new InvalidOperationException($"expected {typeof(T).Name}");
     }
+
+    private static T Capture<T>(Action action) where T : Exception
+    {
+        try
+        {
+            action();
+        }
+        catch (T exception)
+        {
+            return exception;
+        }
+
+        throw new InvalidOperationException($"expected {typeof(T).Name}");
+    }
+    private static InvalidOperationException CollectionMutation() => new(
+        "Collection was modified; enumeration operation may not execute.");
+}
+
+internal static class PatchIdentityProbe
+{
+    public static void Apply(int value, string text) { }
 }
 
 internal class BaseProbe
@@ -493,6 +1553,77 @@ internal class BaseProbe
     private string Join(string first, string second) => $"{first}:{second}";
 }
 
+internal sealed class OneShotEnumerable<T>(IEnumerable<T> values) : IEnumerable<T>
+{
+    public int EnumerationCount { get; private set; }
+
+    public IEnumerator<T> GetEnumerator()
+    {
+        EnumerationCount++;
+        if (EnumerationCount > 1)
+            throw new InvalidOperationException("live source was enumerated twice");
+        return values.GetEnumerator();
+    }
+
+    System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() =>
+        GetEnumerator();
+}
+
 internal sealed class DerivedProbe : BaseProbe
 {
+}
+
+internal sealed class FakeSettlementClock : ISettlementClock
+{
+    public DateTimeOffset UtcNow { get; private set; } =
+        DateTimeOffset.UnixEpoch;
+
+    public void Advance(int milliseconds) =>
+        UtcNow = UtcNow.AddMilliseconds(milliseconds);
+}
+
+internal sealed class FakeSettlementTicks : ISettlementTickSource
+{
+    private readonly FakeSettlementClock _clock;
+    private readonly int _waitAdvanceMs;
+    private readonly SettlementProbe[] _probes;
+
+    public FakeSettlementTicks(
+        FakeSettlementClock clock, params SettlementProbe[] probes)
+        : this(clock, 1, probes) { }
+
+    public FakeSettlementTicks(
+        FakeSettlementClock clock,
+        int waitAdvanceMs,
+        params SettlementProbe[] probes)
+    {
+        _clock = clock;
+        _waitAdvanceMs = waitAdvanceMs;
+        _probes = probes;
+    }
+
+    public int Captures { get; private set; }
+    public int ChangeWaits { get; private set; }
+    public int TickWaits { get; private set; }
+
+    public Task<SettlementProbe> Capture(long startedRevision)
+    {
+        var probe = _probes[Math.Min(Captures, _probes.Length - 1)];
+        Captures++;
+        return Task.FromResult(probe);
+    }
+
+    public Task WaitForChange(long afterRevision, int timeoutMs)
+    {
+        ChangeWaits++;
+        _clock.Advance(Math.Min(_waitAdvanceMs, timeoutMs));
+        return Task.CompletedTask;
+    }
+
+    public Task WaitForTick(long afterTick, int timeoutMs)
+    {
+        TickWaits++;
+        _clock.Advance(Math.Min(_waitAdvanceMs, timeoutMs));
+        return Task.CompletedTask;
+    }
 }

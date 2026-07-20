@@ -1,6 +1,5 @@
 using MegaCrit.Sts2.Core.CardSelection;
 using MegaCrit.Sts2.Core.Combat;
-using MegaCrit.Sts2.Core.Context;
 using MegaCrit.Sts2.Core.Entities.Cards;
 using MegaCrit.Sts2.Core.Entities.Creatures;
 using MegaCrit.Sts2.Core.Entities.Players;
@@ -8,6 +7,7 @@ using MegaCrit.Sts2.Core.Events.Custom.CrystalSphereEvent.CrystalSphereItems;
 using MegaCrit.Sts2.Core.Events;
 using MegaCrit.Sts2.Core.HoverTips;
 using MegaCrit.Sts2.Core.Localization;
+using MegaCrit.Sts2.Core.Localization.DynamicVars;
 using MegaCrit.Sts2.Core.Models.Events;
 using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Models.Powers;
@@ -26,12 +26,13 @@ using MegaCrit.Sts2.Core.Nodes.Screens.Overlays;
 using MegaCrit.Sts2.Core.Rewards;
 using MegaCrit.Sts2.Core.Rooms;
 using MegaCrit.Sts2.Core.Runs;
+using System.Text.Json;
 using CrystalItem = MegaCrit.Sts2.Core.Events.Custom.CrystalSphereEvent.CrystalSphereItem;
 using CrystalMinigame = MegaCrit.Sts2.Core.Events.Custom.CrystalSphereEvent.CrystalSphereMinigame;
 
 namespace Spirescry.State;
 
-public static class Snapshotter
+internal static class Snapshotter
 {
     // Compact mode elides the big repeats (map graph, per-card deck) for
     // agents that poll often. Set per snapshot; safe as a static because
@@ -42,11 +43,12 @@ public static class Snapshotter
     private static HashSet<string> _emittedCardTexts = new(StringComparer.Ordinal);
 
     // Must be called on the main thread.
-    public static object ForCurrentPhase() => ForCurrentPhase(false);
+    internal static SnapshotContract ForCurrentPhase() => ForCurrentPhase(false);
 
-    public static object ForCurrentPhase(bool compact) => ForCurrentPhase(compact, false, []);
+    internal static SnapshotContract ForCurrentPhase(bool compact) =>
+        ForCurrentPhase(compact, false, []);
 
-    public static object ForCurrentPhase(
+    internal static SnapshotContract ForCurrentPhase(
         bool compact, bool decision, IEnumerable<string> knownCardTexts)
     {
         _compact = compact || decision;
@@ -58,73 +60,156 @@ public static class Snapshotter
         var phase = PhaseDetector.Current();
         return phase switch
         {
-            Phase.Combat => CombatSnapshot(phase.AsString()),
-            Phase.Map => MapSnapshot(phase.AsString()),
-            Phase.Event => EventSnapshot(phase.AsString()),
-            Phase.Rewards => RewardsSnapshot(phase.AsString()),
-            Phase.CardReward => CardRewardSnapshot(phase.AsString()),
-            Phase.Shop => ShopSnapshot(phase.AsString()),
-            Phase.RestSite => RestSiteSnapshot(phase.AsString()),
-            Phase.Treasure => TreasureSnapshot(phase.AsString()),
-            Phase.RelicReward => RelicRewardSnapshot(phase.AsString()),
-            Phase.CardSelect => CardSelectSnapshot(phase.AsString()),
-            Phase.HandSelect => HandSelectSnapshot(phase.AsString()),
-            Phase.BundleSelect => BundleSelectSnapshot(phase.AsString()),
-            Phase.CrystalSphere => CrystalSphereSnapshot(phase.AsString()),
-            Phase.GameOver => GameOverSnapshot(phase.AsString()),
+            Phase.Combat => CombatSnapshot(phase),
+            Phase.Map => MapSnapshot(phase),
+            Phase.Event => EventSnapshot(phase),
+            Phase.Rewards => RewardsSnapshot(phase),
+            Phase.CardReward => CardRewardSnapshot(phase),
+            Phase.Shop => ShopSnapshot(phase),
+            Phase.RestSite => RestSiteSnapshot(phase),
+            Phase.Treasure => TreasureSnapshot(phase),
+            Phase.RelicReward => RelicRewardSnapshot(phase),
+            Phase.CardSelect => CardSelectSnapshot(phase),
+            Phase.HandSelect => HandSelectSnapshot(phase),
+            Phase.BundleSelect => BundleSelectSnapshot(phase),
+            Phase.CrystalSphere => CrystalSphereSnapshot(phase),
+            Phase.GameOver => GameOverSnapshot(phase),
             // Name the capturing overlay so a stuck screen is diagnosable
             // from /obs alone.
-            Phase.Overlay or Phase.Unknown => new
-            {
-                phase = phase.AsString(),
-                overlay = NOverlayStack.Instance?.Peek()?.GetType().Name,
-            },
-            _ => new { phase = phase.AsString() },
+            Phase.Overlay or Phase.Unknown => Snapshot(
+                phase,
+                new { overlay = NOverlayStack.Instance?.Peek()?.GetType().Name }),
+            _ => new SnapshotContract(phase),
         };
     }
 
-    // Bundle offers: pick one pack of cards (Neow's Scroll Boxes, …).
-    private static object BundleSelectSnapshot(string phase)
+    private static SnapshotContract Snapshot(Phase phase, object extensions)
     {
-        var gui = RunMode.IsHeadless ? null : Screens.Top<NChooseABundleSelectionScreen>();
-        var bundles = RunMode.IsHeadless
-            ? HeadlessBundle.Bundles
-            : gui is { } screen
-                ? Screens.Bundles(screen)
-                : null;
-        if (bundles is null || bundles.Count == 0) return new { phase, available = false };
-        return new
+        var snapshot = new SnapshotContract(phase);
+        snapshot.AddExtensions(extensions);
+        return snapshot;
+    }
+
+    private static SnapshotItemContract Item(
+        object extensions,
+        int? index = null,
+        string? id = null,
+        string? model = null,
+        string? selector = null,
+        int? slot = null,
+        string? target = null,
+        int? col = null,
+        int? row = null,
+        string? type = null,
+        string[]? semanticState = null,
+        bool? selected = null)
+    {
+        var item = new SnapshotItemContract
         {
-            phase,
-            player = FooterView(),
-            confirmable = gui is not null
-                && Reflect.Field<NClickableControl>(gui, "_confirmButton") is { IsEnabled: true },
-            cancelable = RunMode.IsHeadless
-                ? HeadlessBundle.IsActive
-                : gui is not null
-                    && Reflect.Field<NClickableControl>(gui, "_skipButton") is { IsEnabled: true },
-            bundles = bundles.Select((b, i) => new
+            Index = index,
+            Id = id,
+            Model = model,
+            Selector = selector,
+            Slot = slot,
+            Target = target,
+            Col = col,
+            Row = row,
+            Type = type,
+            SemanticState = semanticState,
+            Selected = selected,
+        };
+        item.AddExtensions(extensions);
+        return item;
+    }
+
+    // Rich/localized wire fields remain available to agents. These compact,
+    // locale-free tokens are their typed semantic mirror for settlement and
+    // replay; callers sort collections whose domain order is irrelevant.
+    private static string SemanticToken(string kind, params object?[] values) =>
+        $"{kind}:{JsonSerializer.Serialize(values)}";
+
+    private static string CardStateToken(CardModel card, bool liveCost = false)
+    {
+        var variables = CardSpecifier.SemanticDynamicVars(card)?
+            .OrderBy(pair => pair.Key, StringComparer.Ordinal)
+            .Select(pair => new object[] { pair.Key, pair.Value })
+            .ToArray() ?? [];
+        return SemanticToken(
+            "card",
+            CardSpecifier.From(card),
+            liveCost ? card.EnergyCost.GetAmountToSpend() : card.EnergyCost.Canonical,
+            CardSpecifier.SemanticStarCost(card),
+            card.Keywords.Contains(CardKeyword.Unplayable),
+            variables);
+    }
+
+    private static string RelicStateToken(RelicModel relic) =>
+        SemanticToken("relic", relic.Id.Entry, RelicCounter(relic), relic.IsUsedUp);
+
+    private static string[] EventDynamicVarState(DynamicVarSet variables) =>
+        CollectionSnapshot.ReadStable(
+            "event dynamic vars semantic state",
+            () => variables
+                .Select(pair => SemanticToken(
+                    "eventVar",
+                    pair.Key,
+                    pair.Value.GetType().FullName,
+                    pair.Value.BaseValue,
+                    pair.Value.EnchantedValue,
+                    pair.Value.PreviewValue))
+                .OrderBy(token => token, StringComparer.Ordinal)
+                .ToArray());
+
+    private static string[] PowerState(Creature creature)
+        => CollectionSnapshot.ReadStable(
+            "power semantic state",
+            () => creature.Powers
+                .Select(power => SemanticToken("power", power.Id.Entry, power.Amount))
+                .OrderBy(token => token, StringComparer.Ordinal)
+                .ToArray());
+
+    // Bundle offers: pick one pack of cards (Neow's Scroll Boxes, …).
+    private static SnapshotContract BundleSelectSnapshot(Phase phase)
+    {
+        var decision = DecisionSurface.Current.Bundle;
+        var bundles = decision?.Bundles;
+        if (bundles is null || bundles.Count == 0)
+            return new SnapshotContract(phase) { Available = false };
+        return new SnapshotContract(phase)
+        {
+            Player = FooterView(),
+            Confirmable = decision!.Confirmable,
+            Cancelable = decision.Cancelable,
+            Bundles = bundles.Select((bundle, bundleIndex) =>
             {
-                idx = i,
-                cards = b.Select(RewardCardView).ToArray(),
+                var item = new SnapshotItemContract
+                {
+                    Index = bundleIndex,
+                    Cards = bundle.Select((card, cardIndex) =>
+                        Item(RewardCardView(card), cardIndex,
+                            model: card.Id.Entry,
+                            selector: CardSpecifier.From(card),
+                            type: card.Type.ToString().ToLowerInvariant(),
+                            semanticState: [CardStateToken(card)])).ToArray(),
+                };
+                item.SemanticState = item.Cards
+                    .SelectMany(card => card.SemanticState ?? [])
+                    .ToArray();
+                return item;
             }).ToArray(),
         };
     }
 
     // The crystal-sphere event minigame: a cell grid, a divination tool,
     // and a fixed number of reveals. map-move clicks a cell, option picks
-    // the tool, proceed leaves. GUI-only — the screen owns the minigame.
-    private static object CrystalSphereSnapshot(string phase)
+    // the tool, proceed leaves.
+    private static SnapshotContract CrystalSphereSnapshot(Phase phase)
     {
-        var entity = RunMode.IsHeadless
-            ? HeadlessCrystal.Entity
-            : Screens.Crystal() is { } screen
-                ? Screens.CrystalEntity(screen)
-                : null;
-        if (entity is null) return new { phase, available = false };
+        var entity = DecisionSurface.Current.Crystal;
+        if (entity is null) return new SnapshotContract(phase) { Available = false };
 
         var grid = entity.GridSize;
-        var cells = new List<object>();
+        var cells = new List<SnapshotItemContract>();
         var hiddenCells = 0;
         for (var y = 0; y < grid.Y; y++)
             for (var x = 0; x < grid.X; x++)
@@ -151,26 +236,61 @@ public static class Snapshotter
                         },
                     };
                 }
-                cells.Add(new
+                var cellView = Item(new
                 {
-                    col = cell.X,
-                    row = cell.Y,
-                    hidden = cell.IsHidden,
                     hasItem = cell.Item is not null && !cell.IsHidden,
                     item,
-                });
+                }, col: cell.X, row: cell.Y,
+                    semanticState:
+                    [
+                        SemanticToken(
+                            "cell",
+                            cell.IsHidden,
+                            cell.Item is not null && !cell.IsHidden,
+                            !cell.IsHidden && cell.Item is { } stateItem
+                                ? CrystalItemType(stateItem)
+                                : null,
+                            !cell.IsHidden && cell.Item is { } positioned
+                                ? positioned.Position.X
+                                : null,
+                            !cell.IsHidden && cell.Item is { } positionedY
+                                ? positionedY.Position.Y
+                                : null,
+                            !cell.IsHidden && cell.Item is { } sized
+                                ? sized.Size.X
+                                : null,
+                            !cell.IsHidden && cell.Item is { } sizedY
+                                ? sizedY.Size.Y
+                                : null)
+                    ]);
+                cellView.Hidden = cell.IsHidden;
+                cells.Add(cellView);
             }
-        return new
+        var snapshot = new SnapshotContract(phase)
         {
-            phase,
-            player = FooterView(),
+            Player = FooterView(),
+            Cells = cells.ToArray(),
+            SemanticState =
+            [
+                SemanticToken(
+                    "crystal",
+                    grid.X,
+                    grid.Y,
+                    entity.DivinationCount,
+                    entity.CrystalSphereTool.ToString().ToLowerInvariant(),
+                    entity.IsFinished,
+                    hiddenCells)
+            ],
+        };
+        snapshot.AddExtensions(new
+        {
             grid = new { width = grid.X, height = grid.Y },
             divinationsLeft = entity.DivinationCount,
             tool = entity.CrystalSphereTool.ToString().ToLowerInvariant(),
             finished = entity.IsFinished,
             hiddenCells,
-            cells,
-        };
+        });
+        return snapshot;
     }
 
     private static string CrystalItemType(CrystalItem item) => item switch
@@ -183,25 +303,44 @@ public static class Snapshotter
         _ => "unknown",
     };
 
-    private static object GameOverSnapshot(string phase)
+    private static SnapshotContract GameOverSnapshot(Phase phase)
     {
-        var rm = RunManager.Instance;
-        var rs = rm?.DebugOnlyGetState();
-        if (rm is null || rs is null) return new { phase, available = false };
-        var player = LocalContext.GetMe(rs);
+        if (LocalRunContext.StateOnly is not { } run)
+            return new SnapshotContract(phase) { Available = false };
+        var rm = run.Manager;
+        var rs = run.State;
+        var player = LocalRunContext.LocalPlayer(rs);
         var creature = player?.Creature;
-        return new
+        var snapshot = new SnapshotContract(phase)
         {
-            phase,
-            // WinTime is only stamped on a won run; abandon wins the tie
-            // so a mid-run bail never reads as a defeat.
-            outcome = rm.IsAbandoned ? "abandoned" : rm.WinTime > 0 ? "victory" : "defeat",
+            Act = rs.CurrentActIndex,
+            Outcome = rm.IsAbandoned
+                ? "abandoned"
+                : rm.WinTime > 0 ? "victory" : "defeat",
+            Hp = creature is null ? null : [creature.CurrentHp, creature.MaxHp],
+            Gold = player?.Gold,
+            SemanticState =
+            [
+                SemanticToken(
+                    "gameOver",
+                    rs.TotalFloor,
+                    rs.ActFloor,
+                    rs.CurrentMapCoord?.col,
+                    rs.CurrentMapCoord?.row,
+                    rs.CurrentRoom is CombatRoom semanticRoom
+                        ? semanticRoom.Encounter.Id.Entry
+                        : null,
+                    rs.AscensionLevel,
+                    rs.Rng?.StringSeed ?? "")
+            ],
+        };
+        snapshot.AddExtensions(new
+        {
             // Compat pair: floor is the run-cumulative TotalFloor, act the
             // zero-based CurrentActIndex. actNumber/actFloor/mapCoord say
             // the same position in the 1-based, act-local terms a run
             // report wants.
             floor = rs.TotalFloor,
-            act = rs.CurrentActIndex,
             actNumber = rs.CurrentActIndex + 1,
             actFloor = rs.ActFloor,
             mapCoord = rs.CurrentMapCoord is { } c ? new { c.col, c.row } : null,
@@ -216,30 +355,45 @@ public static class Snapshotter
                 : null,
             ascension = rs.AscensionLevel,
             seed = rs.Rng?.StringSeed ?? "",
-            hp = creature is null ? null : new[] { creature.CurrentHp, creature.MaxHp },
-            gold = player?.Gold,
-        };
+        });
+        return snapshot;
     }
 
     // Out-of-combat decisions need run context: HEAL vs SMITH reads hp,
     // card picks read the deck, events price their options in gold.
-    private static object? FooterView()
+    private static SnapshotPlayerContract? FooterView()
     {
-        var rs = RunManager.Instance?.DebugOnlyGetState();
-        var player = rs is null ? null : LocalContext.GetMe(rs);
+        var player = LocalRunContext.Current?.Player;
         if (player is null) return null;
         var creature = player.Creature;
-        return new
+        var footer = new SnapshotPlayerContract
         {
-            hp = creature is null ? null : new[] { creature.CurrentHp, creature.MaxHp },
-            gold = player.Gold,
-            potions = PotionViews(player),
+            Hp = creature is null ? null : [creature.CurrentHp, creature.MaxHp],
+            Gold = player.Gold,
+            SemanticState = PlayerSemanticState(player),
+        };
+        footer.Potions = PotionViews(player);
+        footer.AddExtensions(new
+        {
             // Keep the original ID list stable for existing agents; rich,
             // mutable state is additive so a schema upgrade is not required.
             relics = player.Relics.Select(r => r.Id.Entry).ToArray(),
             relicStates = player.Relics.Select(RelicStateView).ToArray(),
             deck = DeckView(player),
-        };
+        });
+        return footer;
+    }
+
+    private static string[] PlayerSemanticState(Player player)
+    {
+        var deck = (player.Deck?.Cards ?? Enumerable.Empty<CardModel>())
+            .Where(card => card is not null)
+            .Select(card => SemanticToken("deck", CardStateToken(card)))
+            .OrderBy(token => token, StringComparer.Ordinal);
+        var relics = player.Relics
+            .Select(relic => SemanticToken("owned", RelicStateToken(relic)))
+            .OrderBy(token => token, StringComparer.Ordinal);
+        return deck.Concat(relics).ToArray();
     }
 
     // Compact: counts by model, "+" marking upgraded copies — a 30-card
@@ -285,20 +439,18 @@ public static class Snapshotter
 
     // Empty slots and queued/consumed potions are omitted; `slot` is what
     // potion-use / potion-discard take.
-    private static object[] PotionViews(Player player)
+    private static SnapshotItemContract[] PotionViews(Player player)
     {
         var slots = player.PotionSlots;
-        var result = new List<object>();
+        var result = new List<SnapshotItemContract>();
         for (var i = 0; i < slots.Count; i++)
         {
             if (slots[i] is not { } p || p.IsQueued || p.HasBeenRemovedFromState) continue;
-            result.Add(new
+            result.Add(Item(new
             {
-                slot = i,
-                model = p.Id.Entry,
-                target = p.TargetType.ToString().ToLowerInvariant(),
                 description = SafeText(p.DynamicDescription),
-            });
+            }, model: p.Id.Entry, slot: i,
+                target: p.TargetType.ToString().ToLowerInvariant()));
         }
         return result.ToArray();
     }
@@ -323,6 +475,20 @@ public static class Snapshotter
                     evoke = o.EvokeVal,
                 }).ToArray(),
         };
+    }
+
+    private static string[] OrbState(PlayerCombatState pcs)
+    {
+        var queue = pcs.OrbQueue
+            ?? throw new InvalidOperationException("player orb queue is unavailable");
+        return
+        [
+            SemanticToken("orbSlots", queue.Capacity),
+            .. queue.Orbs
+                .Where(orb => orb is not null)
+                .Select((orb, index) => SemanticToken(
+                    "orb", index, orb.Id.Entry, orb.PassiveVal, orb.EvokeVal)),
+        ];
     }
 
     private static object[] PowerViews(Creature c)
@@ -402,95 +568,140 @@ public static class Snapshotter
         return new { count = cards.Length, cards = (object)cards };
     }
 
-    private static object ShopSnapshot(string phase)
+    private static string[] PileState(string name, CardPile? pile, bool sorted = false)
     {
-        var rs = RunManager.Instance?.DebugOnlyGetState();
+        var cards = CollectionSnapshot.Once(
+            (pile?.Cards ?? Enumerable.Empty<CardModel>())
+                .Where(card => card is not null)
+                .Select(card => CardStateToken(card)));
+        if (sorted) Array.Sort(cards, StringComparer.Ordinal);
+        return cards.Select((card, index) => SemanticToken("pile", name, index, card))
+            .Prepend(SemanticToken("pileCount", name, cards.Length))
+            .ToArray();
+    }
+
+    private static SnapshotContract ShopSnapshot(Phase phase)
+    {
+        if (LocalRunContext.Current is not { } run)
+            return new SnapshotContract(phase) { Available = false };
+        var rs = run.State;
         var inv = Screens.ShopInventory(rs);
-        if (rs is null || inv is null) return new { phase, available = false };
-        var player = LocalContext.GetMe(rs);
+        if (inv is null)
+            return new SnapshotContract(phase) { Available = false };
+        var player = run.Player;
 
         // `cost` stays the gold amount for wire compatibility; `price`
         // names it explicitly. Cards add playCost/starCost so their combat
         // economy is visible before purchase without changing old clients.
-        object CardEntry(MegaCrit.Sts2.Core.Entities.Merchant.MerchantCardEntry e, int i)
+        SnapshotItemContract CardEntry(
+            MegaCrit.Sts2.Core.Entities.Merchant.MerchantCardEntry e, int i)
         {
             var card = e.CreationResult?.Card;
             var showText = card is not null && ShouldShowCardText(card);
-            return new
+            var entry = Item(new
             {
-                idx = i,
-                model = card?.Id.Entry,
                 title = card?.Title,
-                textKey = card is null ? null : CardTextKey(card),
-                description = showText ? CardDescription(card!) : null,
+                textKey = card is null ? null : CardSpecifier.TextKey(card),
+                description = showText ? CardSpecifier.Description(card!) : null,
                 cost = e.Cost,
                 price = e.Cost,
                 playCost = card?.EnergyCost.Canonical,
-                starCost = card is null ? null : StarCost(card),
+                starCost = card is null ? null : CardSpecifier.StarCost(card),
                 stocked = e.IsStocked,
                 affordable = e.EnoughGold,
-                purchasable = e.IsStocked && e.EnoughGold,
-            };
+            }, i, model: card?.Id.Entry,
+                selector: card is null ? null : CardSpecifier.From(card),
+                semanticState:
+                [
+                    SemanticToken(
+                        "shopCard",
+                        e.Cost,
+                        e.IsStocked,
+                        e.EnoughGold,
+                        card is null ? null : CardStateToken(card))
+                ]);
+            entry.Purchasable = e.IsStocked && e.EnoughGold;
+            return entry;
         }
         // Model goes null once the entry is purchased — like CardEntry,
         // render the sold-out tile instead of throwing.
-        object StockEntry(string? model, LocString? title, MegaCrit.Sts2.Core.Entities.Merchant.MerchantEntry e, int i)
+        SnapshotItemContract StockEntry(
+            string? model, LocString? title,
+            MegaCrit.Sts2.Core.Entities.Merchant.MerchantEntry e, int i)
         {
             var potionHasRoom = e is not MegaCrit.Sts2.Core.Entities.Merchant.MerchantPotionEntry
                 || player?.HasOpenPotionSlots == true;
-            return new
+            var entry = Item(new
             {
-                idx = i,
-                model,
                 title = SafeText(title),
                 cost = e.Cost,
                 price = e.Cost,
                 stocked = e.IsStocked,
                 affordable = e.EnoughGold,
-                purchasable = e.IsStocked && e.EnoughGold && potionHasRoom,
-            };
+            }, i, model: model,
+                semanticState:
+                [
+                    SemanticToken(
+                        "shopStock",
+                        e.Cost,
+                        e.IsStocked,
+                        e.EnoughGold,
+                        potionHasRoom)
+                ]);
+            entry.Purchasable = e.IsStocked && e.EnoughGold && potionHasRoom;
+            return entry;
         }
-        return new
+        var removal = inv.CardRemovalEntry is { } cr
+            ? Item(new
+            {
+                cost = cr.Cost,
+                price = cr.Cost,
+                used = cr.Used,
+                affordable = cr.EnoughGold,
+            }, semanticState:
+            [
+                SemanticToken(
+                    "cardRemoval",
+                    cr.Cost,
+                    cr.Used,
+                    cr.EnoughGold)
+            ])
+            : null;
+        if (removal is not null)
+            removal.Purchasable = !inv.CardRemovalEntry!.Used
+                && inv.CardRemovalEntry.EnoughGold;
+        var snapshot = new SnapshotContract(phase)
         {
-            phase,
-            gold = player?.Gold ?? 0,
-            player = FooterView(),
-            cards = inv.CharacterCardEntries.Select(CardEntry).ToArray(),
-            colorless = inv.ColorlessCardEntries.Select(CardEntry).ToArray(),
-            relics = inv.RelicEntries
+            Player = FooterView(),
+            Cards = inv.CharacterCardEntries.Select(CardEntry).ToArray(),
+            Colorless = inv.ColorlessCardEntries.Select(CardEntry).ToArray(),
+            Relics = inv.RelicEntries
                 .Select((e, i) => StockEntry(e.Model?.Id.Entry, e.Model?.Title, e, i)).ToArray(),
-            potions = inv.PotionEntries
+            Potions = inv.PotionEntries
                 .Select((e, i) => StockEntry(e.Model?.Id.Entry, e.Model?.Title, e, i)).ToArray(),
-            cardRemoval = inv.CardRemovalEntry is { } cr
-                ? new
-                {
-                    cost = cr.Cost,
-                    price = cr.Cost,
-                    used = cr.Used,
-                    affordable = cr.EnoughGold,
-                    purchasable = !cr.Used && cr.EnoughGold,
-                }
-                : null,
+            CardRemoval = removal,
+            Gold = player?.Gold ?? 0,
         };
+        return snapshot;
     }
 
-    private static object RestSiteSnapshot(string phase)
+    private static SnapshotContract RestSiteSnapshot(Phase phase)
     {
-        var options = Screens.RestOptions();
-        if (options is null) return new { phase, available = false };
-        return new
+        var decision = DecisionSurface.Current.RestSite;
+        if (decision is null) return new SnapshotContract(phase) { Available = false };
+        return new SnapshotContract(phase)
         {
-            phase,
-            player = FooterView(),
-            proceedAvailable = RunMode.IsHeadless
-                || NRestSiteRoom.Instance?.ProceedButton is { Visible: true },
-            options = options.Select((o, i) => new
+            Player = FooterView(),
+            ProceedAvailable = decision.ProceedAvailable,
+            Options = decision.Options.Select((o, i) =>
             {
-                idx = i,
-                id = o.OptionId.ToString(),
-                title = SafeText(o.Title),
-                description = SafeText(o.Description),
-                enabled = o.IsEnabled,
+                var option = Item(new
+                {
+                    title = SafeText(o.Title),
+                    description = SafeText(o.Description),
+                }, i, id: o.OptionId.ToString());
+                option.Enabled = o.IsEnabled;
+                return option;
             }).ToArray(),
         };
     }
@@ -500,52 +711,40 @@ public static class Snapshotter
     // makes the offer visible here just as the GUI's chest-open callback
     // does. chestOpened=false therefore means "unopened", never "empty":
     // an empty relics array with an open chest is a resolved offer.
-    private static object TreasureSnapshot(string phase)
+    private static SnapshotContract TreasureSnapshot(Phase phase)
     {
-        var room = NRun.Instance?.TreasureRoom;
-        var opened = room is not null && Screens.ChestOpened(room);
-        var sync = RunManager.Instance?.TreasureRoomRelicSynchronizer;
-
-        var relics = sync?.CurrentRelics;
-        // Headless has no chest-flag node: the offer being visible marks
-        // the chest open, and HeadlessTreasure keeps it open after a
-        // pick/skip empties the offer (relics resolve; the chest doesn't
-        // close again).
-        var headlessOpened = RunMode.IsHeadless && ReferenceEquals(
-            HeadlessTreasure.OpenedRoom,
-            RunManager.Instance?.DebugOnlyGetState()?.CurrentRoom);
-        return new
+        var decision = DecisionSurface.Current.Treasure;
+        return new SnapshotContract(phase)
         {
-            phase,
-            chestOpened = opened || headlessOpened || relics is { Count: > 0 },
+            ChestOpened = decision.ChestOpened,
             // Headless can always leave the room (proceed declines a
             // pending offer first); the GUI gates leaving on resolving
             // the chest.
-            proceedAvailable = RunMode.IsHeadless
-                || NRun.Instance?.TreasureRoom?.ProceedButton is { Visible: true },
-            player = FooterView(),
-            relics = (relics ?? []).Select(RelicView).ToArray(),
+            ProceedAvailable = decision.ProceedAvailable,
+            Player = FooterView(),
+            Relics = decision.Relics
+                .Select((relic, i) => Item(
+                    RelicView(relic), i, model: relic.Id.Entry)).ToArray(),
         };
     }
 
-    private static object RelicRewardSnapshot(string phase)
+    private static SnapshotContract RelicRewardSnapshot(Phase phase)
     {
         var screen = Screens.Top<NChooseARelicSelection>();
         var holders = screen is null ? null : Screens.RelicHolders(screen);
         if (holders is null || holders.Count == 0)
-            return new { phase, available = false };
-        return new
+            return new SnapshotContract(phase) { Available = false };
+        return new SnapshotContract(phase)
         {
-            phase,
-            player = FooterView(),
-            relics = holders.Select((h, i) => RelicView(h.Relic.Model, i)).ToArray(),
+            Player = FooterView(),
+            Relics = holders.Select((h, i) => Item(
+                RelicView(h.Relic.Model), i,
+                model: h.Relic.Model.Id.Entry)).ToArray(),
         };
     }
 
-    private static object RelicView(RelicModel r, int i) => new
+    private static object RelicView(RelicModel r) => new
     {
-        idx = i,
-        model = r.Id.Entry,
         title = SafeText(r.Title),
         rarity = r.Rarity.ToString().ToLowerInvariant(),
         description = SafeText(r.DynamicDescription),
@@ -554,34 +753,31 @@ public static class Snapshotter
     // Tile idx is the position in the screen's full button list — claimed
     // tiles linger disabled during their hide tween, so sibling indices
     // stay stable; we just omit them from the snapshot.
-    private static object RewardsSnapshot(string phase)
+    private static SnapshotContract RewardsSnapshot(Phase phase)
     {
-        if (RunMode.IsHeadless)
-            return new
-            {
-                phase,
-                player = FooterView(),
-                rewards = HeadlessRewards.Slotted()
-                    .Select(s => RewardView(s.reward, s.idx)).ToList(),
-            };
-
-        var screen = Screens.Top<NRewardsScreen>();
-        var buttons = screen is null ? null : Screens.RewardButtons(screen);
-        if (buttons is null) return new { phase, available = false };
-
-        var rewards = new List<object>();
-        for (var i = 0; i < buttons.Count; i++)
-            if (Screens.ClaimableReward(buttons[i]) is { } btn)
-                rewards.Add(RewardView(btn.Reward!, i));
-        return new { phase, player = FooterView(), rewards };
+        var decision = DecisionSurface.Current.Rewards;
+        if (decision is null) return new SnapshotContract(phase) { Available = false };
+        return new SnapshotContract(phase)
+        {
+            Player = FooterView(),
+            Rewards = decision.Rewards
+                .Select(slot => Item(
+                    RewardView(slot.Reward), slot.Index,
+                    type: RewardType(slot.Reward),
+                    semanticState:
+                    [
+                        SemanticToken(
+                            "reward",
+                            slot.Reward.GetType().FullName,
+                            slot.Reward is GoldReward gold ? gold.Amount : null)
+                    ])).ToArray(),
+        };
     }
 
     // Shared reward-tile view — see the per-card views below for why both
     // boots build their snapshots through one shape.
-    private static object RewardView(Reward r, int i) => new
+    private static object RewardView(Reward r) => new
     {
-        idx = i,
-        type = RewardType(r),
         amount = r is GoldReward g ? g.Amount : (int?)null,
         description = SafeText(r.Description),
     };
@@ -596,193 +792,130 @@ public static class Snapshotter
         _ => r.GetType().Name.ToLowerInvariant(),
     };
 
-    private static object CardRewardSnapshot(string phase)
+    private static SnapshotContract CardRewardSnapshot(Phase phase)
     {
-        if (RunMode.IsHeadless)
+        var decision = DecisionSurface.Current.CardReward;
+        if (decision is null) return new SnapshotContract(phase) { Available = false };
+        return new SnapshotContract(phase)
         {
-            var offered = HeadlessRewards.ActiveCardPick?.Cards?.ToList();
-            if (offered is null) return new { phase, available = false };
-            return new
-            {
-                phase,
-                player = FooterView(),
-                cards = offered.Select(RewardCardView).ToArray(),
-                alternatives = HeadlessRewards.Alternatives()
-                    .Select((a, i) => (object)new { idx = i, title = SafeText(a.Title) })
-                    .ToArray(),
-            };
-        }
-
-        var screen = Screens.Top<NCardRewardSelectionScreen>();
-        var holders = screen is null ? null : Screens.CardHolders(screen);
-        if (holders is null || holders.Count == 0)
-            return new { phase, available = false };
-        var cardViews = new List<object>(holders.Count);
-        for (var i = 0; i < holders.Count; i++)
-        {
-            if (holders[i].CardModel is not { } card)
-                return new { phase, available = false };
-            cardViews.Add(RewardCardView(card, i));
-        }
-
-        return new
-        {
-            phase,
-            player = FooterView(),
-            cards = cardViews.ToArray(),
+            Player = FooterView(),
+            Cards = decision.Cards
+                .Select((card, i) => Item(
+                    RewardCardView(card), i,
+                    model: card.Id.Entry,
+                    selector: CardSpecifier.From(card),
+                    type: card.Type.ToString().ToLowerInvariant(),
+                    semanticState: [CardStateToken(card)])).ToArray(),
             // Non-card choices (skip, trade offers, …) — target of `skip`.
-            alternatives = Screens.ExtraOptions(screen!)
-                .Select((o, i) => new
+            Alternatives = decision.AlternativeTitles
+                .Select((title, i) => Item(new
                 {
-                    idx = i,
-                    title = SafeText(Reflect.PropertyValue(o, "Title") as LocString),
-                }).ToArray(),
+                    title = SafeText(title),
+                }, i,
+                    semanticState:
+                    [
+                        SemanticToken(
+                            "alternative",
+                            title?.LocTable,
+                            title?.LocEntryKey)
+                    ])).ToArray(),
         };
     }
-
-    // GetDescriptionForPile bakes upgraded/runtime stats into the text;
-    // the raw Description LocString throws without its variables filled.
-    private static string CardDescription(CardModel card)
-    {
-        try { return RichText.NormalizeIcons(card.GetDescriptionForPile(PileType.None, null)); }
-        catch { return SafeText(card.Description); }
-    }
-
-    // A caller-cache key for exactly the prose-bearing card variant. Card
-    // model alone is insufficient: upgrades, enchantments, and afflictions
-    // all change the rendered rules text while leaving Id.Entry unchanged.
-    private static string CardTextKey(CardModel card) => DecisionProjection.CardTextKey(
-        card.Id.Entry,
-        card.CurrentUpgradeLevel,
-        card.Enchantment?.Id.Entry,
-        card.Affliction?.Id.Entry);
 
     private static bool ShouldShowCardText(CardModel card, bool compactElides = false)
     {
         if (!_decision) return !compactElides || !_compact;
-        var key = CardTextKey(card);
+        var key = CardSpecifier.TextKey(card);
         return !_knownCardTexts.Contains(key) && _emittedCardTexts.Add(key);
     }
 
-    private static bool CanPlayCard(CardModel card)
-    {
-        try { return card.CanPlay(out _, out _); }
-        catch { return false; }
-    }
+    private static bool CanPlayCard(CardModel card) =>
+        ConsumerSemanticRead.CardPlayable(() => card.CanPlay(out _, out _));
 
     // Shared per-card views — both boots build their snapshots through
     // these, so the shapes can't drift between modes (tests/parity.py
     // compares the key sets).
-    private static object RewardCardView(CardModel c, int i)
+    private static object RewardCardView(CardModel c)
     {
         var showText = ShouldShowCardText(c);
         return new
         {
-            idx = i,
-            model = c.Id.Entry,
             title = c.Title,
             cost = c.EnergyCost.Canonical,
-            starCost = StarCost(c),
-            type = c.Type.ToString().ToLowerInvariant(),
+            starCost = CardSpecifier.StarCost(c),
             rarity = c.Rarity.ToString().ToLowerInvariant(),
-            textKey = CardTextKey(c),
-            description = showText ? CardDescription(c) : null,
+            textKey = CardSpecifier.TextKey(c),
+            description = showText ? CardSpecifier.Description(c) : null,
         };
     }
 
-    private static object SelectCardView(CardModel c, int i, bool selected)
+    private static object SelectCardView(CardModel c)
     {
         var showText = ShouldShowCardText(c);
-        var preview = UpgradePreview(c);
+        var preview = CardSpecifier.UpgradePreview(c);
         return new
         {
-            idx = i,
-            model = c.Id.Entry,
             title = c.Title,
             cost = c.EnergyCost.Canonical,
-            starCost = StarCost(c),
+            starCost = CardSpecifier.StarCost(c),
             upgraded = c.IsUpgraded,
             enchant = c.Enchantment?.Id.Entry,
             affliction = c.Affliction?.Id.Entry,
-            selected,
-            textKey = CardTextKey(c),
-            description = showText ? CardDescription(c) : null,
+            textKey = CardSpecifier.TextKey(c),
+            description = showText ? CardSpecifier.Description(c) : null,
             // Preserve upgradedPreview's string/null wire type; numeric
             // upgrade economics do not need to be hidden with cached prose.
-            upgradedPreview = showText ? preview?.description : null,
-            upgradedPlayCost = preview?.playCost,
-            upgradedStarCost = preview?.starCost,
+            upgradedPreview = showText ? preview?.Description : null,
+            upgradedPlayCost = preview?.PlayCost,
+            upgradedStarCost = preview?.StarCost,
         };
     }
 
-    // -1 = the card has no star cost (the second combat currency);
-    // surface null so energy-only cards stay clean. X-star cards report
-    // the current star count, mirroring X-energy's cost display.
-    private static int? StarCost(CardModel c)
-    {
-        try
-        {
-            var s = c.GetStarCostWithModifiers();
-            return s >= 0 ? s : null;
-        }
-        catch { return null; }
-    }
-
-    // What the card text becomes if upgraded — the rest-site smith's
-    // preview pane. null when the card can't upgrade further. Upgrades
-    // mutate a card's dynamic vars in place, so the upgraded numbers only
-    // exist on an upgraded instance: build a throwaway twin from the
-    // canonical model and replay the upgrades one level past the card.
-    private static (string description, int playCost, int? starCost)? UpgradePreview(CardModel c)
-    {
-        if (!c.IsUpgradable) return null;
-        try
-        {
-            var twin = ModelDb.GetById<CardModel>(c.Id).ToMutable();
-            for (var lvl = 0; lvl <= c.CurrentUpgradeLevel; lvl++)
-                twin.UpgradeInternal();
-            return (CardDescription(twin), twin.EnergyCost.Canonical, StarCost(twin));
-        }
-        catch { return null; }
-    }
-
-    private static object HandCardView(CardModel? card, int i)
+    private static object HandCardView(CardModel? card)
     {
         var showText = card is not null
             && ShouldShowCardText(card, compactElides: true);
         return new
         {
-            idx = i,
-            model = card?.Id.Entry,
             cost = card?.EnergyCost.GetAmountToSpend(),
-            starCost = card is null ? null : StarCost(card),
+            starCost = card is null ? null : CardSpecifier.StarCost(card),
             upgraded = card?.IsUpgraded ?? false,
             enchant = card?.Enchantment?.Id.Entry,
             affliction = card?.Affliction?.Id.Entry,
-            textKey = card is null ? null : CardTextKey(card),
-            description = showText ? CardText(card!, PileType.Hand) : null,
-            vars = card is null ? null : CardVars(card),
+            textKey = card is null ? null : CardSpecifier.TextKey(card),
+            description = showText ? CardSpecifier.Text(card!, PileType.Hand) : null,
+            vars = card is null ? null : CardSpecifier.DynamicVars(card),
         };
     }
 
-    private static object MapSnapshot(string phase)
+    private static SnapshotContract MapSnapshot(Phase phase)
     {
-        var rs = RunManager.Instance?.DebugOnlyGetState();
-        if (rs is null) return new { phase, available = false };
+        if (LocalRunContext.Current is not { } run)
+            return new SnapshotContract(phase) { Available = false };
+        var rs = run.State;
 
         var points = rs.Map is { } map ? AllMapPoints(map) : [];
-        var snapshot = new Dictionary<string, object?>
+        var snapshot = new SnapshotContract(phase)
         {
-            ["phase"] = phase,
-            ["act"] = rs.CurrentActIndex,
-            ["seed"] = rs.Rng?.StringSeed ?? "",
-            ["player"] = FooterView(),
-            ["current"] = rs.CurrentMapCoord is { } c ? new[] { c.col, c.row } : null,
-            ["next"] = NextPoints(rs).Select(MapPointView).ToArray(),
+            Player = FooterView(),
+            Act = rs.CurrentActIndex,
+            Current = rs.CurrentMapCoord is { } current
+                ? [current.col, current.row]
+                : null,
+            SemanticState = points
+                .Select(MapPointState)
+                .OrderBy(token => token, StringComparer.Ordinal)
+                .ToArray(),
+        };
+        snapshot.Next = NextPoints(rs)
+            .Select(MapPointItem).ToArray();
+        snapshot.AddExtensions(new
+        {
+            seed = rs.Rng?.StringSeed ?? "",
             // The act graph is the biggest repeat in the protocol — compact
             // callers keep `next` and re-request the full view when routing.
-            ["graph"] = _compact ? null : points.Select(MapPointView).ToArray(),
-        };
+            graph = _compact ? null : points.Select(MapPointView).ToArray(),
+        });
 
         // Quest markers can sit anywhere in the next act, not necessarily
         // on a currently reachable node. Keep compact graph elision, but
@@ -791,7 +924,7 @@ public static class Snapshotter
         var marked = points.Where(p => MapMarkers(p).Length > 0)
             .Select(MapPointView)
             .ToArray();
-        if (marked.Length > 0) snapshot["marked"] = marked;
+        if (marked.Length > 0) snapshot.AddExtensions(new { marked });
         return snapshot;
     }
 
@@ -815,11 +948,51 @@ public static class Snapshotter
         return view;
     }
 
+    private static SnapshotItemContract MapPointItem(
+        MegaCrit.Sts2.Core.Map.MapPoint point)
+    {
+        var extension = new Dictionary<string, object?>
+        {
+            ["next"] = point.Children
+                .Where(child => child != null)
+                .Select(child => new[] { child.coord.col, child.coord.row })
+                .ToArray(),
+        };
+        var markers = MapMarkers(point);
+        if (markers.Length > 0) extension["markers"] = markers;
+        return Item(
+            extension,
+            col: point.coord.col,
+            row: point.coord.row,
+            type: point.PointType.ToString().ToLowerInvariant(),
+            semanticState: [MapPointState(point)]);
+    }
+
+    private static string MapPointState(MegaCrit.Sts2.Core.Map.MapPoint point) =>
+        SemanticToken(
+            "mapPoint",
+            point.coord.col,
+            point.coord.row,
+            point.PointType.ToString().ToLowerInvariant(),
+            point.Children
+                .Where(child => child is not null)
+                .Select(child => new[] { child.coord.col, child.coord.row })
+                .OrderBy(coord => coord[1])
+                .ThenBy(coord => coord[0])
+                .ToArray(),
+            SemanticMapMarkers(point));
+
+    private static string[] SemanticMapMarkers(
+        MegaCrit.Sts2.Core.Map.MapPoint point) =>
+        ConsumerSemanticRead.MapMarkerIdentities(
+            $"map marker semantic state at {point.coord.col},{point.coord.row}",
+            () => MapMarkerIdentities(point));
+
     private static string[] MapMarkers(MegaCrit.Sts2.Core.Map.MapPoint point)
     {
         try
         {
-            return point.Quests.Select(q => q.Id.Entry)
+            return MapMarkerIdentities(point)
                 .OrderBy(id => id, StringComparer.Ordinal)
                 .ToArray();
         }
@@ -829,6 +1002,10 @@ public static class Snapshotter
             return [];
         }
     }
+
+    private static IEnumerable<string> MapMarkerIdentities(
+        MegaCrit.Sts2.Core.Map.MapPoint point) =>
+        point.Quests.Select(quest => quest.Id.Entry);
 
     // BFS over the act map from its start points. The final act's second
     // boss hangs off the map without a child edge — include it explicitly.
@@ -862,21 +1039,72 @@ public static class Snapshotter
         rs.Map is { SecondBossMapPoint: not null } map
         && rs.CurrentMapPoint is { } here && ReferenceEquals(here, map.BossMapPoint);
 
-    private static object EventSnapshot(string phase)
+    private static SnapshotContract EventSnapshot(Phase phase)
     {
         var ev = Screens.CurrentEvent();
-        if (ev is null) return new { phase, available = false };
+        if (ev is null) return new SnapshotContract(phase) { Available = false };
         var owner = ev.Owner;
 
         // EventRoom already called CalculateVars exactly once when the
         // event began. Never call it while observing: several events roll
         // RNG or advance counters there, so a read would change both the
         // advertised choice and the effect that the click later executes.
-        return new
+        var snapshot = new SnapshotContract(phase)
         {
-            phase,
-            id = ev.Id.Entry,
-            player = FooterView(),
+            Id = ev.Id.Entry,
+            Player = FooterView(),
+            SemanticState =
+            [
+                SemanticToken("event", ev.GetType().FullName, ev.IsFinished),
+                .. EventDynamicVarState(ev.DynamicVars),
+                .. (ev is FakeMerchant semanticMerchant
+                    ? FakeMerchantState(semanticMerchant)
+                    : []),
+            ],
+            Options = (ev.CurrentOptions ?? []).Select((o, i) =>
+            {
+                var lethal = OptionLethal(o, owner);
+                var option = Item(new
+                {
+                    title = SafeText(o.Title, ev.DynamicVars.AddTo),
+                    description = SafeText(o.Description, ev.DynamicVars.AddTo),
+                    proceed = o.IsProceed,
+                    // The GUI marks choices that kill this player with a red
+                    // pulse. Null means the option has no lethal predicate.
+                    lethal,
+                    // GUI hover cards/tooltips are decision state, not
+                    // decoration: event choices often name a relic, curse, or
+                    // enchantment without explaining its effect in the body.
+                    hints = EventHints(o),
+                    relic = o.Relic is { } r ? new
+                    {
+                        model = r.Id.Entry,
+                        title = SafeText(r.Title),
+                        description = SafeText(r.DynamicDescription),
+                    } : null,
+                }, i,
+                    semanticState:
+                    [
+                        SemanticToken(
+                            "eventOption",
+                            o.GetType().FullName,
+                            o.Title?.LocTable,
+                            o.Title?.LocEntryKey,
+                            o.Description?.LocTable,
+                            o.Description?.LocEntryKey,
+                            o.TextKey,
+                            o.IsProceed,
+                            lethal,
+                            o.Relic?.Id.Entry,
+                            EventHintState(o))
+                    ]);
+                option.Locked = o.IsLocked;
+                option.Chosen = o.WasChosen;
+                return option;
+            }).ToArray(),
+        };
+        snapshot.AddExtensions(new
+        {
             title = SafeText(ev.Title),
             description = SafeText(ev.Description, local =>
             {
@@ -887,29 +1115,29 @@ public static class Snapshotter
             }),
             finished = ev.IsFinished,
             fakeMerchant = ev is FakeMerchant fake ? FakeMerchantView(fake) : null,
-            options = (ev.CurrentOptions ?? []).Select((o, i) => new
-            {
-                idx = i,
-                title = SafeText(o.Title, ev.DynamicVars.AddTo),
-                description = SafeText(o.Description, ev.DynamicVars.AddTo),
-                locked = o.IsLocked,
-                chosen = o.WasChosen,
-                proceed = o.IsProceed,
-                // The GUI marks choices that kill this player with a red
-                // pulse. Null means the option has no lethal predicate.
-                lethal = OptionLethal(o, owner),
-                // GUI hover cards/tooltips are decision state, not
-                // decoration: event choices often name a relic, curse, or
-                // enchantment without explaining its effect in the body.
-                hints = EventHints(o),
-                relic = o.Relic is { } r ? new
-                {
-                    model = r.Id.Entry,
-                    title = SafeText(r.Title),
-                    description = SafeText(r.DynamicDescription),
-                } : null,
-            }).ToArray(),
-        };
+        });
+        return snapshot;
+    }
+
+    private static string[] FakeMerchantState(FakeMerchant fake)
+    {
+        var inventory = fake.Inventory;
+        return
+        [
+            SemanticToken(
+                "fakeMerchant",
+                inventory is not null,
+                fake.Owner?.PotionSlots.Any(
+                    potion => potion?.Id.Entry == "FOUL_POTION") == true),
+            .. (inventory?.RelicEntries ?? [])
+                .Select((entry, index) => SemanticToken(
+                    "fakeMerchantRelic",
+                    index,
+                    entry.Model?.Id.Entry,
+                    entry.Cost,
+                    entry.IsStocked,
+                    entry.EnoughGold)),
+        ];
     }
 
     private static object FakeMerchantView(FakeMerchant fake)
@@ -949,6 +1177,14 @@ public static class Snapshotter
     private static object[] EventHints(EventOption option) =>
         (option.HoverTips ?? []).Select(EventHintView).ToArray();
 
+    private static object[] EventHintState(EventOption option) =>
+        (option.HoverTips ?? []).Select(hint => (object)new
+        {
+            kind = hint.GetType().FullName,
+            model = hint.CanonicalModel?.Id.Entry,
+            upgraded = hint is CardHoverTip card && card.Card.IsUpgraded,
+        }).ToArray();
+
     private static object EventHintView(IHoverTip hint)
     {
         if (hint is CardHoverTip card)
@@ -957,7 +1193,7 @@ public static class Snapshotter
                 kind = "card",
                 model = card.Card.Id.Entry,
                 title = RichText.NormalizeIcons(card.Card.Title ?? ""),
-                description = CardDescription(card.Card),
+                description = CardSpecifier.Description(card.Card),
                 upgraded = card.Card.IsUpgraded,
             };
         if (hint is HoverTip text)
@@ -975,42 +1211,6 @@ public static class Snapshotter
             title = "",
             description = "",
         };
-    }
-
-    // The UI's own composed card text: dynamic vars refreshed first
-    // (strength/weak applied through the engine's preview hooks — the GUI
-    // card node does the same each frame), then the same description path
-    // the card renders with, enchant/affliction lines included.
-    // The same per-frame refresh the GUI card node does — bakes strength/
-    // weak/etc. into PreviewValue, which both the text and vars read.
-    private static void RefreshCardPreview(CardModel c)
-    {
-        try { c.UpdateDynamicVarPreview(CardPreviewMode.Normal, null, c.DynamicVars); }
-        catch { }
-    }
-
-    private static string CardText(CardModel c, PileType pile)
-    {
-        try
-        {
-            RefreshCardPreview(c);
-            return RichText.NormalizeIcons(c.GetDescriptionForPile(pile));
-        }
-        catch { return ""; }
-    }
-
-    // The numbers behind the text — lets an agent do arithmetic without
-    // parsing bbcode. PreviewValue is what the card face shows.
-    private static Dictionary<string, decimal>? CardVars(CardModel c)
-    {
-        try
-        {
-            var vars = new Dictionary<string, decimal>();
-            foreach (var v in c.DynamicVars.Values)
-                vars[v.Name] = v.PreviewValue;
-            return vars.Count == 0 ? null : vars;
-        }
-        catch { return null; }
     }
 
     // Missing locale keys throw from GetFormattedText (Neow-style events
@@ -1046,89 +1246,126 @@ public static class Snapshotter
     // The phase can flip to Combat before every singleton is wired
     // (act transitions). Return `available: false` instead of throwing
     // so the agent gets something it can poll on.
-    private static object CombatSnapshot(string phase)
+    private static SnapshotContract CombatSnapshot(Phase phase)
     {
         var combat = CombatManager.Instance;
         var state = combat?.DebugOnlyGetState();
-        if (combat is null || state is null) return new { phase, available = false };
-        var player = LocalContext.GetMe(state);
+        if (combat is null || state is null)
+            return new SnapshotContract(phase) { Available = false };
+        var player = LocalRunContext.LocalPlayer(state);
         var pcs = player?.PlayerCombatState;
         var creature = player?.Creature;
         if (pcs is null || creature is null)
-            return new { phase, available = false };
+            return new SnapshotContract(phase) { Available = false };
         var facing = FacingOf(creature);
 
-        return new
+        var you = new SnapshotCombatantContract
         {
-            phase,
-            turn = state.RoundNumber,
-            side = state.CurrentSide.ToString().ToLowerInvariant(),
-            actionsDisabled = combat.PlayerActionsDisabled,
-            you = new
+            Hp = [creature.CurrentHp, creature.MaxHp],
+            Block = creature.Block,
+            Energy = [pcs.Energy, pcs.MaxEnergy],
+            Stars = pcs.Stars,
+            SemanticState =
+            [
+                .. OrbState(pcs),
+                .. PowerState(creature),
+                .. player!.Relics
+                    .Select(relic => SemanticToken("combatRelic", RelicStateToken(relic)))
+                    .OrderBy(token => token, StringComparer.Ordinal),
+                SemanticToken("facing", facing),
+            ],
+        };
+        you.AddExtensions(new
+        {
+            orbs = OrbViews(pcs),
+            powers = PowerViews(creature),
+            // Counters tick mid-combat (every-N relics); the full
+            // relic story lives in the out-of-combat footer.
+            relics = player!.Relics
+                .Select(r => (object)new { model = r.Id.Entry, counter = RelicCounter(r) })
+                .ToArray(),
+            facing,
+        });
+        var enemies = state.Enemies
+            .Where(c => c != null)
+            .Select(c =>
             {
-                hp = new[] { creature.CurrentHp, creature.MaxHp },
-                block = creature.Block,
-                energy = new[] { pcs.Energy, pcs.MaxEnergy },
-                stars = pcs.Stars,
-                orbs = OrbViews(pcs),
-                powers = PowerViews(creature),
-                // Counters tick mid-combat (every-N relics); the full
-                // relic story lives in the out-of-combat footer.
-                relics = player!.Relics
-                    .Select(r => (object)new { model = r.Id.Entry, counter = RelicCounter(r) })
-                    .ToArray(),
-                facing,
-            },
-            potions = PotionViews(player!),
+                var enemy = new SnapshotEnemyContract
+                {
+                    Id = c.CombatId ?? 0u,
+                    Model = c.Monster?.Id.Entry,
+                    Hp = [c.CurrentHp, c.MaxHp],
+                    Block = c.Block,
+                    Alive = c.IsAlive,
+                    SemanticState =
+                    [
+                        .. PowerState(c),
+                        .. IntentState(state, c),
+                        SemanticToken("side", SideOf(c), IsBehind(c, facing)),
+                    ],
+                };
+                enemy.AddExtensions(new
+                {
+                    title = SafeText(c.Monster?.Title),
+                    side = SideOf(c),
+                    isBehind = IsBehind(c, facing),
+                    powers = PowerViews(c),
+                    intents = IntentViews(state, c),
+                });
+                return enemy;
+            }).ToArray();
+        var snapshot = new SnapshotContract(phase)
+        {
+            Turn = state.RoundNumber,
+            You = you,
+            Enemies = enemies,
+            SemanticState =
+            [
+                .. PileState("draw", pcs.DrawPile, sorted: true),
+                .. PileState("discard", pcs.DiscardPile),
+                .. PileState("exhaust", pcs.ExhaustPile),
+            ],
+        };
+        snapshot.Side = state.CurrentSide.ToString().ToLowerInvariant();
+        snapshot.ActionsDisabled = combat.PlayerActionsDisabled;
+        snapshot.AddExtensions(new
+        {
             piles = new
             {
                 draw = PileView(pcs.DrawPile, sorted: true),
                 discard = PileView(pcs.DiscardPile),
                 exhaust = PileView(pcs.ExhaustPile),
             },
-            hand = pcs.Hand.Cards
-                .Where(c => c != null)
-                .Select(c =>
+        });
+        snapshot.Potions = PotionViews(player!);
+        snapshot.Hand = pcs.Hand.Cards
+            .Where(c => c != null)
+            .Select(c =>
+            {
+                // Compact keeps the numbers (vars) and drops the prose —
+                // the refresh still runs so vars carry modified values.
+                if (_compact) CardSpecifier.RefreshPreview(c);
+                var showText = ShouldShowCardText(c, compactElides: true);
+                var selector = CardSpecifier.From(c);
+                var card = Item(new
                 {
-                    // Compact keeps the numbers (vars) and drops the prose —
-                    // the refresh still runs so vars carry modified values.
-                    if (_compact) RefreshCardPreview(c);
-                    var showText = ShouldShowCardText(c, compactElides: true);
-                    return (object)new
-                    {
-                        model = c.Id.Entry,
-                        selector = CardSpecifier.From(c),
-                        cost = c.EnergyCost.GetAmountToSpend(),
-                        starCost = StarCost(c),
-                        target = c.TargetType.ToString().ToLowerInvariant(),
-                        upgraded = c.IsUpgraded,
-                        enchant = c.Enchantment?.Id.Entry,
-                        affliction = c.Affliction?.Id.Entry,
-                        unplayable = c.Keywords.Contains(CardKeyword.Unplayable),
-                        playable = CanPlayCard(c),
-                        textKey = CardTextKey(c),
-                        description = showText ? CardText(c, PileType.Hand) : null,
-                        vars = CardVars(c),
-                    };
-                })
-                .ToArray(),
-            enemies = state.Enemies
-                .Where(c => c != null)
-                .Select(c => new
-                {
-                    id = c.CombatId ?? 0u,
-                    model = c.Monster?.Id.Entry,
-                    title = SafeText(c.Monster?.Title),
-                    hp = new[] { c.CurrentHp, c.MaxHp },
-                    block = c.Block,
-                    alive = c.IsAlive,
-                    side = SideOf(c),
-                    isBehind = IsBehind(c, facing),
-                    powers = PowerViews(c),
-                    intents = IntentViews(state, c),
-                })
-                .ToArray(),
-        };
+                    cost = c.EnergyCost.GetAmountToSpend(),
+                    starCost = CardSpecifier.StarCost(c),
+                    upgraded = c.IsUpgraded,
+                    enchant = c.Enchantment?.Id.Entry,
+                    affliction = c.Affliction?.Id.Entry,
+                    unplayable = c.Keywords.Contains(CardKeyword.Unplayable),
+                    textKey = CardSpecifier.TextKey(c),
+                    description = showText ? CardSpecifier.Text(c, PileType.Hand) : null,
+                    vars = CardSpecifier.DynamicVars(c),
+                }, model: c.Id.Entry, selector: selector,
+                    target: c.TargetType.ToString().ToLowerInvariant(),
+                    semanticState: [CardStateToken(c, liveCost: true)]);
+                card.Playable = CanPlayCard(c);
+                return card;
+            })
+            .ToArray();
+        return snapshot;
     }
 
     // Surround fights: the engine keeps the player's orientation as
@@ -1181,6 +1418,23 @@ public static class Snapshotter
         catch { return []; }
     }
 
+    private static string[] IntentState(CombatState state, Creature enemy)
+        => CollectionSnapshot.ReadStable(
+            "intent semantic state",
+            () => (enemy.Monster?.NextMove.Intents ?? [])
+                .Select((intent, index) => SemanticToken(
+                    "intent",
+                    index,
+                    intent.IntentType.ToString().ToLowerInvariant(),
+                    intent is AttackIntent attack
+                        ? attack.GetSingleDamage(state.Allies, enemy)
+                        : null,
+                    intent is AttackIntent raw && raw.DamageCalc is { } calc
+                        ? (int?)(int)calc()
+                        : null,
+                    intent is AttackIntent repeated ? repeated.Repeats : null))
+                .ToArray());
+
     private static string? IntentTip(AbstractIntent i, CombatState state, Creature enemy)
     {
         if (_compact) return null;
@@ -1195,129 +1449,65 @@ public static class Snapshotter
         catch { return null; }
     }
 
-    // Every grid picker (deck removal / upgrade / transform / enchant,
-    // combat pile selects) shares one base: cards behind an NCardGrid,
-    // toggled via OnCardClicked, bounded by CardSelectorPrefs.
-    // Headless: card_select and hand_select both read the deferred picker.
-    // Key sets mirror the GUI snapshots (prompt is unknown here — the
-    // engine doesn't pass it through ICardSelector; skip always cancels,
-    // so cancelable is true).
-    private static object PickerSnapshot(string phase, bool handSelect)
+    private static SnapshotContract CardSelectSnapshot(Phase phase)
     {
-        if (!HeadlessPicker.IsActive) return new { phase, available = false };
-        var picked = HeadlessPicker.Picked;
-        if (handSelect)
-            return new
-            {
-                phase,
-                prompt = "",
-                min = HeadlessPicker.MinSelect,
-                max = HeadlessPicker.MaxSelect,
-                confirmable = picked.Count >= HeadlessPicker.MinSelect,
-                selected = picked.Select(c => c.Id.Entry).ToArray(),
-                cards = HeadlessPicker.Candidates
-                    .Select((c, i) => HandCardView(c, i)).ToArray(),
-            };
-        return new
+        var decision = DecisionSurface.Current.CardSelect;
+        if (decision is null) return new SnapshotContract(phase) { Available = false };
+        var snapshot = new SnapshotContract(phase)
         {
-            phase,
-            player = FooterView(),
-            prompt = "",
-            min = HeadlessPicker.MinSelect,
-            max = HeadlessPicker.MaxSelect,
-            cancelable = true,
-            confirmable = picked.Count >= HeadlessPicker.MinSelect,
-            cards = HeadlessPicker.Candidates
-                .Select((c, i) => SelectCardView(c, i, picked.Contains(c))).ToArray(),
+            Player = FooterView(),
+            Cancelable = decision.Cancelable,
+            Confirmable = decision.Confirmable,
+            Cards = decision.Cards.Select((card, i) => Item(
+                SelectCardView(card), i,
+                model: card.Id.Entry,
+                selector: CardSpecifier.From(card),
+                semanticState: [CardStateToken(card)],
+                selected: decision.Selected.Contains(card))).ToArray(),
+            Selected = decision.Selected.Select(CardSpecifier.From).ToArray(),
+            SemanticState =
+            [
+                SemanticToken("selectionBounds", decision.MinSelect, decision.MaxSelect)
+            ],
         };
-    }
-
-    private static object CardSelectSnapshot(string phase)
-    {
-        if (RunMode.IsHeadless) return PickerSnapshot(phase, handSelect: false);
-
-        // Choose-a-card overlays (Discovery, event card offers): a card
-        // row, pick one, done — no confirm step.
-        if (Screens.Top<NChooseACardSelectionScreen>() is { } choose)
+        snapshot.AddExtensions(new
         {
-            var chooseHolders = Screens.CardHolders(choose);
-            if (chooseHolders is null || chooseHolders.Count == 0)
-                return new { phase, available = false };
-            var chooseCards = new List<object>(chooseHolders.Count);
-            for (var i = 0; i < chooseHolders.Count; i++)
-            {
-                if (chooseHolders[i].CardModel is not { } card)
-                    return new { phase, available = false };
-                chooseCards.Add(SelectCardView(card, i, false));
-            }
-            return new
-            {
-                phase,
-                player = FooterView(),
-                prompt = "",
-                min = 1,
-                max = 1,
-                cancelable = Screens.ChooseSkipEnabled(choose),
-                confirmable = false,
-                cards = chooseCards.ToArray(),
-            };
-        }
-
-        var screen = Screens.Top<NCardGridSelectionScreen>();
-        var cards = screen is null ? null : Screens.GridCards(screen);
-        if (screen is null || cards is null || cards.Count == 0)
-            return new { phase, available = false };
-
-        var prefs = Screens.Prefs(screen);
-        var selected = Screens.SelectedCards(screen).ToHashSet();
-        var selectedCount = selected.Count;
-        var confirmable = screen switch
-        {
-            NSimpleCardSelectScreen or NCombatPileCardSelectScreen =>
-                Reflect.Field<NClickableControl>(screen, "_confirmButton") is { IsEnabled: true },
-            NDeckTransformSelectScreen => selectedCount >= prefs.MinSelect,
-            NDeckCardSelectScreen => selectedCount >= prefs.MinSelect,
-            _ => selectedCount >= prefs.MaxSelect,
-        };
-        return new
-        {
-            phase,
-            player = FooterView(),
-            prompt = SafeText(prefs.Prompt),
-            min = prefs.MinSelect,
-            max = prefs.MaxSelect,
-            cancelable = prefs.Cancelable,
-            confirmable,
-            cards = cards.Select((c, i) => SelectCardView(c, i, selected.Contains(c))).ToArray(),
-        };
+            prompt = SafeText(decision.Prompt),
+            min = decision.MinSelect,
+            max = decision.MaxSelect,
+        });
+        return snapshot;
     }
 
     // Hand select runs inside the combat room — the hand flips into a
     // selection mode instead of pushing an overlay. Picked cards leave
     // ActiveHolders (into the selected row), so idx tracks what's on screen.
-    private static object HandSelectSnapshot(string phase)
+    private static SnapshotContract HandSelectSnapshot(Phase phase)
     {
-        if (RunMode.IsHeadless) return PickerSnapshot(phase, handSelect: true);
-
-        var hand = NPlayerHand.Instance;
-        if (hand is null) return new { phase, available = false };
-
-        var prefs = Screens.Prefs(hand);
-        var selected = Screens.SelectedCards(hand);
-        var confirmable = Reflect.Field<NClickableControl>(
-            hand, "_selectModeConfirmButton") is { IsEnabled: true };
-        return new
+        var decision = DecisionSurface.Current.HandSelect;
+        if (decision is null) return new SnapshotContract(phase) { Available = false };
+        var snapshot = new SnapshotContract(phase)
         {
-            phase,
-            player = FooterView(),
-            prompt = SafeText(prefs.Prompt),
-            min = prefs.MinSelect,
-            max = prefs.MaxSelect,
-            confirmable,
-            selected = selected.Select(c => c.Id.Entry).ToArray(),
-            cards = hand.ActiveHolders.Select((h, i) =>
-                HandCardView(h.CardNode?.Model, i))
-                .ToArray(),
+            Confirmable = decision.Confirmable,
+            Cards = decision.Cards.Select((card, i) => Item(
+                HandCardView(card), i,
+                model: card?.Id.Entry,
+                selector: card is null ? null : CardSpecifier.From(card),
+                semanticState: card is null ? [SemanticToken("card", (object?)null)]
+                    : [CardStateToken(card, liveCost: true)])).ToArray(),
+            Selected = decision.Selected.Select(CardSpecifier.From).ToArray(),
+            SemanticState =
+            [
+                SemanticToken("selectionBounds", decision.MinSelect, decision.MaxSelect)
+            ],
         };
+        if (decision.IncludePlayer) snapshot.Player = FooterView();
+        snapshot.AddExtensions(new
+        {
+            prompt = SafeText(decision.Prompt),
+            min = decision.MinSelect,
+            max = decision.MaxSelect,
+        });
+        return snapshot;
     }
 }

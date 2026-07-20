@@ -40,11 +40,9 @@ internal static class HeadlessBoot
 
     public static void Start()
     {
-        // Before anything engine-shaped exists: the NGame immunization
-        // below installs a non-null dummy, which would flip the mod's
-        // NGame-null mode probe to "GUI" — the explicit flag is the mode
-        // authority in host boots.
-        RunMode.ForcedHeadless = true;
+        // Composition root: this is the only host decision about which
+        // runtime adapter owns player decisions and model settlement.
+        DecisionSurface.UseHeadless();
 
         // STS2_HOST_DEBUG=1: print first-chance exception stacks — the
         // engine's own logger swallows them down to one message line.
@@ -77,7 +75,7 @@ internal static class HeadlessBoot
         InitModelDb();
         HeadlessLocalization.Init();
         ApplyHarmonyPatches();
-        HeadlessPicker.Install();
+        DecisionSurface.Current.InstallPersistentCardSelector();
         MainThreadPump.BootstrapHeadless();
         // Background continuations (unpatched Task.Delay in engine code)
         // mutate state outside handler calls; a slow pump tick folds those
@@ -213,33 +211,37 @@ internal static class HeadlessBoot
         // that hangs on the first combat action is worse than not starting.
         PatchCmdWait();
         VerifyQueueWaitIlPatch();
+        PatchCombatRewardParking();
         PatchTreasureChestGate();
         PatchAct4TreasureRooms();
 
-        // Cosmetic — a missing one loses a label or a particle, not liveness.
-        try
-        {
-            PatchFinalizersByName("MegaCrit.Sts2.Core.Localization.LocString",
-                "Exists", "GetIfExists", "GetRawText");
-            PatchLocStringFormattedText();
-            PatchAddDetailsTo();
-            PatchFinalizersByName("MegaCrit.Sts2.Core.Events.EventOption", "ToString");
-            PatchFinalizersByName("MegaCrit.Sts2.Core.Multiplayer.Game.EventSynchronizer",
-                "SaveEventOptionToHistory", "AppendToMapPointHistory");
-            PatchVfxPlay();
-            PatchEpochLookups();
-            ImmunizeAudioSingletons();
-            PatchMonsterFlavorHooks();
-            PatchProgressTracking();
-            PatchReattachFadeOut();
-            RerouteBundleScreen();
-            RerouteCrystalSphere();
-            RerouteCustomRewards();
-        }
-        catch (Exception ex)
-        {
-            HostLog.Error("cosmetic patch failed", ex);
-        }
+        // Presentation-only failures are recorded with their exact method
+        // and may continue. Their finalizers still swallow runtime display
+        // faults exactly as before; this policy applies only while installing
+        // the patches.
+        PatchFinalizersByName("MegaCrit.Sts2.Core.Localization.LocString",
+            "Exists", "GetIfExists", "GetRawText");
+        PatchLocStringFormattedText();
+        PatchAddDetailsTo();
+        PatchFinalizersByName("MegaCrit.Sts2.Core.Events.EventOption", "ToString");
+        PatchFinalizersByName("MegaCrit.Sts2.Core.Multiplayer.Game.EventSynchronizer",
+            "SaveEventOptionToHistory", "AppendToMapPointHistory");
+        PatchVfxPlay();
+        PatchMonsterFlavorHooks();
+        PatchReattachFadeOut();
+
+        // These shims keep model-layer work alive or own a gameplay decision.
+        // Missing targets and install failures are version skew, not a host
+        // that can safely limp onward.
+        PatchEpochLookups();
+        // Broad audio/UI method finalizers are presentation-only and report
+        // failures individually; the exact Trial decision reroutes installed
+        // by this call are required and still abort on failure.
+        ImmunizeAudioSingletons();
+        PatchProgressTracking();
+        RerouteBundleScreen();
+        RerouteCrystalSphere();
+        RerouteCustomRewards();
     }
 
     // Act 4 maps can contain treasure points, but the engine constructs a
@@ -256,7 +258,11 @@ internal static class HeadlessBoot
             [typeof(RoomType), typeof(MapPointType), typeof(AbstractModel)], null);
         if (createRoom is null)
             throw new MissingMethodException(typeof(RunManager).FullName, "CreateRoom");
-        _harmony!.Patch(createRoom, prefix: Local(nameof(CreateRoomPrefix)));
+        PatchOne(
+            "Act 4 treasure room construction",
+            HostPatchFailurePolicy.Required,
+            createRoom,
+            prefix: Local(nameof(CreateRoomPrefix)));
         HostLog.Info("clamping post-Act-3 treasure rooms past the constructor guard");
     }
 
@@ -284,14 +290,22 @@ internal static class HeadlessBoot
             BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
         if (m is null)
         {
-            HostLog.Info("ReattachPower.DoFadeOutOnAllSegments not found");
+            new HostPatchBatchResult(0, 0, []).Enforce(
+                "ReattachPower death fade",
+                HostPatchFailurePolicy.PresentationOnly,
+                HostLog.Error);
             return;
         }
 
         var prefix = m.ReturnType == typeof(Task)
             ? Local(nameof(SkipReattachFadeOutTask))
             : Local(nameof(SkipReattachFadeOutVoid));
-        _harmony!.Patch(m, prefix: prefix);
+        if (!PatchOne(
+            "ReattachPower death fade",
+            HostPatchFailurePolicy.PresentationOnly,
+            m,
+            prefix: prefix))
+            return;
         HostLog.Info("skipping ReattachPower death fade in headless mode");
     }
 
@@ -310,27 +324,54 @@ internal static class HeadlessBoot
             BindingFlags.Public | BindingFlags.Instance)
             ?? throw new InvalidOperationException(
                 "TreasureRoomRelicSynchronizer.BeginRelicPicking not found");
-        _harmony!.Patch(method, prefix: Local(nameof(BeginRelicPickingPrefix)));
+        PatchOne(
+            "treasure relic choice gate",
+            HostPatchFailurePolicy.Required,
+            method,
+            prefix: Local(nameof(BeginRelicPickingPrefix)));
         HostLog.Info("gated treasure relic offers behind an explicit verb");
     }
 
     private static bool BeginRelicPickingPrefix() =>
-        HeadlessTreasure.CanBeginRelicPicking;
+        DecisionSurface.Current.CanBeginTreasureRelicPicking;
+
+    // MarkPreFinished is the engine's transition from combat resolution to
+    // the parked post-combat choice. Capture exactly there; observation is
+    // now a pure read and cannot manufacture rewards.
+    private static void PatchCombatRewardParking()
+    {
+        var method = typeof(CombatRoom).GetMethod(
+            nameof(CombatRoom.MarkPreFinished),
+            BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)
+            ?? throw new InvalidOperationException("CombatRoom.MarkPreFinished not found");
+        PatchOne(
+            "combat reward parking",
+            HostPatchFailurePolicy.Required,
+            method,
+            postfix: Local(nameof(CombatRewardParkedPostfix)));
+        HostLog.Info("parked post-combat rewards on the decision surface");
+    }
+
+    private static void CombatRewardParkedPostfix(CombatRoom __instance)
+    {
+        var parked = DecisionSurface.Current.ParkCombatRewards(__instance);
+        if (!parked.Ok)
+            throw new InvalidOperationException(
+                parked.Message ?? "decision surface failed to park combat rewards");
+    }
 
     // Custom reward offers (event trades like THE_FUTURE_OF_POTIONS) run
     // RewardsCmd.OfferCustom → RewardsSet.Offer, which shows the GUI
     // rewards screen and validates completion against it — headless that
     // throws and the offer evaporates while the trade's cost sticks.
-    // Reroute the whole OfferCustom: generate the set, park it in
-    // HeadlessRewards, and return; the agent claims from the rewards
-    // phase like any post-combat offer. Scoped to OfferCustom so the
-    // combat/treasure Offer() paths stay untouched.
+    // Reroute the whole OfferCustom through the selected completion owner;
+    // the host adapter parks it for the agent to claim from the rewards
+    // phase. Scoped to OfferCustom so combat/treasure Offer() stay untouched.
     private static void RerouteCustomRewards()
     {
         Reroute(
             typeof(MegaCrit.Sts2.Core.Commands.RewardsCmd), "OfferCustom",
             BindingFlags.Public | BindingFlags.Static, nameof(OfferCustomPrefix),
-            "RewardsCmd.OfferCustom not found — custom reward offers unsupported",
             "rerouted custom reward offers to the headless stand-in");
     }
 
@@ -339,18 +380,8 @@ internal static class HeadlessBoot
         List<MegaCrit.Sts2.Core.Rewards.Reward> rewards,
         ref Task __result)
     {
-        __result = CaptureCustomOffer(player, rewards);
-        return false;
-    }
-
-    private static async Task CaptureCustomOffer(
-        MegaCrit.Sts2.Core.Entities.Players.Player player,
-        List<MegaCrit.Sts2.Core.Rewards.Reward> rewards)
-    {
-        var set = new MegaCrit.Sts2.Core.Rewards.RewardsSet(player)
-            .WithCustomRewards(rewards);
-        await set.GenerateWithoutOffering();
-        Spirescry.State.HeadlessRewards.CaptureFromSet(set);
+        return !DecisionSurface.Current.TryOwnCustomRewardCompletion(
+            player, rewards, out __result);
     }
 
     // Cmd.Wait gates card-play pacing on UI animation time; headless has no
@@ -364,7 +395,11 @@ internal static class HeadlessBoot
         foreach (var m in cmdType.GetMethods(BindingFlags.Public | BindingFlags.Static))
         {
             if (m.Name != "Wait") continue;
-            _harmony!.Patch(m, prefix: prefix);
+            PatchOne(
+                "Cmd.Wait overloads",
+                HostPatchFailurePolicy.Required,
+                m,
+                prefix: prefix);
             patched++;
         }
         if (patched == 0)
@@ -417,44 +452,78 @@ internal static class HeadlessBoot
         return null;
     }
 
-    private static int PatchMethodsAndSwallow(
-        IEnumerable<Type> types, BindingFlags flags,
-        Func<MethodInfo, bool> matches, bool completeFaultedTasks = false,
-        List<string>? failures = null)
+    private static HostPatchBatchResult PatchMethodsAndSwallow(
+        string patchSet,
+        HostPatchFailurePolicy failurePolicy,
+        IEnumerable<Type> types,
+        BindingFlags flags,
+        Func<MethodInfo, bool> matches,
+        bool completeFaultedTasks = false)
     {
+        var matched = 0;
         var patched = 0;
+        var failures = new List<HostPatchFailure>();
         foreach (var t in types)
         {
             if (!t.IsClass) continue;
             foreach (var m in t.GetMethods(flags))
             {
                 if (!matches(m) || m.IsAbstract || m.IsGenericMethodDefinition) continue;
+                matched++;
                 var finalizer = completeFaultedTasks
                     && typeof(Task).IsAssignableFrom(m.ReturnType)
                     ? SwallowTask : Swallow;
                 // A failed patch usually means the method's body references
                 // a Godot API the stubs don't cover, so Harmony can't JIT
                 // it — the method then runs raw and its fault escapes the
-                // swallow. Callers that immunize singletons pass `failures`
-                // to make that visible instead of chasing it downstream.
+                // swallow. Preserve the exact overload and exception so boot
+                // policy can either stop or explicitly report and continue.
                 try { _harmony!.Patch(m, finalizer: finalizer); patched++; }
-                catch { failures?.Add($"{t.Name}.{m.Name}"); }
+                catch (Exception ex) { failures.Add(HostPatchFailure.From(m, ex)); }
             }
         }
-        return patched;
+        var result = new HostPatchBatchResult(matched, patched, failures);
+        result.Enforce(patchSet, failurePolicy, HostLog.Error);
+        return result;
+    }
+
+    private static bool PatchOne(
+        string patchSet,
+        HostPatchFailurePolicy failurePolicy,
+        MethodInfo method,
+        HarmonyMethod? prefix = null,
+        HarmonyMethod? postfix = null,
+        HarmonyMethod? finalizer = null)
+    {
+        try
+        {
+            _harmony!.Patch(
+                method, prefix: prefix, postfix: postfix, finalizer: finalizer);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            var result = new HostPatchBatchResult(
+                MatchedCount: 1,
+                PatchedCount: 0,
+                Failures: [HostPatchFailure.From(method, ex)]);
+            result.Enforce(patchSet, failurePolicy, HostLog.Error);
+            return false;
+        }
     }
 
     private static void Reroute(
         Type type, string methodName, BindingFlags flags, string prefixName,
-        string missingLog, string successLog)
+        string successLog)
     {
         var method = type.GetMethod(methodName, flags);
         if (method is null)
-        {
-            HostLog.Info(missingLog);
-            return;
-        }
-        _harmony!.Patch(method, prefix: Local(prefixName));
+            throw new MissingMethodException(type.FullName, methodName);
+        PatchOne(
+            $"{type.FullName}.{methodName} reroute",
+            HostPatchFailurePolicy.Required,
+            method,
+            prefix: Local(prefixName));
         HostLog.Info(successLog);
     }
 
@@ -462,10 +531,14 @@ internal static class HeadlessBoot
     private static void PatchFinalizersByName(string typeName, params string[] methods)
     {
         var t = typeof(AbstractModelSubtypes).Assembly.GetType(typeName);
-        if (t is null) return;
         var bf = BindingFlags.Public | BindingFlags.NonPublic
                  | BindingFlags.Instance | BindingFlags.Static;
-        PatchMethodsAndSwallow([t], bf, m => methods.Contains(m.Name));
+        PatchMethodsAndSwallow(
+            $"presentation finalizers {typeName}.{string.Join('/', methods)}",
+            HostPatchFailurePolicy.PresentationOnly,
+            t is null ? [] : [t],
+            bf,
+            m => methods.Contains(m.Name));
     }
 
     // LocString.GetFormattedText faults bubble through Creature.LogName and
@@ -475,8 +548,19 @@ internal static class HeadlessBoot
     {
         var t = typeof(AbstractModelSubtypes).Assembly.GetType("MegaCrit.Sts2.Core.Localization.LocString");
         var m = t?.GetMethod("GetFormattedText", BindingFlags.Public | BindingFlags.Instance);
-        if (m is null) return;
-        _harmony!.Patch(m, finalizer: Local(nameof(LocStringFinalizer)));
+        if (m is null)
+        {
+            new HostPatchBatchResult(0, 0, []).Enforce(
+                "LocString.GetFormattedText finalizer",
+                HostPatchFailurePolicy.PresentationOnly,
+                HostLog.Error);
+            return;
+        }
+        PatchOne(
+            "LocString.GetFormattedText finalizer",
+            HostPatchFailurePolicy.PresentationOnly,
+            m,
+            finalizer: Local(nameof(LocStringFinalizer)));
     }
 
     private static Exception? LocStringFinalizer(
@@ -505,6 +589,8 @@ internal static class HeadlessBoot
     private static void PatchAddDetailsTo()
     {
         PatchMethodsAndSwallow(
+            "localized detail injection finalizers",
+            HostPatchFailurePolicy.PresentationOnly,
             SafeTypes(), AllDeclared,
             m => m.Name is "AddDetailsTo" or "AddLocVars");
     }
@@ -515,19 +601,23 @@ internal static class HeadlessBoot
         var names = new[] { "Play", "PlayAnim", "Animate", "Stop", "Show", "Pulse", "Trigger" };
         var types = SafeTypes().Where(t =>
             (t.Namespace ?? "").Contains(".Vfx") || t.Name.EndsWith("Vfx"));
-        PatchMethodsAndSwallow(types, AllDeclared, m => names.Contains(m.Name));
+        PatchMethodsAndSwallow(
+            "VFX finalizers",
+            HostPatchFailurePolicy.PresentationOnly,
+            types,
+            AllDeclared,
+            m => names.Contains(m.Name));
     }
 
     // CardSelectCmd.FromChooseABundleScreen is UI-only (shows the bundle
-    // screen, awaits its click) — reroute it onto the HeadlessBundle
-    // stand-in so Neow's card packs work without a scene tree.
+    // screen, awaits its click) — ask the boot-selected decision surface
+    // to take completion ownership in headless mode.
     private static void RerouteBundleScreen()
     {
         Reroute(
             typeof(MegaCrit.Sts2.Core.Commands.CardSelectCmd),
             "FromChooseABundleScreen", BindingFlags.Public | BindingFlags.Static,
             nameof(BundlePrefix),
-            "FromChooseABundleScreen not found — bundle offers unsupported",
             "rerouted bundle offers to the headless stand-in");
     }
 
@@ -535,8 +625,7 @@ internal static class HeadlessBoot
         IReadOnlyList<IReadOnlyList<MegaCrit.Sts2.Core.Models.CardModel>> bundles,
         ref Task<IEnumerable<MegaCrit.Sts2.Core.Models.CardModel>> __result)
     {
-        __result = Spirescry.State.HeadlessBundle.Park(bundles);
-        return false;
+        return !DecisionSurface.Current.TryOwnBundleCompletion(bundles, out __result);
     }
 
     // The crystal-sphere minigame is model-driven; ShowScreen is its only
@@ -549,7 +638,6 @@ internal static class HeadlessBoot
             typeof(MegaCrit.Sts2.Core.Nodes.Events.Custom.CrystalSphere.NCrystalSphereScreen),
             "ShowScreen", BindingFlags.Public | BindingFlags.Static,
             nameof(CrystalPrefix),
-            "NCrystalSphereScreen.ShowScreen not found — crystal sphere unsupported",
             "rerouted crystal sphere to the headless stand-in");
     }
 
@@ -557,7 +645,8 @@ internal static class HeadlessBoot
         MegaCrit.Sts2.Core.Events.Custom.CrystalSphereEvent.CrystalSphereMinigame grid,
         ref MegaCrit.Sts2.Core.Nodes.Events.Custom.CrystalSphere.NCrystalSphereScreen __result)
     {
-        Spirescry.State.HeadlessCrystal.Park(grid);
+        if (!DecisionSurface.Current.TryOwnCrystalScreen(grid))
+            return true;
         __result = null!;
         return false;
     }
@@ -571,17 +660,22 @@ internal static class HeadlessBoot
     {
         var t = typeof(AbstractModelSubtypes).Assembly
             .GetType("MegaCrit.Sts2.Core.Saves.Managers.ProgressSaveManager");
-        if (t is null) return;
-        var patched = PatchMethodsAndSwallow(
-            [t], BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly,
+        var result = PatchMethodsAndSwallow(
+            "progress tracking finalizers",
+            HostPatchFailurePolicy.Required,
+            t is null ? [] : [t],
+            BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly,
             m => !m.IsSpecialName, completeFaultedTasks: true);
-        HostLog.Info($"swallowed {patched} progress-tracking methods");
+        HostLog.Info($"swallowed {result.PatchedCount} progress-tracking methods");
     }
 
     // Monster model flavor hooks (BeforeDeath, BeforeRemovedFromRoom) play
     // death SFX / arm animations; in host they NRE on missing audio and
     // scene nodes, and that aborts CreatureCmd.Kill — the boss never dies
-    // and the win condition never fires. Swallow: flavor only.
+    // and the win condition never fires. Soul Nexus puts the same
+    // presentation-only work in its AfterDeath event handler, so target that
+    // one exact hook too. Do not blanket-swallow AfterDeath: other monsters
+    // can own gameplay there.
     private static void PatchMonsterFlavorHooks()
     {
         var bf = BindingFlags.Public | BindingFlags.NonPublic
@@ -590,10 +684,15 @@ internal static class HeadlessBoot
             (t.Namespace ?? "").Contains("Models.Monsters"));
         // Task-returning hooks must not leave a null result behind —
         // the engine awaits it.
-        var patched = PatchMethodsAndSwallow(
-            types, bf, m => m.Name is "BeforeDeath" or "BeforeRemovedFromRoom",
+        var result = PatchMethodsAndSwallow(
+            "monster flavor finalizers",
+            HostPatchFailurePolicy.PresentationOnly,
+            types, bf, m => m.Name is "BeforeDeath" or "BeforeRemovedFromRoom"
+                || (m.Name == "AfterDeath"
+                    && m.DeclaringType?.FullName
+                        == "MegaCrit.Sts2.Core.Models.Monsters.SoulNexus"),
             completeFaultedTasks: true);
-        HostLog.Info($"swallowed {patched} monster flavor hooks");
+        HostLog.Info($"swallowed {result.PatchedCount} monster flavor hooks");
     }
 
     // Model-layer code calls display/audio singletons without null guards:
@@ -605,20 +704,26 @@ internal static class HeadlessBoot
     // the Amalgamator removed two Defends and never granted the Ultimate
     // Defend. Give each singleton an uninitialized body and swallow every
     // method: they are presentation output, and every one of these calls
-    // was already a guaranteed NRE headless, so a no-op is strictly more
+    // was already a guaranteed NRE in this host, so a no-op is strictly more
     // faithful to the GUI's behavior.
     private static void ImmunizeAudioSingletons()
     {
-        var audio = ImmunizeSingleton("MegaCrit.Sts2.Core.Nodes.Audio.NAudioManager");
-        var debugAudio = ImmunizeSingleton("MegaCrit.Sts2.Core.Audio.Debug.NDebugAudioManager");
+        var audio = ImmunizeSingleton(
+            "MegaCrit.Sts2.Core.Nodes.Audio.NAudioManager",
+            HostPatchFailurePolicy.PresentationOnly);
+        var debugAudio = ImmunizeSingleton(
+            "MegaCrit.Sts2.Core.Audio.Debug.NDebugAudioManager",
+            HostPatchFailurePolicy.PresentationOnly);
         // NGame is the root visual node, so its dummy must be fully
         // inert: property accessors too (non-auto getters deref null
         // fields), and Task-returning members must complete rather than
-        // return null — engine code awaits them. Mode detection is
-        // insulated by RunMode.ForcedHeadless, stamped before this runs.
+        // return null — engine code awaits them. Adapter selection already
+        // happened at this composition root before the dummy is installed.
         var game = ImmunizeSingleton("MegaCrit.Sts2.Core.Nodes.NGame",
-            includeSpecialNames: true, completeFaultedTasks: true);
-        if (game is null) return;
+            HostPatchFailurePolicy.PresentationOnly,
+            includeSpecialNames: true, completeFaultedTasks: true)
+            ?? throw new InvalidOperationException(
+                "NGame presentation shim unavailable — Trial decisions cannot complete");
 
         // Sub-manager chains resolve through the dummy: _Ready would have
         // GetNode'd these auto-properties, and NDebugAudioManager.Instance
@@ -645,10 +750,16 @@ internal static class HeadlessBoot
     {
         _eventLayoutDummy = ImmunizeSingleton(
             "MegaCrit.Sts2.Core.Nodes.Events.NEventLayout",
-            includeSpecialNames: true, completeFaultedTasks: true);
+            HostPatchFailurePolicy.PresentationOnly,
+            includeSpecialNames: true, completeFaultedTasks: true)
+            ?? throw new InvalidOperationException(
+                "NEventLayout presentation shim unavailable — Trial decisions cannot complete");
         var room = ImmunizeSingleton(
             "MegaCrit.Sts2.Core.Nodes.Rooms.NEventRoom",
-            includeSpecialNames: true, completeFaultedTasks: true);
+            HostPatchFailurePolicy.PresentationOnly,
+            includeSpecialNames: true, completeFaultedTasks: true)
+            ?? throw new InvalidOperationException(
+                "NEventRoom presentation shim unavailable — Trial decisions cannot complete");
         // NModalContainer must NOT get a dummy: a non-null Instance opens
         // engine FTUE gates — CardPileCmd's first-shuffle popup checks
         // `NModalContainer.Instance != null`, then awaits a modal that can
@@ -665,21 +776,28 @@ internal static class HeadlessBoot
         // chains whose sub-properties stay null, so behavior elsewhere is
         // unchanged.
         _eventRoomDummy = room;
-        if (room is not null)
-        {
-            var getInstance = typeof(MegaCrit.Sts2.Core.Nodes.Rooms.NEventRoom)
-                .GetProperty("Instance", BindingFlags.Public | BindingFlags.Static)
-                ?.GetGetMethod();
-            if (getInstance is not null)
-                _harmony!.Patch(getInstance, prefix: Local(nameof(EventRoomInstancePrefix)));
-        }
-        if (room is not null && _eventLayoutDummy is not null)
-        {
-            var getLayout = typeof(MegaCrit.Sts2.Core.Nodes.Rooms.NEventRoom)
-                .GetProperty("Layout")?.GetGetMethod();
-            if (getLayout is not null)
-                _harmony!.Patch(getLayout, prefix: Local(nameof(EventLayoutPrefix)));
-        }
+        var getInstance = typeof(MegaCrit.Sts2.Core.Nodes.Rooms.NEventRoom)
+            .GetProperty("Instance", BindingFlags.Public | BindingFlags.Static)
+            ?.GetGetMethod()
+            ?? throw new MissingMethodException(
+                typeof(MegaCrit.Sts2.Core.Nodes.Rooms.NEventRoom).FullName,
+                "get_Instance");
+        PatchOne(
+            "Trial event room instance",
+            HostPatchFailurePolicy.Required,
+            getInstance,
+            prefix: Local(nameof(EventRoomInstancePrefix)));
+
+        var getLayout = typeof(MegaCrit.Sts2.Core.Nodes.Rooms.NEventRoom)
+            .GetProperty("Layout")?.GetGetMethod()
+            ?? throw new MissingMethodException(
+                typeof(MegaCrit.Sts2.Core.Nodes.Rooms.NEventRoom).FullName,
+                "get_Layout");
+        PatchOne(
+            "Trial event layout",
+            HostPatchFailurePolicy.Required,
+            getLayout,
+            prefix: Local(nameof(EventLayoutPrefix)));
 
         // Two Trial helpers fault headless. AddVfxAnchoredToPortrait is
         // pure presentation (NREs on Cache.GetScene(path).Instantiate) —
@@ -690,30 +808,41 @@ internal static class HeadlessBoot
         // action directly — the agent's option click is the confirmation
         // (obs already marks the option lethal).
         var trial = typeof(AbstractModelSubtypes).Assembly.GetType(
-            "MegaCrit.Sts2.Core.Models.Events.Trial");
-        if (trial is not null)
-        {
-            PatchMethodsAndSwallow(
-                [trial],
-                BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.DeclaredOnly,
-                m => m.Name == "AddVfxAnchoredToPortrait");
-            var doubleDown = trial.GetMethod(
-                "DoubleDown", BindingFlags.NonPublic | BindingFlags.Instance);
-            if (doubleDown is not null)
-                _harmony!.Patch(doubleDown, prefix: Local(nameof(TrialDoubleDownPrefix)));
-        }
+            "MegaCrit.Sts2.Core.Models.Events.Trial")
+            ?? throw new TypeLoadException(
+                "Trial event model not found — double-down completion shim unavailable");
+        PatchMethodsAndSwallow(
+            "Trial portrait VFX finalizer",
+            HostPatchFailurePolicy.PresentationOnly,
+            [trial],
+            BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.DeclaredOnly,
+            m => m.Name == "AddVfxAnchoredToPortrait");
+        var doubleDown = trial.GetMethod(
+            "DoubleDown", BindingFlags.NonPublic | BindingFlags.Instance)
+            ?? throw new MissingMethodException(trial.FullName, "DoubleDown");
+        PatchOne(
+            "Trial double-down confirmation",
+            HostPatchFailurePolicy.Required,
+            doubleDown,
+            prefix: Local(nameof(TrialDoubleDownPrefix)));
     }
 
     private static bool TrialDoubleDownPrefix(ref Task __result)
     {
         // The popup's accepted action is RunManager.Abandon(), but engine
         // AbandonInternal opens with screen closes that NRE headless and
-        // log an error line — use the dispatcher's screen-free teardown
-        // (same IsAbandoned + forced-kill pipeline, no UI).
+        // log an error line — ask the selected adapter to accept the same
+        // confirmation through its screen-free teardown.
         try
         {
             if (RunManager.Instance is { } rm)
-                Spirescry.Actions.Dispatcher.HeadlessAbandonTeardown(rm);
+            {
+                var abandoned = DecisionSurface.Current
+                    .AcceptAbandonConfirmation(rm);
+                if (!abandoned.Ok)
+                    HostLog.Info(abandoned.Message
+                        ?? "trial double-down abandon was rejected");
+            }
         }
         catch (Exception ex) { HostLog.Error("trial double-down abandon", ex); }
         __result = Task.CompletedTask;
@@ -738,12 +867,18 @@ internal static class HeadlessBoot
 
 
     private static object? ImmunizeSingleton(
-        string name, bool includeSpecialNames = false, bool completeFaultedTasks = false)
+        string name,
+        HostPatchFailurePolicy failurePolicy,
+        bool includeSpecialNames = false,
+        bool completeFaultedTasks = false)
     {
         var t = typeof(AbstractModelSubtypes).Assembly.GetType(name);
         if (t is null)
         {
-            HostLog.Info($"immunize: {name} not found");
+            new HostPatchBatchResult(0, 0, []).Enforce(
+                $"{name} inert presentation methods",
+                failurePolicy,
+                HostLog.Error);
             return null;
         }
         try
@@ -753,19 +888,20 @@ internal static class HeadlessBoot
                 t.GetField("_instance",
                     BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static)
                     ?.SetValue(null, inst);
-            var failures = new List<string>();
-            var patched = PatchMethodsAndSwallow(
+            var result = PatchMethodsAndSwallow(
+                $"{t.FullName} inert presentation methods",
+                failurePolicy,
                 [t], BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly,
                 m => includeSpecialNames || !m.IsSpecialName,
-                completeFaultedTasks, failures);
-            HostLog.Info($"immunized {t.Name}: {patched} methods" + (failures.Count == 0
-                ? ""
-                : $" — {failures.Count} UNPATCHABLE (faults escape): {string.Join(", ", failures)}"));
+                completeFaultedTasks);
+            HostLog.Info($"immunized {t.Name}: {result.PatchedCount} methods");
             return inst;
         }
         catch (Exception ex)
         {
             HostLog.Error($"immunize {name}", ex);
+            if (failurePolicy == HostPatchFailurePolicy.Required)
+                throw;
             return null;
         }
     }
@@ -776,12 +912,24 @@ internal static class HeadlessBoot
     {
         var t = typeof(AbstractModelSubtypes).Assembly
             .GetType("MegaCrit.Sts2.Core.Multiplayer.Serialization.ModelIdSerializationCache");
-        if (t is null) return;
+        if (t is null)
+            throw new TypeLoadException(
+                "ModelIdSerializationCache not found — epoch transition shim unavailable");
         var bf = BindingFlags.Public | BindingFlags.Static;
-        if (t.GetMethod("GetNetIdForEpochId", bf) is { } getNet)
-            _harmony!.Patch(getNet, prefix: Local(nameof(EpochNetIdPrefix)));
-        if (t.GetMethod("GetEpochIdForNetId", bf) is { } getId)
-            _harmony!.Patch(getId, prefix: Local(nameof(EpochIdPrefix)));
+        var getNet = t.GetMethod("GetNetIdForEpochId", bf)
+            ?? throw new MissingMethodException(t.FullName, "GetNetIdForEpochId");
+        var getId = t.GetMethod("GetEpochIdForNetId", bf)
+            ?? throw new MissingMethodException(t.FullName, "GetEpochIdForNetId");
+        PatchOne(
+            "epoch id to network id lookup",
+            HostPatchFailurePolicy.Required,
+            getNet,
+            prefix: Local(nameof(EpochNetIdPrefix)));
+        PatchOne(
+            "epoch network id to model id lookup",
+            HostPatchFailurePolicy.Required,
+            getId,
+            prefix: Local(nameof(EpochIdPrefix)));
     }
 
     private static bool EpochNetIdPrefix(ref int __result)

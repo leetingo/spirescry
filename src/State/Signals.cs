@@ -40,17 +40,12 @@ public static class Signals
     private static string _lastPhase = "";
     private static object? _runStateRef;
     private static string _runId = "none";
-    private static GameAction? _watchedAction;
-    private static DateTime _watchedSinceUtc;
-    private static bool _wedgeAnnounced;
-    private static DateTime? _deadBoardSinceUtc;
-    private static bool _deadBoardAnnounced;
     private static bool _logHooked;
 
     // Milliseconds the executor has been stuck on the SAME action. The
     // serial executor never recovers from a parked action on its own —
     // past the threshold the contract is: abandon and start over.
-    public static long ExecutorStuckMs { get; private set; }
+    public static long ExecutorStuckMs => Settlement.Current.ExecutorStuckMs;
 
     private static ActionExecutor? _exec;
     private static MegaCrit.Sts2.Core.GameActions.Multiplayer.ActionQueueSet? _queueSet;
@@ -209,8 +204,17 @@ public static class Signals
         // an unreadable state count as in-combat — unknown context must
         // degrade toward reporting an error, never toward hiding one.
         bool combatInProgress;
-        try { combatInProgress = CombatManager.Instance is { IsInProgress: true }; }
-        catch { combatInProgress = true; }
+        bool headlessHost;
+        try
+        {
+            combatInProgress = CombatManager.Instance is { IsInProgress: true };
+            headlessHost = DecisionSurface.Current is HeadlessDecisionSurface;
+        }
+        catch
+        {
+            combatInProgress = true;
+            headlessHost = false;
+        }
         // TaskHelper logs just before its returned task transitions to
         // Faulted. When dead-owner tasks exist, give the concrete task's
         // same-thread completion continuation a short identity-correlation
@@ -225,6 +229,7 @@ public static class Signals
                 pending = EngineLogs.Register(
                     text,
                     combatInProgress,
+                    headlessHost,
                     ManagedThreadId.Current);
         }
         if (pending is not null)
@@ -233,7 +238,7 @@ public static class Signals
                 PublishEngineLogAfterRetiredCorrelation(pending));
             return;
         }
-        Bump(ErrorEvents.FromLogLine(text, combatInProgress));
+        Bump(ErrorEvents.FromLogLine(text, combatInProgress, headlessHost));
     }
 
     // Correlation is real pending work — follow must not settle while the
@@ -273,7 +278,7 @@ public static class Signals
         if (await pending.Resolution.Task.ConfigureAwait(false)
             == EngineLogDisposition.Publish)
             Bump(ErrorEvents.FromLogLine(
-                pending.Text, pending.CombatInProgress));
+                pending.Text, pending.CombatInProgress, pending.HeadlessHost));
     }
 
     // Error events accepted-to-settlement: the follow response surfaces
@@ -293,9 +298,13 @@ public static class Signals
     // same serialized job as dispatch, never against a prior frame's cache.
     public static string RefreshRunIdentity()
     {
-        var rm = RunManager.Instance;
-        var runState = rm?.DebugOnlyGetState();
-        var eventSync = runState is null ? null : rm?.EventSynchronizer;
+        // RunState identity exists before the local player seat is mounted.
+        // Using the player-gated context here would transiently publish
+        // run:none for the same RunState, then mint a second token once the
+        // player appeared.
+        var stateOnly = LocalRunContext.StateOnly;
+        var runState = stateOnly?.State;
+        var eventSync = stateOnly?.Manager.EventSynchronizer;
         string? changedTo = null;
         var ownerChangedWithoutRun = false;
         lock (Gate)
@@ -348,7 +357,7 @@ public static class Signals
     public static void Tick()
     {
         EnsureSubscribed();
-        WatchExecutor();
+        WatchSettlement();
         RefreshRunIdentity();
         var phase = PhaseDetector.Current().AsString();
         SweepPendingEventOptions();
@@ -431,69 +440,23 @@ public static class Signals
                 .ToArray();
     }
 
-    private static void WatchExecutor()
+    private static void WatchSettlement()
     {
-        var running = RunManager.Instance?.ActionExecutor?.CurrentlyRunningAction;
-        WatchDeadBoard(running);
-        if (running is null || !ReferenceEquals(running, _watchedAction))
-        {
-            _watchedAction = running;
-            _watchedSinceUtc = DateTime.UtcNow;
-            ExecutorStuckMs = 0;
-            _wedgeAnnounced = false;
-            return;
-        }
-        // A deferred pick parks the executing action on purpose — the
-        // engine is waiting on the agent's pick-card/confirm, not stuck.
-        // Hold the clock at zero so a slow decision can't fire a spurious
-        // wedge (a potion pick pondered past 8s used to).
-        if (HeadlessPicker.IsActive)
-        {
-            _watchedSinceUtc = DateTime.UtcNow;
-            ExecutorStuckMs = 0;
-            return;
-        }
-        ExecutorStuckMs = (long)(DateTime.UtcNow - _watchedSinceUtc).TotalMilliseconds;
-        if (ExecutorStuckMs > 8000 && !_wedgeAnnounced)
-        {
-            _wedgeAnnounced = true;
-            Bump($"wedge:{running.GetType().Name}");
-        }
-    }
-
-    // The stuck-executor clock above can't see the other fatal shape: an
-    // exception mid death-resolution aborts the chain, leaving nothing
-    // running, nothing queued, every enemy dead — and the combat never
-    // ending. Executor-idle resets the wedge clock, so a second clock
-    // times the dead board itself and announces once past the same
-    // threshold.
-    private static void WatchDeadBoard(GameAction? running)
-    {
+        var run = RunManager.Instance;
+        var running = run?.ActionExecutor?.CurrentlyRunningAction;
         var combat = CombatManager.Instance;
-        // IsEnding legitimately has an all-dead board while victory
-        // actions, revives, and phase transitions are still settling.
-        var queuesEmpty = RunManager.Instance is { } rm
-            && EngineQueues.All(rm).All(q => q.depth == 0);
-        var deadBoard = ResolutionGuards.IsDeadBoardCandidate(
-            running is not null,
-            HeadlessPicker.IsActive,
+        var queuesEmpty = run is not null
+            && EngineQueues.All(run).All(queue => queue.depth == 0);
+        var result = Settlement.Current.ObserveWatchdogs(new SettlementWatchdogProbe(
+            running,
+            running?.GetType().Name,
+            DecisionSurface.Current.DeferredCardChoiceActive,
             combat is { IsInProgress: true },
             combat is { IsEnding: true },
             queuesEmpty,
-            combat is not null && AllEnemiesDead(combat));
-        if (!deadBoard)
-        {
-            _deadBoardSinceUtc = null;
-            _deadBoardAnnounced = false;
-            return;
-        }
-        _deadBoardSinceUtc ??= DateTime.UtcNow;
-        if (!_deadBoardAnnounced
-            && (DateTime.UtcNow - _deadBoardSinceUtc.Value).TotalMilliseconds > 8000)
-        {
-            _deadBoardAnnounced = true;
-            Bump("wedge:DeadBoard");
-        }
+            combat is not null && AllEnemiesDead(combat)));
+        foreach (var settlementEvent in result.Events)
+            Bump(settlementEvent);
     }
 
     private static bool AllEnemiesDead(CombatManager combat)

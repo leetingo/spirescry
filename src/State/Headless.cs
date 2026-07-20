@@ -4,6 +4,7 @@ using MegaCrit.Sts2.Core.Entities.CardRewardAlternatives;
 using MegaCrit.Sts2.Core.Entities.Cards;
 using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Rewards;
+using MegaCrit.Sts2.Core.Rooms;
 using MegaCrit.Sts2.Core.Runs;
 using MegaCrit.Sts2.Core.TestSupport;
 using CrystalMinigame = MegaCrit.Sts2.Core.Events.Custom.CrystalSphereEvent.CrystalSphereMinigame;
@@ -13,7 +14,7 @@ namespace Spirescry.State;
 // TreasureRoom.Enter primes relic picking before the GUI chest is clicked.
 // The headless host gates that engine callback so merely entering/observing
 // the room cannot reveal rewards; a bridge verb opens the gate explicitly.
-public static class HeadlessTreasure
+internal static class HeadlessTreasure
 {
     private static int _openDepth;
 
@@ -54,7 +55,7 @@ public static class HeadlessTreasure
 // HeadlessRewards — the post-combat rewards flow normally lives on
 // NRewardsScreen. Headless builds the same RewardsSet from the room and
 // drives Reward.SelectUnsynchronized directly.
-public static class HeadlessPicker
+internal static class HeadlessPicker
 {
     private static IDisposable? _scope;
     private static TaskCompletionSource<IEnumerable<CardModel>>? _tcs;
@@ -71,7 +72,7 @@ public static class HeadlessPicker
     // that fire later (TOOLS_OF_THE_TRADE at the next turn start).
     public static void Install()
     {
-        if (!RunMode.IsHeadless || _scope is not null) return;
+        if (_scope is not null) return;
         _scope = CardSelectCmd.PushSelector(new Deferred());
     }
 
@@ -152,7 +153,7 @@ public static class HeadlessPicker
 // CardSelectCmd.FromChooseABundleScreen — is UI-only, so the host boot
 // reroutes it here via a Harmony prefix: the bundles park on a TCS, the
 // agent picks one by idx, the chosen bundle's cards resolve the call.
-public static class HeadlessBundle
+internal static class HeadlessBundle
 {
     private static TaskCompletionSource<IEnumerable<CardModel>>? _tcs;
     private static IReadOnlyList<IReadOnlyList<CardModel>> _bundles = [];
@@ -196,7 +197,7 @@ public static class HeadlessBundle
 // prefix parks the live minigame here and skips the screen — the verbs
 // drive the model directly, and the minigame's own completion (last
 // divination, or ForceMinigameEnd) resumes the awaiting event.
-public static class HeadlessCrystal
+internal static class HeadlessCrystal
 {
     public static CrystalMinigame? Entity { get; private set; }
 
@@ -211,7 +212,7 @@ public static class HeadlessCrystal
 // parked completion source or captured entity leaks into the next run.
 // A new stand-in belongs on BOTH lists here (ResetAll and
 // HasParkedDecision) and in PhaseDetector's stand-in phase mapping.
-public static class HeadlessState
+internal static class HeadlessState
 {
     // True while any stand-in holds a completion source the agent must
     // resolve with a verb. The follow probe keys on this: an event
@@ -239,7 +240,7 @@ public static class HeadlessState
     }
 }
 
-public static class HeadlessRewards
+internal static class HeadlessRewards
 {
     // Slot list: a picked entry's slot goes null but stays in place so the
     // other rewards keep their idx between picks.
@@ -266,32 +267,30 @@ public static class HeadlessRewards
         _activeCardPick = null;
     }
 
-    // Build the RewardsSet for the current (just-finished) combat room and
-    // populate every reward. Idempotent while active.
-    public static bool CaptureFromCurrentRoom()
+    // Build the RewardsSet when the engine parks a just-finished combat
+    // choice. Idempotent while active; observation never calls this.
+    public static string? CaptureFromRoom(CombatRoom room)
     {
-        if (IsActive) return true;
-        var rm = RunManager.Instance;
-        var rs = rm?.DebugOnlyGetState();
-        var room = rs?.CurrentRoom;
-        var player = rs is null ? null : LocalContext.GetMe(rs);
-        if (rm is null || room is null || player is null) return false;
-        if (ReferenceEquals(_completedFor, room)) return false;
+        if (IsActive || ReferenceEquals(_completedFor, room)) return null;
+        if (LocalRunContext.Current is not { } run
+            || !ReferenceEquals(run.State.CurrentRoom, room))
+            return "combat rewards parked before the local run context was ready";
 
         try
         {
-            var set = new RewardsSet(player, rm.RewardsSetSynchronizer).WithRewardsFromRoom(room);
+            var set = new RewardsSet(
+                run.Player, run.Manager.RewardsSetSynchronizer).WithRewardsFromRoom(room);
             // Async but pure logic — drains inline under the host's
             // patches, so GetResult returns synchronously.
             set.GenerateWithoutOffering().GetAwaiter().GetResult();
             _pending = Flatten(set.Rewards).Select(r => (Reward?)r).ToList();
-            return true;
+            return null;
         }
         catch (Exception ex)
         {
             SafeLog.Error("headless rewards capture", ex);
             _pending = null;
-            return false;
+            return $"combat rewards capture failed: {ex.GetType().Name}: {ex.Message}";
         }
     }
 
@@ -379,7 +378,7 @@ public static class HeadlessRewards
     public static void SkipAllAndClear()
     {
         foreach (var (_, r) in Slotted()) InvokeOnSkipped(r);
-        _completedFor = RunManager.Instance?.DebugOnlyGetState()?.CurrentRoom;
+        _completedFor = LocalRunContext.Current?.State.CurrentRoom;
         Clear();
     }
 

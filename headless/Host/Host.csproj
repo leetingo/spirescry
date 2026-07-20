@@ -25,8 +25,7 @@
   </ItemGroup>
   <ItemGroup>
     <!-- Compile the mod's source straight in: the bridge, snapshotters,
-         and dispatcher are reused verbatim; RunMode picks the headless
-         branches at runtime. -->
+         dispatcher, and boot-selected decision surface are reused verbatim. -->
     <Compile Include="..\..\src\**\*.cs" Exclude="..\..\src\bin\**\*.cs;..\..\src\obj\**\*.cs" />
   </ItemGroup>
 </Project>

@@ -62,11 +62,14 @@ a stable `textKey` that includes upgrade, enchantment, and affliction;
 pass cached keys back as repeatable `--known-card <key>` flags to omit
 their prose without any process-global or read-order-dependent state.
 
+<!-- protocol:phases:start -->
 Phases: `main_menu`, `map`, `combat`, `event`, `shop`, `rest_site`,
 `treasure`, `rewards`, `card_reward`, `relic_reward`, `card_select`,
 `hand_select`, `bundle_select`, `crystal_sphere`, `game_over` — plus
-`overlay`/`unknown` for anything unmapped, carrying the overlay's type
-name so a stuck screen is diagnosable from `/obs` alone.
+`overlay`, `unknown`.
+<!-- protocol:phases:end -->
+Anything unmapped carries the overlay's type name so a stuck screen is
+diagnosable from `/obs` alone.
 
 Shop inventory keeps `cost` as its original gold-price field and also
 exposes the clearer `price` alias. Card stock adds `playCost` and `starCost`;
@@ -76,9 +79,12 @@ upgrade candidates keep the string `upgradedPreview` and add
 **`POST /step`** takes `{"action": ..., "args": ...}`. Add
 `"follow": <ms>` (CLI: `--follow [ms]`) to wait past acceptance until
 the engine queues and tracked async work settle, or until a new decision
-surface appears. The response distinguishes `outcome: settled`,
-`next_decision`, and `timeout`, and includes resolution events plus a fresh
-decision `obs`. GUI callbacks that do not return a task must also expose the
+surface appears. The response carries one of the typed settlement outcomes:
+<!-- protocol:settlement-outcomes:start -->
+`settled`, `next_decision`, `fault`, `timeout`.
+<!-- protocol:settlement-outcomes:end -->
+It includes resolution events plus a fresh decision `obs`; `fault` also keeps
+the engine error tokens in `errors`. GUI callbacks that do not return a task must expose the
 same boundary across three consecutive frames; guard checks still happen
 atomically before dispatch. This is a bounded settlement signal for work the
 bridge can observe, not a claim that every opaque engine continuation has
@@ -96,6 +102,7 @@ Verbs: `new-run`,
 Errors ride on 4xx/5xx as `{"ok": false, "err": "<code>", "msg": "..."}`
 with a stable machine-readable vocabulary:
 
+<!-- protocol:rejection-codes:start -->
 | Code | Meaning |
 | --- | --- |
 | `bad_request` | The verb or arguments are malformed or unsupported. |
@@ -115,6 +122,7 @@ with a stable machine-readable vocabulary:
 | `resolution_failed` | An inline engine action faulted before observable state changed. |
 | `not_found` | The HTTP route does not exist. |
 | `internal` | The bridge hit an invariant or unexpected implementation failure. |
+<!-- protocol:rejection-codes:end -->
 
 The CLI prints failures on stderr and exits `75` (`EX_TEMPFAIL`) only for
 `not_ready`; every other bridge rejection, local validation error, transport
@@ -181,7 +189,18 @@ one `runId`. A recipe is complete only when every verb used follow, reached
 `settled` or `next_decision`, and recorded a state fingerprint. From a clean
 `main_menu` (`runId: none`), `spirescry replay run.json` re-drives that recipe
 with CAS guards and follow settlement, checking every recorded state
-fingerprint and stopping at the first divergence.
+fingerprint and stopping at the first divergence. Fingerprints cover the
+typed decision/settlement projection: phase and gates, action-target identity
+and selectors, map position, HP/gold/resources, selection state, and stable
+semantic tokens for deck/relic inventory, combat piles/powers/intents, event
+pages, and reward/shop economics. Snapshot producers set those fields through
+`SnapshotContract`. Its typed consumer-projection schema publishes both wire
+and canonical output names in `protocol.json`; the Rust CLI generates its field
+constants and projection groups from that artifact, so removing a consumed
+field fails its build and renaming a wire key updates the consumer without a
+second hand-written token. C# and Rust also share exact fingerprint fixtures.
+Localized prose and other descriptive snapshot extensions are intentionally
+outside that compatibility contract.
 This is a debugging aid, not authoritative replay recording: the output is
 explicitly a new reconstruction with its own `runId`, and its final state
 must never be attributed to the source run.
@@ -204,11 +223,12 @@ must never be attributed to the source run.
 
 **In-game** boots load the mod inside the game process and drive the real
 UI. The **host** boot loads an IL-patched `sts2.dll` against a stub
-GodotSharp in a plain .NET process; `RunMode` branches swap UI nodes for
-the engine's model-layer test entry points (`RunState.CreateForTest`,
-deferred `ICardSelector`s, a virtual rewards flow). Same protocol either
-way — in host mode actions also resolve inline, so `/step` returns with
-the effect already applied.
+GodotSharp in a plain .NET process. Each composition root selects one
+`DecisionSurface` adapter; the host adapter owns the engine's model-layer
+test entry points (`RunState.CreateForTest`, deferred `ICardSelector`s, a
+virtual rewards flow) without leaking boot checks into protocol modules.
+Same protocol either way — in host mode actions also resolve inline, so
+`/step` returns with the effect already applied.
 
 `host --foreground` execs the host in the invoking process instead of
 starting a background child. Use it in CI, sandboxes, and agent runners that
@@ -238,9 +258,38 @@ picks), and text comes from tables extracted out of your local install's
   Neow's card-pack bundles, the crystal-sphere minigame (`map-move`
   clicks a cell, `option 0/1` picks the divination tool).
 - **Reproducibility**: `new-run --seed --ascension`.
-- **Dev cheats** for single-point verification:
-  `cheat goto|gold|heal|hp|wound-enemies|event|combat|card|card-upgraded|relic|potion|stars|energy|async-fault|engine-error|engine-error-delayed|event-fault-delayed|event-fault-late|event-complete-late|event-orphan|event-orphan-fault|event-orphan-collision|event-owner-rotate`
-  — jump anywhere on the act map, end fights fast, force any event or
+- **Dev cheats** for single-point verification use these positional shapes
+  (the same shapes are advertised by `/health`):
+
+  <!-- protocol:cheat-argument-shapes:start -->
+  | Cheat | Positional arguments |
+  | --- | --- |
+  | `goto` | `col:integer row:integer` |
+  | `gold` | `value:integer` |
+  | `heal` | — |
+  | `hp` | `value:integer` |
+  | `wound-enemies` | — |
+  | `event` | `id:string` |
+  | `combat` | `id:string` |
+  | `card` | `id:string [upgraded:boolean]` |
+  | `card-upgraded` | `id:string` |
+  | `relic` | `id:string` |
+  | `potion` | `id:string` |
+  | `stars` | `value:integer` |
+  | `energy` | `value:integer` |
+  | `async-fault` | — |
+  | `engine-error` | — |
+  | `engine-error-delayed` | — |
+  | `event-fault-delayed` | — |
+  | `event-fault-late` | — |
+  | `event-complete-late` | — |
+  | `event-orphan` | — |
+  | `event-orphan-fault` | — |
+  | `event-orphan-collision` | — |
+  | `event-owner-rotate` | — |
+  <!-- protocol:cheat-argument-shapes:end -->
+
+  They jump anywhere on the act map, end fights fast, force any event or
   encounter by model id, graft content into the run, or deliberately fault
   tracked/logged async work and event-option ownership transitions to verify
   the failure event stream. `models
@@ -254,8 +303,8 @@ picks), and text comes from tables extracted out of your local install's
                          # diffs the recorded snapshot key sets — same
                          # phase must expose the same keys in each
 python3 tests/e2e.py --boot   # the pre-merge suite against a self-booted
-                              # host (port 7779): every phase, verb, and
-                              # content atom; intentionally long-running
+                              # host with this checkout's release CLI
+                              # (build it with ./build.sh cli first)
 python3 tests/e2e.py --boot --quick  # iteration loop: skip exhaustive M*,
                                      # click the first option per event
 python3 tests/eventsweep.py --all-options  # event sweep alone (e2e E1)

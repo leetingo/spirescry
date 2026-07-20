@@ -10,11 +10,12 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
 const DEFAULT_HTTP_TIMEOUT_MS: u64 = 70_000;
 const HTTP_TIMEOUT_GRACE_MS: u64 = 10_000;
-const PROTOCOL_VERSION: u64 = 2;
+
+include!(concat!(env!("OUT_DIR"), "/protocol.rs"));
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum CliError {
@@ -312,15 +313,16 @@ fn main() -> ExitCode {
     };
     match result {
         Ok(v) => {
+            let settlement_outcome = v.get("outcome").and_then(SettlementOutcome::from_value);
             // Engine faults logged between acceptance and settlement ride
-            // the response's "errors" array; an outcome of "settled" alone
-            // must not read as proof the effect executed cleanly.
+            // the response's "errors" array and the typed fault outcome.
             if let Some(errors) = v.get("errors").and_then(Value::as_array) {
                 if !errors.is_empty() {
                     eprintln!(
                         "spirescry: host logged {} engine error(s) during this action — \
-                         the outcome is suspect; inspect the 'errors' field before the next verb",
-                        errors.len()
+                         outcome={:?}; inspect the 'errors' field before the next verb",
+                        errors.len(),
+                        settlement_outcome,
                     );
                 }
             }
@@ -380,29 +382,45 @@ fn skip_args(idx: Option<i32>) -> Value {
     }
 }
 
-// Positional sugar for the known cheat arg shapes; the bridge's own
-// per-cheat validation is the source of truth.
+// Positional sugar driven by the checked protocol artifact. Unknown cheat
+// names still reach the bridge so its supported-list rejection remains the
+// source of truth for a host with a different surface.
 fn cheat_args(name: &str, values: &[String]) -> Result<Value, String> {
     let mut args = json!({ "name": name });
-    let num = |s: &String| {
-        s.parse::<i32>()
-            .map_err(|_| format!("invalid number: {}", s))
+    let Some(shape) = CHEAT_ARGUMENT_SHAPES
+        .iter()
+        .find(|shape| shape.name == name)
+    else {
+        return Ok(args);
     };
-    match (name, values) {
-        ("goto", [col, row]) => {
-            args["col"] = json!(num(col)?);
-            args["row"] = json!(num(row)?);
-        }
-        ("gold", [value]) | ("hp", [value]) | ("stars", [value]) | ("energy", [value]) => {
-            args["value"] = json!(num(value)?)
-        }
-        ("event", [id])
-        | ("combat", [id])
-        | ("card", [id])
-        | ("card-upgraded", [id])
-        | ("relic", [id])
-        | ("potion", [id]) => args["id"] = json!(id),
-        _ => {}
+    let required = shape
+        .arguments
+        .iter()
+        .filter(|argument| !argument.optional)
+        .count();
+    if values.len() < required || values.len() > shape.arguments.len() {
+        let expected = if required == shape.arguments.len() {
+            format!("{} arguments", required)
+        } else {
+            format!("{}..={} arguments", required, shape.arguments.len())
+        };
+        return Err(format!(
+            "cheat '{}' expects {}, got {}",
+            name,
+            expected,
+            values.len()
+        ));
+    }
+    for (argument, value) in shape.arguments.iter().zip(values) {
+        args[argument.name] = match argument.kind {
+            ProtocolArgumentKind::Boolean => json!(value
+                .parse::<bool>()
+                .map_err(|_| format!("invalid boolean: {}", value))?),
+            ProtocolArgumentKind::Integer => json!(value
+                .parse::<i32>()
+                .map_err(|_| format!("invalid number: {}", value))?),
+            ProtocolArgumentKind::String => json!(value),
+        };
     }
     Ok(args)
 }
@@ -447,14 +465,15 @@ fn replay_value(client: &impl ReplayTransport, log: &Value) -> CliResult<Value> 
         return Err(format!("runlog crosses RunIds at verb {}", idx + 1).into());
     }
     if let Some((idx, _)) = verbs.iter().enumerate().find(|(_, verb)| {
-        !matches!(
-            verb.get("outcome").and_then(Value::as_str),
-            Some("settled" | "next_decision")
-        ) || verb
-            .get("fingerprint")
-            .and_then(Value::as_str)
-            .filter(|value| !value.is_empty())
-            .is_none()
+        !verb
+            .get("outcome")
+            .and_then(SettlementOutcome::from_value)
+            .is_some_and(SettlementOutcome::is_replayable)
+            || verb
+                .get("fingerprint")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .is_none()
     }) {
         return Err(format!(
             "runlog verb {} has no verifiable settled fingerprint",
@@ -486,7 +505,7 @@ fn replay_value(client: &impl ReplayTransport, log: &Value) -> CliResult<Value> 
     }
 
     let mut current = client.get("/obs")?;
-    if current.get("phase").and_then(Value::as_str) != Some("main_menu")
+    if current.get("phase").and_then(Value::as_str) != Some(PHASE_MAIN_MENU)
         || current.get("runId").and_then(Value::as_str) != Some("none")
     {
         return Err(format!(
@@ -545,9 +564,27 @@ fn replay_value(client: &impl ReplayTransport, log: &Value) -> CliResult<Value> 
                 "follow": 10_000,
             }),
         )?;
-        if response.get("settled").and_then(Value::as_bool) != Some(true) {
+        let outcome = response
+            .get("outcome")
+            .and_then(SettlementOutcome::from_value)
+            .ok_or_else(|| {
+                format!(
+                    "verb {} ({}) follow response has no valid outcome",
+                    idx + 1,
+                    action,
+                )
+            })?;
+        if !outcome.reached_boundary() {
             return Err(format!(
                 "divergence at verb {} ({}): reconstruction timed out",
+                idx + 1,
+                action,
+            )
+            .into());
+        }
+        if !outcome.is_replayable() {
+            return Err(format!(
+                "divergence at verb {} ({}): reconstruction faulted",
                 idx + 1,
                 action,
             )
@@ -603,8 +640,7 @@ fn replay_value(client: &impl ReplayTransport, log: &Value) -> CliResult<Value> 
 }
 
 fn state_fingerprint(value: &Value) -> String {
-    let mut stable = value.clone();
-    remove_volatile(&mut stable);
+    let stable = consumer_projection(value);
     let bytes = serde_json::to_vec(&stable).unwrap_or_default();
     let mut hash: u64 = 14_695_981_039_346_656_037;
     for byte in bytes {
@@ -614,21 +650,383 @@ fn state_fingerprint(value: &Value) -> String {
     format!("{hash:016x}")
 }
 
-fn remove_volatile(value: &mut Value) {
-    match value {
-        Value::Object(map) => {
-            map.remove("rev");
-            map.remove("runId");
-            for child in map.values_mut() {
-                remove_volatile(child);
-            }
+// These names are the cross-language compile contract. If a C# schema field is
+// removed without updating this consumer, generation omits its symbol and the
+// Rust build fails instead of silently narrowing replay/settlement semantics.
+macro_rules! require_projection_fields {
+    ($($field:ident),* $(,)?) => {
+        $(const _: ProjectionField = $field;)*
+    };
+}
+
+require_projection_fields!(
+    PROJECTION_TOP_PHASE,
+    PROJECTION_TOP_ID,
+    PROJECTION_TOP_ACT,
+    PROJECTION_TOP_CURRENT,
+    PROJECTION_TOP_TURN,
+    PROJECTION_TOP_OUTCOME,
+    PROJECTION_TOP_HP,
+    PROJECTION_TOP_GOLD,
+    PROJECTION_TOP_SEMANTIC_STATE,
+    PROJECTION_TOP_SELECTED,
+    PROJECTION_TOP_SIDE,
+    PROJECTION_TOP_ACTIONS_DISABLED,
+    PROJECTION_TOP_AVAILABLE,
+    PROJECTION_TOP_PROCEED_AVAILABLE,
+    PROJECTION_TOP_CHEST_OPENED,
+    PROJECTION_TOP_CONFIRMABLE,
+    PROJECTION_TOP_CANCELABLE,
+    PROJECTION_TOP_HAS_TOP_LEVEL_POTIONS,
+    PROJECTION_TOP_NEXT,
+    PROJECTION_TOP_HAND,
+    PROJECTION_TOP_POTIONS,
+    PROJECTION_TOP_OPTIONS,
+    PROJECTION_TOP_CARDS,
+    PROJECTION_TOP_COLORLESS,
+    PROJECTION_TOP_RELICS,
+    PROJECTION_TOP_REWARDS,
+    PROJECTION_TOP_ALTERNATIVES,
+    PROJECTION_TOP_BUNDLES,
+    PROJECTION_TOP_CELLS,
+    PROJECTION_TOP_YOU,
+    PROJECTION_TOP_ENEMIES,
+    PROJECTION_TOP_PLAYER,
+    PROJECTION_TOP_CARD_REMOVAL,
+    PROJECTION_TOP_LEGAL,
+    PROJECTION_ITEM_INDEX,
+    PROJECTION_ITEM_ID,
+    PROJECTION_ITEM_MODEL,
+    PROJECTION_ITEM_SELECTOR,
+    PROJECTION_ITEM_SLOT,
+    PROJECTION_ITEM_TARGET,
+    PROJECTION_ITEM_COL,
+    PROJECTION_ITEM_ROW,
+    PROJECTION_ITEM_TYPE,
+    PROJECTION_ITEM_SEMANTIC_STATE,
+    PROJECTION_ITEM_SELECTED,
+    PROJECTION_ITEM_PLAYABLE,
+    PROJECTION_ITEM_LOCKED,
+    PROJECTION_ITEM_CHOSEN,
+    PROJECTION_ITEM_ENABLED,
+    PROJECTION_ITEM_PURCHASABLE,
+    PROJECTION_ITEM_HIDDEN,
+    PROJECTION_ITEM_CARDS,
+    PROJECTION_COMBATANT_HP,
+    PROJECTION_COMBATANT_BLOCK,
+    PROJECTION_COMBATANT_ENERGY,
+    PROJECTION_COMBATANT_STARS,
+    PROJECTION_COMBATANT_SEMANTIC_STATE,
+    PROJECTION_ENEMY_ID,
+    PROJECTION_ENEMY_MODEL,
+    PROJECTION_ENEMY_HP,
+    PROJECTION_ENEMY_BLOCK,
+    PROJECTION_ENEMY_ALIVE,
+    PROJECTION_ENEMY_SEMANTIC_STATE,
+    PROJECTION_PLAYER_HP,
+    PROJECTION_PLAYER_GOLD,
+    PROJECTION_PLAYER_SEMANTIC_STATE,
+    PROJECTION_PLAYER_POTIONS,
+);
+
+// protocol.json owns this deliberate semantic replay/settlement contract. The
+// generated groups keep wire and output names aligned with C# without copying
+// JSON vocabulary into this consumer.
+fn consumer_projection(value: &Value) -> Value {
+    let mut result = Map::new();
+    copy_required_strings(value, &mut result, PROJECTION_TOP_REQUIRED_STRING_FIELDS);
+    copy_optional_strings(value, &mut result, PROJECTION_TOP_OPTIONAL_STRING_FIELDS);
+    copy_optional_numbers(value, &mut result, PROJECTION_TOP_OPTIONAL_NUMBER_FIELDS);
+    copy_optional_int_arrays(value, &mut result, PROJECTION_TOP_OPTIONAL_INT_ARRAY_FIELDS);
+    copy_optional_string_arrays(
+        value,
+        &mut result,
+        PROJECTION_TOP_OPTIONAL_STRING_ARRAY_FIELDS,
+    );
+    copy_optional_booleans(value, &mut result, PROJECTION_TOP_OPTIONAL_BOOLEAN_FIELDS);
+    copy_presence_booleans(value, &mut result, PROJECTION_TOP_PRESENCE_BOOLEAN_FIELDS);
+    copy_item_arrays(value, &mut result, PROJECTION_TOP_ITEM_ARRAY_FIELDS);
+    copy_optional_items(value, &mut result, PROJECTION_TOP_OPTIONAL_ITEM_FIELDS);
+    copy_optional_combatants(value, &mut result, PROJECTION_TOP_OPTIONAL_COMBATANT_FIELDS);
+    copy_enemy_arrays(value, &mut result, PROJECTION_TOP_ENEMY_ARRAY_FIELDS);
+    copy_optional_players(value, &mut result, PROJECTION_TOP_OPTIONAL_PLAYER_FIELDS);
+    copy_required_string_arrays(
+        value,
+        &mut result,
+        PROJECTION_TOP_REQUIRED_STRING_ARRAY_FIELDS,
+    );
+    Value::Object(result)
+}
+
+fn item_array(value: Option<&Value>) -> Value {
+    Value::Array(
+        value
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|item| item.is_object())
+            .map(item_projection)
+            .collect(),
+    )
+}
+
+fn item_projection(value: &Value) -> Value {
+    let mut result = Map::new();
+    copy_optional_strings(value, &mut result, PROJECTION_ITEM_OPTIONAL_STRING_FIELDS);
+    copy_optional_numbers(value, &mut result, PROJECTION_ITEM_OPTIONAL_NUMBER_FIELDS);
+    copy_optional_string_arrays(
+        value,
+        &mut result,
+        PROJECTION_ITEM_OPTIONAL_STRING_ARRAY_FIELDS,
+    );
+    copy_optional_booleans(value, &mut result, PROJECTION_ITEM_OPTIONAL_BOOLEAN_FIELDS);
+    copy_item_arrays(value, &mut result, PROJECTION_ITEM_ITEM_ARRAY_FIELDS);
+    Value::Object(result)
+}
+
+fn enemy_array(value: Option<&Value>) -> Value {
+    Value::Array(
+        value
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|enemy| enemy.is_object())
+            .map(enemy_projection)
+            .collect(),
+    )
+}
+
+fn combatant_projection(value: &Value) -> Value {
+    let mut result = Map::new();
+    copy_required_int_arrays(
+        value,
+        &mut result,
+        PROJECTION_COMBATANT_REQUIRED_INT_ARRAY_FIELDS,
+    );
+    copy_optional_numbers(
+        value,
+        &mut result,
+        PROJECTION_COMBATANT_OPTIONAL_NUMBER_FIELDS,
+    );
+    copy_optional_string_arrays(
+        value,
+        &mut result,
+        PROJECTION_COMBATANT_OPTIONAL_STRING_ARRAY_FIELDS,
+    );
+    Value::Object(result)
+}
+
+fn enemy_projection(value: &Value) -> Value {
+    let mut result = Map::new();
+    copy_required_int_arrays(
+        value,
+        &mut result,
+        PROJECTION_ENEMY_REQUIRED_INT_ARRAY_FIELDS,
+    );
+    copy_optional_strings(value, &mut result, PROJECTION_ENEMY_OPTIONAL_STRING_FIELDS);
+    copy_optional_numbers(value, &mut result, PROJECTION_ENEMY_OPTIONAL_NUMBER_FIELDS);
+    copy_optional_string_arrays(
+        value,
+        &mut result,
+        PROJECTION_ENEMY_OPTIONAL_STRING_ARRAY_FIELDS,
+    );
+    copy_optional_booleans(value, &mut result, PROJECTION_ENEMY_OPTIONAL_BOOLEAN_FIELDS);
+    Value::Object(result)
+}
+
+fn player_projection(value: &Value) -> Value {
+    let mut result = Map::new();
+    copy_optional_numbers(value, &mut result, PROJECTION_PLAYER_OPTIONAL_NUMBER_FIELDS);
+    copy_optional_int_arrays(
+        value,
+        &mut result,
+        PROJECTION_PLAYER_OPTIONAL_INT_ARRAY_FIELDS,
+    );
+    copy_optional_string_arrays(
+        value,
+        &mut result,
+        PROJECTION_PLAYER_OPTIONAL_STRING_ARRAY_FIELDS,
+    );
+    copy_item_arrays(value, &mut result, PROJECTION_PLAYER_ITEM_ARRAY_FIELDS);
+    Value::Object(result)
+}
+
+fn int_array(value: Option<&Value>) -> Value {
+    Value::Array(
+        value
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|item| item.is_number())
+            .cloned()
+            .collect(),
+    )
+}
+
+fn string_array(value: Option<&Value>) -> Value {
+    Value::Array(
+        value
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(|item| Value::String(item.into()))
+            .collect(),
+    )
+}
+
+fn copy_required_strings(
+    source: &Value,
+    target: &mut Map<String, Value>,
+    fields: &[ProjectionField],
+) {
+    for field in fields {
+        let value = source
+            .get(field.wire)
+            .and_then(Value::as_str)
+            .map_or(Value::Null, |value| Value::String(value.into()));
+        target.insert(field.output.into(), value);
+    }
+}
+
+fn copy_optional_strings(
+    source: &Value,
+    target: &mut Map<String, Value>,
+    fields: &[ProjectionField],
+) {
+    for field in fields {
+        if let Some(value) = source.get(field.wire).and_then(Value::as_str) {
+            target.insert(field.output.into(), Value::String(value.into()));
         }
-        Value::Array(items) => {
-            for child in items {
-                remove_volatile(child);
-            }
+    }
+}
+
+fn copy_optional_numbers(
+    source: &Value,
+    target: &mut Map<String, Value>,
+    fields: &[ProjectionField],
+) {
+    for field in fields {
+        if let Some(value) = source.get(field.wire).filter(|value| value.is_number()) {
+            target.insert(field.output.into(), value.clone());
         }
-        _ => {}
+    }
+}
+
+fn copy_required_int_arrays(
+    source: &Value,
+    target: &mut Map<String, Value>,
+    fields: &[ProjectionField],
+) {
+    for field in fields {
+        target.insert(field.output.into(), int_array(source.get(field.wire)));
+    }
+}
+
+fn copy_optional_int_arrays(
+    source: &Value,
+    target: &mut Map<String, Value>,
+    fields: &[ProjectionField],
+) {
+    for field in fields {
+        if source.get(field.wire).is_some_and(Value::is_array) {
+            target.insert(field.output.into(), int_array(source.get(field.wire)));
+        }
+    }
+}
+
+fn copy_optional_string_arrays(
+    source: &Value,
+    target: &mut Map<String, Value>,
+    fields: &[ProjectionField],
+) {
+    for field in fields {
+        if source.get(field.wire).is_some_and(Value::is_array) {
+            target.insert(field.output.into(), string_array(source.get(field.wire)));
+        }
+    }
+}
+
+fn copy_optional_booleans(
+    source: &Value,
+    target: &mut Map<String, Value>,
+    fields: &[ProjectionField],
+) {
+    for field in fields {
+        if let Some(value) = source.get(field.wire).and_then(Value::as_bool) {
+            target.insert(field.output.into(), Value::Bool(value));
+        }
+    }
+}
+
+fn copy_presence_booleans(
+    source: &Value,
+    target: &mut Map<String, Value>,
+    fields: &[ProjectionField],
+) {
+    for field in fields {
+        target.insert(
+            field.output.into(),
+            Value::Bool(source.get(field.wire).is_some_and(Value::is_array)),
+        );
+    }
+}
+
+fn copy_item_arrays(source: &Value, target: &mut Map<String, Value>, fields: &[ProjectionField]) {
+    for field in fields {
+        target.insert(field.output.into(), item_array(source.get(field.wire)));
+    }
+}
+
+fn copy_optional_items(
+    source: &Value,
+    target: &mut Map<String, Value>,
+    fields: &[ProjectionField],
+) {
+    for field in fields {
+        if let Some(value) = source.get(field.wire).filter(|value| value.is_object()) {
+            target.insert(field.output.into(), item_projection(value));
+        }
+    }
+}
+
+fn copy_optional_combatants(
+    source: &Value,
+    target: &mut Map<String, Value>,
+    fields: &[ProjectionField],
+) {
+    for field in fields {
+        if let Some(value) = source.get(field.wire).filter(|value| value.is_object()) {
+            target.insert(field.output.into(), combatant_projection(value));
+        }
+    }
+}
+
+fn copy_enemy_arrays(source: &Value, target: &mut Map<String, Value>, fields: &[ProjectionField]) {
+    for field in fields {
+        target.insert(field.output.into(), enemy_array(source.get(field.wire)));
+    }
+}
+
+fn copy_optional_players(
+    source: &Value,
+    target: &mut Map<String, Value>,
+    fields: &[ProjectionField],
+) {
+    for field in fields {
+        if let Some(value) = source.get(field.wire).filter(|value| value.is_object()) {
+            target.insert(field.output.into(), player_projection(value));
+        }
+    }
+}
+
+fn copy_required_string_arrays(
+    source: &Value,
+    target: &mut Map<String, Value>,
+    fields: &[ProjectionField],
+) {
+    for field in fields {
+        target.insert(field.output.into(), string_array(source.get(field.wire)));
     }
 }
 
@@ -798,8 +1196,8 @@ fn validate_health_expecting(
                 .collect::<Vec<_>>()
                 .join(", ");
             return Err(format!(
-                "bad_request: host does not advertise '{}' (supported: {})",
-                action, supported
+                "{}: host does not advertise '{}' (supported: {})",
+                REJECTION_BAD_REQUEST, action, supported
             )
             .into());
         }
@@ -817,8 +1215,8 @@ fn validate_health_expecting(
                 .collect::<Vec<_>>()
                 .join(", ");
             return Err(format!(
-                "bad_request: host does not advertise cheat '{}' (supported: {})",
-                cheat, supported
+                "{}: host does not advertise cheat '{}' (supported: {})",
+                REJECTION_BAD_REQUEST, cheat, supported
             )
             .into());
         }
@@ -880,7 +1278,7 @@ fn parse_bridge_value(value: Value) -> CliResult<Value> {
             .unwrap_or("unknown");
         let msg = value.get("msg").and_then(Value::as_str).unwrap_or("");
         let rendered = format!("{}: {}", err, msg);
-        return if err == "not_ready" {
+        return if err == REJECTION_NOT_READY {
             Err(CliError::transient(rendered))
         } else {
             Err(CliError::fatal(rendered))
@@ -1221,13 +1619,216 @@ mod tests {
     }
 
     #[test]
-    fn replay_fingerprint_ignores_revision_and_run_identity_only() {
-        let a = json!({"phase":"map", "rev":1, "runId":"source", "hp":[50, 80]});
-        let b = json!({"phase":"map", "rev":900, "runId":"replay", "hp":[50, 80]});
-        let changed = json!({"phase":"map", "rev":1, "runId":"source", "hp":[49, 80]});
+    fn replay_fingerprint_uses_the_named_consumer_projection() {
+        let a = json!({
+            "phase":"combat", "rev":1, "runId":"source", "decorativeFrame":"a",
+            "side":"player", "hand":[{"idx":0, "model":"STRIKE_R", "playable":true}],
+            "legal":["play", "end-turn"]
+        });
+        let extension_changed = json!({
+            "phase":"combat", "rev":900, "runId":"replay", "decorativeFrame":"b",
+            "side":"player", "hand":[{"idx":0, "model":"STRIKE_R", "playable":true}],
+            "legal":["play", "end-turn"]
+        });
+        let card_changed = json!({
+            "phase":"combat", "rev":1, "runId":"source", "decorativeFrame":"a",
+            "side":"player", "hand":[{"idx":0, "model":"BASH", "playable":true}],
+            "legal":["play", "end-turn"]
+        });
+        let typed_state_changed = json!({
+            "phase":"combat", "rev":1, "runId":"source", "decorativeFrame":"a",
+            "side":"player", "hand":[{"idx":0, "model":"STRIKE_R", "playable":false}],
+            "legal":["play", "end-turn"]
+        });
 
-        assert_eq!(state_fingerprint(&a), state_fingerprint(&b));
-        assert_ne!(state_fingerprint(&a), state_fingerprint(&changed));
+        assert_eq!(state_fingerprint(&a), state_fingerprint(&extension_changed));
+        assert_ne!(
+            state_fingerprint(&a),
+            state_fingerprint(&typed_state_changed)
+        );
+        assert_ne!(state_fingerprint(&a), state_fingerprint(&card_changed));
+    }
+
+    #[test]
+    fn replay_fingerprint_tracks_target_identities_and_coordinates() {
+        let original = json!({
+            "phase":"combat", "act":1, "current":[2,3],
+            "next":[{"idx":0,"id":"PATH_A","col":3,"row":4,"type":"monster"}],
+            "hand":[{"idx":0,"model":"STRIKE_R","playable":true}],
+            "relics":[{"idx":0,"model":"VAJRA"}],
+            "enemies":[{"id":7,"model":"CULTIST","hp":[30,40],"block":0,"alive":true}],
+            "legal":["play","end-turn"]
+        });
+        let mut changed = original.clone();
+
+        changed["next"][0]["col"] = json!(4);
+        assert_ne!(state_fingerprint(&original), state_fingerprint(&changed));
+        changed = original.clone();
+        changed["hand"][0]["model"] = json!("BASH");
+        assert_ne!(state_fingerprint(&original), state_fingerprint(&changed));
+        changed = original.clone();
+        changed["relics"][0]["model"] = json!("ANCHOR");
+        assert_ne!(state_fingerprint(&original), state_fingerprint(&changed));
+        changed = original.clone();
+        changed["enemies"][0]["id"] = json!(8);
+        assert_ne!(state_fingerprint(&original), state_fingerprint(&changed));
+    }
+
+    #[test]
+    fn replay_projection_uses_generated_item_model_wire_key() {
+        let mut snapshot = json!({ "phase": "combat", "hand": [{}] });
+        snapshot["hand"][0]
+            .as_object_mut()
+            .unwrap()
+            .insert(PROJECTION_ITEM_MODEL.wire.into(), json!("STRIKE_R"));
+
+        let projected = consumer_projection(&snapshot);
+
+        assert_eq!(
+            projected["hand"][0].get(PROJECTION_ITEM_MODEL.output),
+            Some(&json!("STRIKE_R"))
+        );
+    }
+
+    #[test]
+    fn replay_fingerprint_tracks_hp_gold_and_combat_resources() {
+        let original = json!({
+            "phase":"combat", "gold":100,
+            "you":{"hp":[60,80],"block":5,"energy":[2,3],"stars":1},
+            "player":{"hp":[60,80],"gold":100,"potions":[]},
+            "enemies":[{"id":7,"model":"CULTIST","hp":[30,40],"block":0,"alive":true}],
+            "legal":["play","end-turn"]
+        });
+        let mut changed = original.clone();
+
+        changed["you"]["hp"][0] = json!(59);
+        assert_ne!(state_fingerprint(&original), state_fingerprint(&changed));
+        changed = original.clone();
+        changed["you"]["energy"][0] = json!(1);
+        assert_ne!(state_fingerprint(&original), state_fingerprint(&changed));
+        changed = original.clone();
+        changed["player"]["gold"] = json!(99);
+        assert_ne!(state_fingerprint(&original), state_fingerprint(&changed));
+        changed = original.clone();
+        changed["enemies"][0]["hp"][0] = json!(29);
+        assert_ne!(state_fingerprint(&original), state_fingerprint(&changed));
+    }
+
+    #[test]
+    fn replay_fingerprint_matches_the_typed_host_fixture() {
+        let snapshot = json!({
+            "phase":"combat", "act":1, "current":[2,3], "gold":100,
+            "semanticState":["pile:draw:STRIKE_R"],
+            "selected":["STRIKE_R"], "side":"player",
+            "next":[{"idx":0,"id":"PATH_A","col":3,"row":4,"type":"monster"}],
+            "hand":[{
+                "idx":0,"model":"STRIKE_R","playable":true,"selected":false,
+                "semanticState":["cost:1"]
+            }],
+            "relics":[{"idx":0,"model":"VAJRA"}],
+            "you":{
+                "hp":[60,80],"block":5,"energy":[2,3],"stars":1,
+                "semanticState":["power:STRENGTH:1"]
+            },
+            "enemies":[{
+                "id":7,"model":"CULTIST","hp":[30,40],"block":0,"alive":true,
+                "semanticState":["intent:attack:6:1"]
+            }],
+            "player":{
+                "hp":[60,80],"gold":100,"potions":[],
+                "semanticState":["deck:STRIKE_R"]
+            },
+            "legal":["play","end-turn"]
+        });
+
+        assert_eq!(state_fingerprint(&snapshot), "d4c312db8769179e");
+    }
+
+    #[test]
+    fn replay_fingerprint_tracks_action_target_grammar() {
+        let original = json!({
+            "phase":"combat", "id":"BIG_FISH", "turn":2,
+            "hand":[{
+                "idx":0,"model":"BASH","selector":"BASH+","slot":1,
+                "target":"anyenemy"
+            }],
+            "legal":["play","end-turn"]
+        });
+        let mut changed = original.clone();
+
+        changed["turn"] = json!(3);
+        assert_ne!(state_fingerprint(&original), state_fingerprint(&changed));
+        changed = original.clone();
+        changed["id"] = json!("SCRAP_OOZE");
+        assert_ne!(state_fingerprint(&original), state_fingerprint(&changed));
+        changed = original.clone();
+        changed["hand"][0]["selector"] = json!("BASH");
+        assert_ne!(state_fingerprint(&original), state_fingerprint(&changed));
+        changed = original.clone();
+        changed["hand"][0]["slot"] = json!(2);
+        assert_ne!(state_fingerprint(&original), state_fingerprint(&changed));
+        changed = original.clone();
+        changed["hand"][0]["target"] = json!("self");
+        assert_ne!(state_fingerprint(&original), state_fingerprint(&changed));
+    }
+
+    #[test]
+    fn replay_game_over_fingerprint_matches_the_typed_host_fixture() {
+        let snapshot = json!({
+            "phase":"game_over", "outcome":"victory", "hp":[20,80],
+            "gold":100
+        });
+
+        assert_eq!(state_fingerprint(&snapshot), "c02643081d2c619c");
+    }
+
+    #[test]
+    fn replay_fingerprint_tracks_typed_semantic_state() {
+        let original = json!({
+            "phase":"combat", "semanticState":["pile:draw:BASH+"],
+            "selected":["BASH+"],
+            "hand":[{
+                "idx":0, "model":"BASH", "selector":"BASH+",
+                "selected":false, "semanticState":["cost:2"]
+            }],
+            "player":{
+                "hp":[60,80], "gold":100, "potions":[],
+                "semanticState":["deck:BASH+"]
+            },
+            "you":{
+                "hp":[60,80], "energy":[2,3],
+                "semanticState":["power:STRENGTH:1"]
+            },
+            "enemies":[{
+                "id":7, "model":"CULTIST", "hp":[30,40],
+                "semanticState":["intent:attack:6:1"]
+            }],
+            "legal":["play","end-turn"]
+        });
+        let mut presentation_changed = original.clone();
+        presentation_changed["decorativeFrame"] = json!("plain");
+        presentation_changed["hand"][0]["title"] = json!("localized title");
+        presentation_changed["player"]["deckDescription"] = json!("localized deck");
+        presentation_changed["you"]["powerDescription"] = json!("localized power");
+        presentation_changed["enemies"][0]["title"] = json!("localized enemy");
+
+        assert_eq!(
+            state_fingerprint(&original),
+            state_fingerprint(&presentation_changed)
+        );
+
+        for (pointer, value) in [
+            ("/semanticState/0", json!("pile:draw:STRIKE_R")),
+            ("/hand/0/semanticState/0", json!("cost:1")),
+            ("/player/semanticState/0", json!("deck:STRIKE_R")),
+            ("/you/semanticState/0", json!("power:WEAK:1")),
+            ("/enemies/0/semanticState/0", json!("intent:attack:12:1")),
+            ("/hand/0/selected", json!(true)),
+        ] {
+            let mut changed = original.clone();
+            *changed.pointer_mut(pointer).unwrap() = value;
+            assert_ne!(state_fingerprint(&original), state_fingerprint(&changed));
+        }
     }
 
     #[test]
@@ -1411,6 +2012,78 @@ mod tests {
     }
 
     #[test]
+    fn cheat_optional_boolean_is_mapped_from_the_generated_shape() {
+        let args = cheat_args("card", &strings(&["WHIRLWIND", "true"])).unwrap();
+
+        assert_eq!(
+            args,
+            json!({ "name": "card", "id": "WHIRLWIND", "upgraded": true })
+        );
+    }
+
+    #[test]
+    fn known_cheat_cardinality_is_enforced_from_the_generated_shape() {
+        let missing = cheat_args("goto", &strings(&["3"])).unwrap_err();
+        let extra = cheat_args("heal", &strings(&["surplus"])).unwrap_err();
+
+        assert!(missing.contains("expects 2 arguments"), "{missing}");
+        assert!(extra.contains("expects 0 arguments"), "{extra}");
+    }
+
+    #[test]
+    fn generated_protocol_constants_match_the_checked_artifact() {
+        let artifact: Value = serde_json::from_str(include_str!("../../protocol.json")).unwrap();
+        let faults = FAULT_EVENT_TOKENS
+            .iter()
+            .map(|(name, value)| ((*name).to_string(), json!(value)))
+            .collect::<serde_json::Map<_, _>>();
+        let cheats = CHEAT_ARGUMENT_SHAPES
+            .iter()
+            .map(|shape| {
+                let arguments = shape
+                    .arguments
+                    .iter()
+                    .map(|argument| {
+                        let kind = match argument.kind {
+                            ProtocolArgumentKind::Boolean => "boolean",
+                            ProtocolArgumentKind::Integer => "integer",
+                            ProtocolArgumentKind::String => "string",
+                        };
+                        let mut value = json!({ "name": argument.name, "type": kind });
+                        if argument.optional {
+                            value["optional"] = json!(true);
+                        }
+                        value
+                    })
+                    .collect::<Vec<_>>();
+                json!({ "name": shape.name, "arguments": arguments })
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(artifact["protocolVersion"], PROTOCOL_VERSION);
+        assert_eq!(artifact["rejectionCodes"], json!(REJECTION_CODES));
+        assert_eq!(artifact["phases"], json!(PHASES));
+        let outcomes = artifact["settlementOutcomes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(SettlementOutcome::from_value)
+            .collect::<Option<Vec<_>>>()
+            .unwrap();
+        assert_eq!(
+            outcomes,
+            vec![
+                SettlementOutcome::Settled,
+                SettlementOutcome::NextDecision,
+                SettlementOutcome::Fault,
+                SettlementOutcome::Timeout,
+            ]
+        );
+        assert_eq!(artifact["faultEventTokens"], Value::Object(faults));
+        assert_eq!(artifact["cheatArgumentShapes"], json!(cheats));
+    }
+
+    #[test]
     fn cheat_card_upgraded_potion_and_relic_map_id() {
         let upgraded = cheat_args("card-upgraded", &strings(&["WHIRLWIND"])).unwrap();
         let potion = cheat_args("potion", &strings(&["FOUL_POTION"])).unwrap();
@@ -1453,9 +2126,9 @@ mod tests {
 
     #[test]
     fn unknown_cheat_passes_name_for_bridge_validation() {
-        let args = cheat_args("heal", &[]).unwrap();
+        let args = cheat_args("future-cheat", &[]).unwrap();
 
-        assert_eq!(args, json!({ "name": "heal" }));
+        assert_eq!(args, json!({ "name": "future-cheat" }));
     }
 
     #[test]

@@ -79,11 +79,11 @@ internal static class Screens
     // model's list stays empty; headless it's the other way around.
     public static IReadOnlyList<RestSiteOption>? RestOptions() =>
         NRestSiteRoom.Instance?.Options
-        ?? (RunManager.Instance?.DebugOnlyGetState()?.CurrentRoom as RestSiteRoom)?.Options;
+        ?? (LocalRunContext.Current?.State.CurrentRoom as RestSiteRoom)?.Options;
 
     // The event model both the snapshot and the option verb act on.
     public static EventModel? CurrentEvent() =>
-        (RunManager.Instance?.DebugOnlyGetState()?.CurrentRoom as EventRoom)?.LocalMutableEvent;
+        (LocalRunContext.Current?.State.CurrentRoom as EventRoom)?.LocalMutableEvent;
 
     public static MerchantInventory? ShopInventory(RunState? rs) =>
         (rs?.CurrentRoom as MerchantRoom)?.GetLocalInventory();

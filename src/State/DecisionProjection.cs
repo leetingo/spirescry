@@ -1,5 +1,3 @@
-using System.Text.Json.Nodes;
-
 namespace Spirescry.State;
 
 // The snapshot is the source of truth for decision availability. Legal verbs
@@ -7,60 +5,49 @@ namespace Spirescry.State;
 // rather than from a second phase-to-verb table that can drift from reality.
 internal static class DecisionProjection
 {
-    internal static string CardTextKey(
-        string model, int upgradeLevel, string? enchantment, string? affliction) =>
-        string.Concat(
-            model,
-            "+", upgradeLevel,
-            enchantment is null ? "" : "@" + enchantment,
-            affliction is null ? "" : "!" + affliction);
-
-    public static string[] LegalVerbs(JsonObject snapshot, bool runActive)
+    public static string[] LegalVerbs(SnapshotContract snapshot, bool runActive)
     {
-        var phase = snapshot["phase"]?.GetValue<string>() ?? "unknown";
         var legal = new List<string>();
         void Add(string verb)
         {
             if (!legal.Contains(verb, StringComparer.Ordinal)) legal.Add(verb);
         }
 
-        switch (phase)
+        switch (snapshot.Phase)
         {
-            case "main_menu":
+            case Phase.MainMenu:
                 if (!runActive) Add("new-run");
                 break;
-            case "map":
-                if (HasItems(snapshot, "next")) Add("map-move");
+            case Phase.Map:
+                if (snapshot.Next.Length > 0) Add("map-move");
                 break;
-            case "combat":
-                if (snapshot["side"]?.GetValue<string>() == "player"
-                    && snapshot["actionsDisabled"]?.GetValue<bool>() != true)
+            case Phase.Combat:
+                if (snapshot.Side == "player" && snapshot.ActionsDisabled != true)
                 {
-                    if (Any(snapshot, "hand", card => card["playable"]?.GetValue<bool>() == true))
+                    if (snapshot.Hand.Any(card => card.Playable == true))
                         Add("play");
                     Add("end-turn");
-                    if (HasItems(snapshot, "potions")) Add("potion-use");
+                    if (snapshot.Potions.Length > 0) Add("potion-use");
                 }
                 break;
-            case "event":
-                if (snapshot["available"]?.GetValue<bool>() == false) break;
-                if (Any(snapshot, "options", option =>
-                    option["locked"]?.GetValue<bool>() != true
-                    && option["chosen"]?.GetValue<bool>() != true))
+            case Phase.Event:
+                if (snapshot.Available == false) break;
+                if (snapshot.Options.Any(option =>
+                    option.Locked != true && option.Chosen != true))
                     Add("option");
                 Add("proceed");
                 break;
-            case "rest_site":
-                if (Any(snapshot, "options", option => option["enabled"]?.GetValue<bool>() == true))
+            case Phase.RestSite:
+                if (snapshot.Options.Any(option => option.Enabled == true))
                     Add("option");
-                if (snapshot["proceedAvailable"]?.GetValue<bool>() == true) Add("proceed");
+                if (snapshot.ProceedAvailable == true) Add("proceed");
                 break;
-            case "shop":
+            case Phase.Shop:
                 if (ShopHasPurchase(snapshot)) Add("buy");
-                if (snapshot["available"]?.GetValue<bool>() != false) Add("leave");
+                if (snapshot.Available != false) Add("leave");
                 break;
-            case "treasure":
-                if (HasItems(snapshot, "relics"))
+            case Phase.Treasure:
+                if (snapshot.Relics.Length > 0)
                 {
                     Add("pick-relic");
                     Add("skip");
@@ -70,44 +57,44 @@ internal static class DecisionProjection
                 // for a rescry; GUI: clicks the chest). Without this the
                 // opening step is never advertised and an agent that only
                 // fires legal verbs can't reach the relic at all.
-                else if (snapshot["chestOpened"]?.GetValue<bool>() == false)
+                else if (snapshot.ChestOpened == false)
                     Add("pick-relic");
-                if (snapshot["proceedAvailable"]?.GetValue<bool>() == true) Add("proceed");
+                if (snapshot.ProceedAvailable == true) Add("proceed");
                 break;
-            case "rewards":
-                if (snapshot["available"]?.GetValue<bool>() == false) break;
-                if (HasItems(snapshot, "rewards")) Add("pick-reward");
+            case Phase.Rewards:
+                if (snapshot.Available == false) break;
+                if (snapshot.Rewards.Length > 0) Add("pick-reward");
                 Add("proceed");
                 break;
-            case "card_reward":
-                if (HasItems(snapshot, "cards")) Add("pick-card");
-                if (HasItems(snapshot, "alternatives")) Add("skip");
+            case Phase.CardReward:
+                if (snapshot.Cards.Length > 0) Add("pick-card");
+                if (snapshot.Alternatives.Length > 0) Add("skip");
                 break;
-            case "relic_reward":
-                if (HasItems(snapshot, "relics"))
+            case Phase.RelicReward:
+                if (snapshot.Relics.Length > 0)
                 {
                     Add("pick-relic");
                     Add("skip");
                 }
                 break;
-            case "card_select":
-                if (HasItems(snapshot, "cards")) Add("pick-card");
-                if (snapshot["confirmable"]?.GetValue<bool>() == true) Add("confirm");
-                if (snapshot["cancelable"]?.GetValue<bool>() == true) Add("skip");
+            case Phase.CardSelect:
+                if (snapshot.Cards.Length > 0) Add("pick-card");
+                if (snapshot.Confirmable == true) Add("confirm");
+                if (snapshot.Cancelable == true) Add("skip");
                 break;
-            case "hand_select":
-                if (HasItems(snapshot, "cards")) Add("pick-card");
-                if (snapshot["confirmable"]?.GetValue<bool>() == true) Add("confirm");
+            case Phase.HandSelect:
+                if (snapshot.Cards.Length > 0) Add("pick-card");
+                if (snapshot.Confirmable == true) Add("confirm");
                 break;
-            case "bundle_select":
-                if (HasItems(snapshot, "bundles")) Add("pick-card");
-                if (snapshot["confirmable"]?.GetValue<bool>() == true) Add("confirm");
-                if (snapshot["cancelable"]?.GetValue<bool>() == true) Add("skip");
+            case Phase.BundleSelect:
+                if (snapshot.Bundles.Length > 0) Add("pick-card");
+                if (snapshot.Confirmable == true) Add("confirm");
+                if (snapshot.Cancelable == true) Add("skip");
                 break;
-            case "crystal_sphere":
-                if (snapshot["available"]?.GetValue<bool>() != false)
+            case Phase.CrystalSphere:
+                if (snapshot.Available != false)
                 {
-                    if (Any(snapshot, "cells", cell => cell["hidden"]?.GetValue<bool>() == true))
+                    if (snapshot.Cells.Any(cell => cell.Hidden == true))
                         Add("map-move");
                     Add("option");
                     Add("proceed");
@@ -123,27 +110,17 @@ internal static class DecisionProjection
         return legal.ToArray();
     }
 
-    private static bool HasItems(JsonObject snapshot, string property) =>
-        snapshot[property] is JsonArray { Count: > 0 };
+    private static int VisiblePotionCount(SnapshotContract snapshot) =>
+        snapshot.HasTopLevelPotions
+            ? snapshot.Potions.Length
+            : snapshot.Player?.Potions.Length ?? 0;
 
-    private static bool Any(JsonObject snapshot, string property, Func<JsonObject, bool> predicate) =>
-        snapshot[property] is JsonArray items
-        && items.OfType<JsonObject>().Any(predicate);
-
-    private static int VisiblePotionCount(JsonObject snapshot)
+    private static bool ShopHasPurchase(SnapshotContract snapshot)
     {
-        if (snapshot["potions"] is JsonArray direct) return direct.Count;
-        if (snapshot["player"] is JsonObject player
-            && player["potions"] is JsonArray nested) return nested.Count;
-        return 0;
-    }
-
-    private static bool ShopHasPurchase(JsonObject snapshot)
-    {
-        foreach (var key in new[] { "cards", "colorless", "relics", "potions" })
-            if (Any(snapshot, key, item => item["purchasable"]?.GetValue<bool>() == true))
-                return true;
-        return snapshot["cardRemoval"] is JsonObject removal
-            && removal["purchasable"]?.GetValue<bool>() == true;
+        return snapshot.Cards.Any(item => item.Purchasable == true)
+            || snapshot.Colorless.Any(item => item.Purchasable == true)
+            || snapshot.Relics.Any(item => item.Purchasable == true)
+            || snapshot.Potions.Any(item => item.Purchasable == true)
+            || snapshot.CardRemoval?.Purchasable == true;
     }
 }

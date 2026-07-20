@@ -3,6 +3,7 @@ using Godot;
 using MegaCrit.Sts2.Core.Logging;
 using MegaCrit.Sts2.Core.Modding;
 using Spirescry.Bridge;
+using Spirescry.State;
 using Spirescry.Threading;
 
 namespace Spirescry;
@@ -16,9 +17,9 @@ public static class Mod
     public const string Id = "spirescry";
     public const string Version = "0.1.0";
 
-    // Bumped whenever the bridge's request/response contract changes
-    // shape — the CLI's detector for a host it doesn't understand.
-    public const int ProtocolVersion = 2;
+    // Compatibility name used by /health; ProtocolVocabulary owns the value
+    // bumped whenever the bridge request/response contract changes shape.
+    public const int ProtocolVersion = ProtocolVocabulary.ProtocolVersion;
 
     // The short git hash build.sh stamps via -p:SourceRevisionId (the
     // SDK appends it to InformationalVersion after a '+'). The stamp's
@@ -90,6 +91,7 @@ internal static class Boot
     {
         if (_started) return;
         _started = true;
+        DecisionSurface.UseGui();
 
         // SceneTree.process_frame fires every frame regardless of pause
         // state and is safe to subscribe at mod-init time.

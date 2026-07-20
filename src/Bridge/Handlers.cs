@@ -47,7 +47,7 @@ public static class Handlers
             version = Mod.Version,
             buildHash = Mod.BuildHash,
             protocolVersion = Mod.ProtocolVersion,
-            capabilities = new { verbs = Dispatcher.Verbs, cheats = Dispatcher.Cheats },
+            capabilities = ProtocolCapabilities.Create(Dispatcher.Verbs),
             snapshot.phase,
             snapshot.rev,
             snapshot.runId,
@@ -81,13 +81,12 @@ public static class Handlers
         {
             var runId = Signals.RefreshRunIdentity();
             var snapshot = Snapshotter.ForCurrentPhase(compact, decision, knownCards ?? []);
-            var node = JsonSerializer.SerializeToNode(snapshot)!.AsObject();
             var revision = Signals.Revision;
-            node["rev"] = revision;
-            node["runId"] = runId;
+            snapshot.Revision = revision;
+            snapshot.RunId = runId;
             if (decision)
-                node["legal"] = JsonSerializer.SerializeToNode(
-                    DecisionProjection.LegalVerbs(node, runId != "none"));
+                snapshot.Legal = DecisionProjection.LegalVerbs(snapshot, runId != "none");
+            var node = snapshot.ToJsonObject();
             if (since >= 0)
             {
                 node["changed"] = revision > since;
@@ -179,7 +178,7 @@ public static class Handlers
         var result = await MainThreadPump.Instance!.Run(() =>
         {
             var runId = Signals.RefreshRunIdentity();
-            var phaseBefore = PhaseDetector.Current().AsString();
+            var phaseBefore = PhaseDetector.Current();
             var tickBefore = Signals.TickCount;
             if (ifRun is not null && ifRun != runId)
                 return (dispatch: DispatchResult.Reject(RejectionCodes.ExternalChange,
@@ -236,75 +235,34 @@ public static class Handlers
         string action,
         long startedRev,
         long acceptedRev,
-        string phaseBefore,
+        Phase phaseBefore,
         long acceptedTick,
         int timeoutMs,
         long? logEntryId)
     {
-        var deadline = DateTime.UtcNow.AddMilliseconds(timeoutMs);
-        string? candidateOutcome = null;
-        string? candidateState = null;
-        long candidateTick = acceptedTick;
-        var stableFrames = 0;
-        while (true)
-        {
-            var probe = await MainThreadPump.Instance!.Run(FollowProbe.Capture);
-            var outcome = FollowProbe.CandidateOutcome(probe, phaseBefore, acceptedRev);
-            if (outcome is not null)
-            {
-                if (probe.Headless)
-                    return FollowResponse(
-                        action, startedRev, acceptedRev, outcome, probe, logEntryId);
-
-                if (outcome == candidateOutcome
-                    && probe.StateKey == candidateState
-                    && probe.Tick > candidateTick)
-                    stableFrames++;
-                else
-                    stableFrames = 1;
-                candidateOutcome = outcome;
-                candidateState = probe.StateKey;
-                candidateTick = probe.Tick;
-
-                // A GUI click or reflected callback may enqueue its real
-                // work on a later frame without returning a Task. Require
-                // the same quiet/decision state across three distinct
-                // frames before claiming that follow reached a boundary.
-                if (stableFrames >= 3)
-                    return FollowResponse(
-                        action, startedRev, acceptedRev, candidateOutcome, probe, logEntryId);
-            }
-            else
-            {
-                candidateOutcome = null;
-                candidateState = null;
-                stableFrames = 0;
-            }
-
-            var remaining = (int)Math.Max(0, (deadline - DateTime.UtcNow).TotalMilliseconds);
-            if (remaining == 0)
-                return FollowResponse(
-                    action, startedRev, acceptedRev, "timeout", probe, logEntryId);
-            if (!probe.Headless && outcome is not null)
-                await Signals.WaitForTick(probe.Tick, remaining);
-            else
-                await Signals.WaitForWorkChange(probe.WorkRev, remaining);
-        }
+        var result = await Settlement.Current.Follow(new SettlementRequest(
+            phaseBefore,
+            startedRev,
+            acceptedRev,
+            acceptedTick,
+            timeoutMs));
+        return FollowResponse(
+            action, startedRev, acceptedRev, result, logEntryId);
     }
 
     private static Response FollowResponse(
         string action,
         long startedRev,
         long acceptedRev,
-        string outcome,
-        FollowProbe probe,
+        SettlementResult result,
         long? logEntryId)
     {
+        var outcome = result.Outcome;
+        var probe = result.Probe;
         // Engine-side faults between acceptance and settlement: an outcome
-        // of "settled" only says tracked work went quiet, and the engine
-        // logs-and-swallows exceptions inside its own task chains — a verb
-        // whose effect half-executed would otherwise read as clean.
-        var errors = Signals.ErrorsSince(startedRev);
+        // says what the one settlement module observed; retain the detailed
+        // tokens so callers and the run log can attribute the engine failure.
+        var errors = probe.Errors.ToArray();
         if (logEntryId is { } id)
             RunLog.RecordOutcome(id, outcome, probe.Observation, errors);
         var node = new JsonObject
@@ -313,105 +271,15 @@ public static class Handlers
             ["enqueued"] = action,
             ["startedRev"] = startedRev,
             ["acceptedRev"] = acceptedRev,
-            ["rev"] = probe.Rev,
+            ["rev"] = probe.Revision,
             ["runId"] = probe.RunId,
-            ["settled"] = outcome != "timeout",
-            ["outcome"] = outcome,
+            ["settled"] = outcome.ReachedBoundary(),
+            ["outcome"] = outcome.WireName(),
             ["errors"] = JsonSerializer.SerializeToNode(errors),
             ["events"] = JsonSerializer.SerializeToNode(Signals.EventsSince(startedRev)),
-            ["obs"] = probe.Observation,
+            ["obs"] = probe.Observation.ToJsonObject(),
         };
         return new Response { Body = node.ToJsonString() };
-    }
-
-    private sealed record FollowProbe(
-        long Rev,
-        long WorkRev,
-        long Tick,
-        string RunId,
-        string Phase,
-        bool Headless,
-        bool Busy,
-        bool OptionExecuting,
-        bool HasDecision,
-        string StateKey,
-        JsonObject Observation)
-    {
-        public static FollowProbe Capture()
-        {
-            var runId = Signals.RefreshRunIdentity();
-            var snapshot = Snapshotter.ForCurrentPhase(
-                compact: false, decision: true, knownCardTexts: []);
-            var node = JsonSerializer.SerializeToNode(snapshot)!.AsObject();
-            var rev = Signals.Revision;
-            var workRev = Signals.WorkRevision;
-            node["rev"] = rev;
-            node["runId"] = runId;
-            var legal = DecisionProjection.LegalVerbs(node, runId != "none");
-            node["legal"] = JsonSerializer.SerializeToNode(legal);
-            var stateKey = node.ToJsonString();
-
-            var rm = MegaCrit.Sts2.Core.Runs.RunManager.Instance;
-            // An event option's task legitimately outlives a follow window
-            // when it awaits an embedded combat or a parked picker — the
-            // agent must act for it to ever complete, so those states must
-            // not read as busy (combat plays would time out; picker parks
-            // would never report next_decision). A pending option task
-            // outside both states is an engine continuation still
-            // executing (a delay between removing cards and granting the
-            // reward, say): THAT blocks settlement, so the response can't
-            // report a half-applied board with errors: []. Parked means a
-            // headless stand-in holds the choice (HeadlessState owns that
-            // list) or, in a GUI boot, a nested decision screen does.
-            var phaseString = node["phase"]?.GetValue<string>() ?? "unknown";
-            var parkedDecision = RunMode.IsHeadless
-                ? HeadlessState.HasParkedDecision
-                : IsNestedDecision(phaseString) || phaseString == "crystal_sphere";
-            var combatLive = MegaCrit.Sts2.Core.Combat.CombatManager.Instance
-                is { IsInProgress: true };
-            var pending = Signals.PendingSnapshot();
-            // A shared-event vote on a multiplayer client owes option
-            // work before any task exists — the resolution arrives by
-            // network message, possibly seconds later. The pending vote
-            // holds this verb's window open until the delivered tasks
-            // take over (the Tick sweep picks them up), so a late fault
-            // still lands in the response that caused it.
-            var optionWorkOwed = pending.EventOptions > 0
-                || Signals.SharedVotePending();
-            var eventOptionExecuting = optionWorkOwed
-                && !combatLive && !parkedDecision;
-            var busy = pending.FireAndForget > 0
-                || eventOptionExecuting
-                || rm?.ActionExecutor?.CurrentlyRunningAction is not null
-                || EngineQueues.All(rm).Any(queue => queue.depth > 0);
-            var hasDecision = legal.Any(verb => verb is not ("abandon" or "potion-discard"));
-            return new FollowProbe(
-                rev, workRev, Signals.TickCount, runId, phaseString, RunMode.IsHeadless,
-                busy, eventOptionExecuting, hasDecision, stateKey, node);
-        }
-
-        public static string? CandidateOutcome(
-            FollowProbe probe, string phaseBefore, long acceptedRev)
-        {
-            if (!probe.Busy) return "settled";
-            // A mid-flight option effect can flip the phase back to event
-            // before its continuation finishes (and before a late fault
-            // logs) — the page on screen is transient, not a decision to
-            // report. Wait for the task to park or complete.
-            if (probe.OptionExecuting) return null;
-            if (!probe.HasDecision) return null;
-            if (probe.Phase != phaseBefore || IsNestedDecision(probe.Phase))
-                return "next_decision";
-            // Some events page within the same coarse phase while the
-            // event Task remains parked on the next choice.
-            return probe.Phase == "event" && probe.Rev > acceptedRev
-                ? "next_decision"
-                : null;
-        }
-
-        public static bool IsNestedDecision(string phase) => phase is
-            "card_select" or "hand_select" or "bundle_select"
-            or "card_reward" or "relic_reward";
     }
 
     // The registry the cheats validate against, enumerable — sweeps drive

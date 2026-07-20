@@ -5,19 +5,27 @@
     <TargetFramework>net9.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
+    <DefineConstants>$(DefineConstants);CARD_GRAMMAR_ONLY</DefineConstants>
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Include="../../src/ProtocolVocabulary.cs" Link="ProtocolVocabulary.cs" />
+    <Compile Include="../../src/ProtocolCapabilities.cs" Link="ProtocolCapabilities.cs" />
     <Compile Include="../../src/Reflect.cs" Link="Reflect.cs" />
     <Compile Include="../../src/RejectionCodes.cs" Link="RejectionCodes.cs" />
-    <Compile Include="../../src/State/ResolutionGuards.cs" Link="ResolutionGuards.cs" />
+    <Compile Include="../../src/State/Settlement.cs" Link="Settlement.cs" />
     <Compile Include="../../src/State/RichText.cs" Link="RichText.cs" />
+    <Compile Include="../../src/State/CardSpecifier.cs" Link="CardSpecifier.cs" />
+    <Compile Include="../../src/State/CollectionSnapshot.cs" Link="CollectionSnapshot.cs" />
+    <Compile Include="../../src/State/ConsumerSemanticRead.cs" Link="ConsumerSemanticRead.cs" />
+    <Compile Include="../../src/State/SnapshotContract.cs" Link="SnapshotContract.cs" />
     <Compile Include="../../src/State/DecisionProjection.cs" Link="DecisionProjection.cs" />
     <Compile Include="../../src/State/ErrorEvents.cs" Link="ErrorEvents.cs" />
     <Compile Include="../../src/State/EngineLogCorrelation.cs" Link="EngineLogCorrelation.cs" />
     <Compile Include="../../src/State/RevisionJournal.cs" Link="RevisionJournal.cs" />
     <Compile Include="../../src/State/TaskFault.cs" Link="TaskFault.cs" />
     <Compile Include="../../headless/Host/FirstChanceFilter.cs" Link="FirstChanceFilter.cs" />
+    <Compile Include="../../headless/Host/HostPatchBatch.cs" Link="HostPatchBatch.cs" />
   </ItemGroup>
 
 </Project>

@@ -28,6 +28,18 @@ jobs:
       - name: Run C# unit tests
         run: dotnet run --project tests/UnitTests/UnitTests.csproj
 
+      - name: Check protocol artifact
+        run: bash tests/protocol_artifact_test.sh
+
+      - name: Run Python unit tests
+        run: |
+          python3 tests/protocol_contract_test.py
+          python3 tests/projection_schema_drift_test.py
+          python3 tests/world_walker_test.py
+          python3 tests/parity_settlement_test.py
+          python3 tests/e2e_settlement_test.py
+          python3 tests/build_identity_test.py
+
       - name: Run CLI unit tests
         run: cargo test --manifest-path cli/Cargo.toml
 

@@ -5,7 +5,7 @@ Run against either boot (host is fastest). Not part of ./build.sh verify —
 it takes minutes and mutates a throwaway run heavily; use it after engine
 updates or event-related changes.
 """
-import re, sys, time
+import re, sys
 from collections import Counter
 
 import bridge
@@ -13,93 +13,62 @@ import bridge
 run = bridge.run
 
 obs = lambda: run("obs")
+WORLD_CLAIMS = {
+    "claim_reward_tiles": False,
+    "claim_card_reward": False,
+    "claim_relic_reward": False,
+}
 
 def fresh_run(seed=None):
-    run("abandon", allow_fail=True)
-    time.sleep(1)
-    bridge.launch_run(
-        seed=seed, timeout=30, allow_first_failure=True)
-    run("proceed", allow_fail=True)
-    if bridge.wait_phase(
-            "map", timeout=20, raise_on_timeout=False) is None:
-        sys.exit("could not reach map for a fresh run")
-    run("cheat", "gold", "500", allow_fail=True)
-
-def ensure_map():
     d = obs()
-    if d["phase"] == "map":
-        return
-    # try the generic exits first, else nuke
-    for _ in range(4):
-        ph = obs()["phase"]
-        if ph == "map":
-            return
-        if ph in ("event", "rest_site", "treasure", "rewards"):
-            run("proceed", allow_fail=True)
-        elif ph == "shop":
-            run("leave", allow_fail=True)
-        elif ph in ("card_select", "bundle_select"):
-            run("pick-card", "0", allow_fail=True)
-            run("skip", allow_fail=True)
-        elif ph == "crystal_sphere":
-            run("proceed", allow_fail=True)
-        elif ph in ("combat", "hand_select", "card_reward", "relic_reward"):
-            break  # fresh run below
-        else:
-            break
-        time.sleep(0.5)
-    if obs()["phase"] != "map":
-        fresh_run()
+    if d.get("phase") != bridge.PHASE.MAIN_MENU:
+        run("abandon")
+        bridge.wait_phase(
+            bridge.PHASE.MAIN_MENU, after_rev=d["rev"])
+    bridge.launch_run(
+        seed=seed, timeout=30)
+    run("proceed")
+    if bridge.wait_phase(
+            bridge.PHASE.MAP, timeout=20, raise_on_timeout=False) is None:
+        sys.exit("could not reach map for a fresh run")
+    bridge.follow("cheat", "gold", "500")
 
-def drain(max_steps=30):
-    """Generically resolve whatever an option opened, all the way out.
-    Returns where it settled — map/main_menu/game_over — or 'stuck@…'."""
-    for _ in range(max_steps):
-        d = obs()
-        ph = d.get("phase")
-        if ph in ("map", "main_menu", "game_over"):
-            return ph
-        if ph == "event":
-            opts = [o for o in d.get("options", [])
-                    if not o.get("locked") and not o.get("chosen")]
-            if opts:
-                run("option", str(opts[0]["idx"]), allow_fail=True)
-            else:
-                run("proceed", allow_fail=True)
-        else:  # rewards, rest_site, treasure, crystal_sphere, …
-            error = bridge.resolve_transient_phase(d)
-            if error:
-                return f"stuck@{ph}:{error}"
-        time.sleep(0.4)
-    return f"stuck@{obs().get('phase')}"
+def walk_or_stuck(*wanted, **walk_options):
+    """Keep the sweep aggregating after one option wedges or times out."""
+    try:
+        return bridge.walk_world(
+            *wanted, **WORLD_CLAIMS, **walk_options)
+    except AssertionError as error:
+        return {"phase": f"stuck@{obs().get('phase')}:{str(error)[:120]}"}
 
 
-def settle_to_event_or_exit(max_steps=30):
-    """Resolve transient screens without choosing another event option."""
-    for _ in range(max_steps):
-        d = obs()
-        ph = d.get("phase")
-        if ph in ("event", "map", "main_menu", "game_over"):
-            return d
-        error = bridge.resolve_transient_phase(d)
-        if error:
-            return {"phase": f"stuck@{ph}:{error}"}
-        time.sleep(0.4)
-    return {"phase": f"stuck@{obs().get('phase')}"}
+def follow_option(idx, *wanted):
+    """Choose one option and continue from its settled observation."""
+    try:
+        settled = bridge.follow("option", str(idx), timeout_ms=4000)
+    except AssertionError as error:
+        return None, str(error)[:120]
+    return walk_or_stuck(*wanted, initial=settled), None
 
 
 def force(ev):
     """Force one event from a settled map; return its snapshot or None."""
-    ensure_map()
-    if "_err" in run("cheat", "event", ev, allow_fail=True):
-        return None
+    # Do not let a combat/picker or a previously explored option leak hp,
+    # deck, or one-shot state into the next forced event.
     d = obs()
-    for _ in range(10):  # engine boots mount the room over a few frames
-        if d.get("phase") != "map":
-            break
-        time.sleep(0.5)
+    if d.get("phase") != bridge.PHASE.MAP:
+        fresh_run()
         d = obs()
-    return d
+    before_rev = d["rev"]
+    forced = run("cheat", bridge.PHASE.EVENT, ev, allow_fail=True)
+    if "_err" in forced:
+        raise AssertionError(f"force event {ev}: {forced['_err']}")
+    mounted = bridge.wait_until(
+        lambda snapshot: snapshot.get("phase") != bridge.PHASE.MAP,
+        description=f"event {ev} to mount",
+        after_rev=before_rev,
+    )
+    return mounted
 
 
 def replay_event_path(ev, path):
@@ -112,16 +81,15 @@ def replay_event_path(ev, path):
     if d is None:
         return None, "REFORCE-FAIL"
     for idx in path:
-        if d.get("phase") != "event":
+        if d.get("phase") != bridge.PHASE.EVENT:
             return None, f"path {path} left event at {d.get('phase')}"
         opts = d.get("options", [])
         if idx >= len(opts) or opts[idx].get("locked"):
             return None, f"path {path} option {idx} unavailable"
-        result = run("option", str(idx), allow_fail=True)
-        if "_err" in result:
-            return None, f"path {path} option {idx} rejected: {result['_err'][:120]}"
-        time.sleep(0.4)
-        d = settle_to_event_or_exit()
+        d, error = follow_option(
+            idx, bridge.PHASE.EVENT, bridge.PHASE.MAP)
+        if error:
+            return None, f"path {path} option {idx} rejected: {error}"
     return d, None
 
 
@@ -148,7 +116,7 @@ def explore_all_event_options(ev):
         page, err = replay_event_path(ev, path)
         if err:
             return outcomes, clicked, locked, err
-        if page.get("phase") != "event":
+        if page.get("phase") != bridge.PHASE.EVENT:
             return outcomes, clicked, locked, f"path {path} ended at {page.get('phase')}"
         signature = page_signature(page)
         if signature in seen_pages:
@@ -164,17 +132,16 @@ def explore_all_event_options(ev):
             # Followed so the response carries `errors`: bridge.run fails
             # the sweep on any engine fault an option swallows — every
             # option click doubles as an engine_error noise regression.
-            result = run("option", str(idx), "--follow", "4000", allow_fail=True)
-            if "_err" in result:
+            after, error = follow_option(
+                idx, bridge.PHASE.EVENT, bridge.PHASE.MAP)
+            if error:
                 return outcomes, clicked, locked, (
-                    f"path {path} option {idx} rejected: {result['_err'][:120]}")
-            time.sleep(0.4)
+                    f"path {path} option {idx} rejected: {error}")
             clicked += 1
-            after = settle_to_event_or_exit()
-            if after.get("phase") == "event":
+            if after.get("phase") == bridge.PHASE.EVENT:
                 if page_signature(after) not in seen_pages:
                     queue.append(path + (idx,))
-                landed = drain()
+                landed = walk_or_stuck(bridge.PHASE.MAP)["phase"]
             else:
                 landed = after.get("phase")
             outcomes.append(f"{path + (idx,)}->{landed}")
@@ -188,14 +155,14 @@ def sweep(all_options=False):
     tests/e2e.py runs this as its event-coverage case."""
     # event list from the cheat's known-list error (needs map phase)
     fresh_run()
-    err = run("cheat", "event", "__LIST__", allow_fail=True).get("_err", "")
+    err = run("cheat", bridge.PHASE.EVENT, "__LIST__", allow_fail=True).get("_err", "")
     ids = sorted(set(err.split("known: ", 1)[1].rstrip(")").split(","))) if "known: " in err else []
     if not ids:
         sys.exit(f"could not enumerate events: {err[:200]}")
     print(f"{len(ids)} events to sweep"
           + (" (every option, drained)" if all_options else ""))
 
-    special_ok = {"bundle_select", "crystal_sphere", "card_select", "shop", "combat", "treasure", "rest_site"}
+    special_ok = {bridge.PHASE.BUNDLE_SELECT, bridge.PHASE.CRYSTAL_SPHERE, bridge.PHASE.CARD_SELECT, bridge.PHASE.SHOP, bridge.PHASE.COMBAT, bridge.PHASE.TREASURE, bridge.PHASE.REST_SITE}
     results = {}
     options_clicked = locked_skipped = 0
     for i, ev in enumerate(ids):
@@ -207,7 +174,7 @@ def sweep(all_options=False):
         if ph in special_ok:
             results[ev] = f"special:{ph}"
             continue
-        if ph != "event":
+        if ph != bridge.PHASE.EVENT:
             results[ev] = f"UNEXPECTED phase={ph} overlay={d.get('overlay')}"
             continue
         opts = d.get("options", [])
@@ -234,17 +201,18 @@ def sweep(all_options=False):
         outcomes = []
         for idx in take:
             d = obs() if idx == take[0] else force(ev)
-            if d is None or d.get("phase") != "event":
+            if d is None or d.get("phase") != bridge.PHASE.EVENT:
                 outcomes.append(f"{idx}:REFORCE-FAIL")
                 continue
             opts_now = d.get("options", [])
             if idx >= len(opts_now) or opts_now[idx].get("locked"):
                 locked_skipped += 1
                 continue
-            run("option", str(idx), "--follow", "4000", allow_fail=True)
-            time.sleep(0.5)
+            landed_snapshot, error = follow_option(idx, bridge.PHASE.MAP)
+            if error:
+                raise AssertionError(f"event {ev} option {idx}: {error}")
             options_clicked += 1
-            landed = drain()
+            landed = landed_snapshot["phase"]
             outcomes.append(f"{idx}->{landed}")
         stuck = [o for o in outcomes if "stuck" in o or "FAIL" in o]
         results[ev] = render + (f" STUCK {stuck}" if stuck else " ok")
