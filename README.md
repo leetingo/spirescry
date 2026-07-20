@@ -88,7 +88,13 @@ the engine error tokens in `errors`. GUI callbacks that do not return a task mus
 same boundary across three consecutive frames; guard checks still happen
 atomically before dispatch. This is a bounded settlement signal for work the
 bridge can observe, not a claim that every opaque engine continuation has
-completed.
+completed. Every followed response also includes an `errors` array covering
+Error-level engine lines and tracked async faults from acceptance through
+settlement; the CLI warns about a non-empty array on stderr while preserving
+the successful verb response on stdout. Two owner-aware exceptions never
+pollute a current verb: a known healthy post-victory stale-pop is retained as
+an `engine_note`, and a TaskHelper line proven to belong to retired run work is
+suppressed instead of being misattributed to the new run.
 Verbs: `new-run`,
 `abandon`, `option`, `proceed`, `map-move`, `pick-reward`, `pick-card`,
 `pick-relic`, `confirm`, `skip`, `buy`, `leave`, `play`, `end-turn`,
@@ -158,7 +164,9 @@ diagnostic trail, not a durable replay log. No sleep-polling anywhere.
 `capabilities`), the current `phase`, `rev`, and `runId`, plus live executor
 diagnostics. `executor` is `null` or `ActionType:State`, `executorStuckMs` is
 the time spent on that same action, and each `queues` entry reports its
-`owner`, `depth`, and `paused` state.
+`owner`, `depth`, and `paused` state. `pendingAsync` reports all tracked async
+work considered by follow; `pendingEventOptions` is its event-option subset,
+useful when the engine is waiting inside an option effect.
 
 **Tracing a session.** `STS2_AGENT_HTTP_LOG=1` on the host makes the
 bridge log one line per request — verb, status, `rev` movement, wall
@@ -272,11 +280,19 @@ picks), and text comes from tables extracted out of your local install's
   | `async-fault` | — |
   | `engine-error` | — |
   | `engine-error-delayed` | — |
+  | `event-fault-delayed` | — |
+  | `event-fault-late` | — |
+  | `event-complete-late` | — |
+  | `event-orphan` | — |
+  | `event-orphan-fault` | — |
+  | `event-orphan-collision` | — |
+  | `event-owner-rotate` | — |
   <!-- protocol:cheat-argument-shapes:end -->
 
   They jump anywhere on the act map, end fights fast, force any event or
   encounter by model id, graft content into the run, or deliberately fault
-  tracked async work to verify the failure event stream. `models
+  tracked/logged async work and event-option ownership transitions to verify
+  the failure event stream. `models
   card|relic|potion|event|encounter|character` enumerates the current
   game build instead of baking ids into tests.
 
@@ -323,6 +339,7 @@ Environment:
 | `STS2_HEADLESS_LIB` | `headless/build/lib`   | host only — patched dll + deps + loc tables                     |
 | `STS2_HOST_DEBUG`   | unset                  | host only — `1` prints first-chance exception stacks except known stub misses; `2` prints all |
 | `STS2_AGENT_HTTP_LOG` | unset                | mod/host — `1` logs each bridge request: verb, status, rev movement, wall time |
+| `SPIRESCRY_EXPECT_BUILD` | unset              | CLI — require `/health.buildHash` before every command; unknown or mismatched builds fail closed |
 
 ## Architecture
 
@@ -335,7 +352,9 @@ Environment:
 | `MainThreadPump`                | `src/Threading/` | engine singletons aren't thread-safe; GUI drains a queue each frame, host is a mutex    |
 | `HttpBridge`                    | `src/Bridge/`    | loopback-only `HttpListener`; no auth because it never leaves 127.0.0.1                 |
 | `PhaseDetector` / `Snapshotter` | `src/State/`     | classify what the game is showing, serialize what the agent needs for that phase        |
-| `Signals`                       | `src/State/`     | the revision stream: engine events + phase diffs, long-poll waiters, executor watchdog  |
+| `Signals` / `RevisionJournal`   | `src/State/`     | revision/work clocks, bounded journals, engine subscriptions, waiters, and watchdogs    |
+| `ErrorEvents` / `EngineLogCorrelation` | `src/State/` | format faults and attribute TaskHelper logs to current or retired tracked work          |
+| `EventSync` / `EventOptionTracker` | `src/State/`  | one compatibility boundary for pending event-option ownership and settlement            |
 | `Dispatcher`                    | `src/Actions/`   | validate a verb with the engine's own gates, then enqueue the engine's own action       |
 | `headless/`                     |                  | host boot: GodotSharp stubs, Mono.Cecil IL patcher, .NET host with Harmony shims        |
 
@@ -345,18 +364,24 @@ pretty-printed JSON on stdout, bridge errors on stderr with a non-zero exit.
 ## Design principles
 
 **Minimal change to the game.** The in-game mod carries no Harmony patches
-and touches no saves — it only observes through the game's own accessors
-and enqueues through the game's own action queue, gated by the same checks
-the UI applies. (The host boot shims what a missing engine would have
-provided; that's its job.)
+and touches no saves. It observes through the game's accessors and enqueues
+through the game's action queue, gated by the same checks the UI applies,
+with one documented compatibility exception: `EventSync` reflectively reads
+the synchronizer's private `_pendingOptionTasks` and `_playerVotes` because
+the engine exposes no non-consuming accessor for the option-work window.
+Production paths never mutate those fields; mutations are confined to the
+listed dev-cheat fixtures. Keeping both field names in that one adapter makes
+an upstream layout change a one-file compatibility fix. (The host boot shims
+what a missing engine would have provided; that's its job.)
 
 **Minimal code.** The smallest end-to-end loop that lets an agent observe
 and act. A verb gets in when an agent actually needs it to keep playing.
 
 **No silent failures.** Every wait window found so far is either gated
 with an explicit `not_ready` (using the engine's own predicates — the
-menu's launch button, the map's travel tweens, queue pause flags) or
-covered by the wedge watchdog. Known bounds are documented, not hidden:
+menu's launch button, the map's travel tweens, queue pause flags), owned by
+tracked settlement work with a bounded follow timeout, or covered by the
+wedge watchdog. Known bounds are documented, not hidden:
 host-boot background continuations (unpatched engine `Task.Delay`) can
 mutate state between serialized requests — harmless for this protocol,
 but not a hard memory barrier.

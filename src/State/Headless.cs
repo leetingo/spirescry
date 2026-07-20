@@ -210,9 +210,22 @@ internal static class HeadlessCrystal
 
 // Every stand-in above holds run-scoped state; abandon calls this so no
 // parked completion source or captured entity leaks into the next run.
-// A new stand-in belongs on this list.
+// A new stand-in belongs on BOTH lists here (ResetAll and
+// HasParkedDecision) and in PhaseDetector's stand-in phase mapping.
 internal static class HeadlessState
 {
+    // True while any stand-in holds a completion source the agent must
+    // resolve with a verb. The follow probe keys on this: an event
+    // option's task parked here must not read as busy (the agent acts
+    // next, the engine won't). Single owner — the probe must not carry
+    // its own copy of this list.
+    public static bool HasParkedDecision =>
+        HeadlessPicker.IsActive
+        || HeadlessBundle.IsActive
+        || HeadlessCrystal.IsActive
+        || HeadlessRewards.IsActive
+        || HeadlessRewards.InCardPick;
+
     public static void ResetAll()
     {
         HeadlessRewards.Clear();
@@ -220,6 +233,10 @@ internal static class HeadlessState
         HeadlessBundle.CancelIfActive();
         HeadlessCrystal.Clear();
         HeadlessTreasure.Clear();
+        // A dead run's option task may be parked on a combat or dialog
+        // that will never resume — one zombie would hold the follow
+        // probe's busy flag for every later run.
+        Signals.DropEventOptionTracking();
     }
 }
 

@@ -19,6 +19,7 @@ public static class Handlers
             var rm = MegaCrit.Sts2.Core.Runs.RunManager.Instance;
             var exec = rm?.ActionExecutor;
             var running = exec?.CurrentlyRunningAction;
+            var pending = Signals.PendingSnapshot();
             var queues = new List<object>();
             foreach (var (owner, depth, paused) in EngineQueues.All(rm))
                 queues.Add(new { owner, depth, paused });
@@ -31,6 +32,11 @@ public static class Handlers
                     ? null
                     : $"{running.GetType().Name}:{running.State}",
                 executorStuckMs = Signals.ExecutorStuckMs,
+                // The two counters behind the follow probe's busy flag —
+                // a follow that times out with an idle executor is almost
+                // always one of these stuck above zero.
+                pendingAsync = pending.FireAndForget + pending.EventOptions,
+                pendingEventOptions = pending.EventOptions,
                 queues,
             };
         });
@@ -47,6 +53,8 @@ public static class Handlers
             snapshot.runId,
             snapshot.executor,
             snapshot.executorStuckMs,
+            snapshot.pendingAsync,
+            snapshot.pendingEventOptions,
             snapshot.queues,
         });
     }

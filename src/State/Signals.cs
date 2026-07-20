@@ -1,5 +1,6 @@
 using MegaCrit.Sts2.Core.Combat;
 using MegaCrit.Sts2.Core.GameActions;
+using MegaCrit.Sts2.Core.Multiplayer.Game;
 using MegaCrit.Sts2.Core.Nodes.Screens.Overlays;
 using MegaCrit.Sts2.Core.Runs;
 
@@ -13,19 +14,29 @@ namespace Spirescry.State;
 // carries the new revision plus the named events behind it.
 public static class Signals
 {
+    private sealed class WaitClock
+    {
+        public long Revision { get; private set; }
+        public List<TaskCompletionSource<bool>> Waiters { get; } = new();
+
+        public void Advance() => Revision++;
+    }
+
     private const int LogCap = 64;
+    private const int RetiredLogCorrelationMs = 50;
     // Errors are rarer and heavier than events; a run that produces more
     // than this is already unplayable, so dropping the oldest is fine.
     private const int ErrorCap = 256;
 
     private static readonly object Gate = new();
-    private static readonly List<(long rev, string type)> Log = new();
-    private static readonly List<(long rev, string type)> Errors = new();
-    private static readonly List<TaskCompletionSource<bool>> Waiters = new();
-    private static readonly List<TaskCompletionSource<bool>> TickWaiters = new();
-    private static readonly HashSet<Task> PendingAsync = new();
-    private static long _revision;
-    private static long _tickCount;
+    private static readonly RevisionJournal EventJournal = new(LogCap);
+    private static readonly RevisionJournal ErrorJournal = new(ErrorCap);
+    private static readonly EventOptionTracker EventOptions = new();
+    private static readonly EngineLogCorrelation EngineLogs = new();
+    private static readonly WaitClock PublicClock = new();
+    private static readonly WaitClock SettlementClock = new();
+    private static readonly WaitClock TickClock = new();
+    private static readonly HashSet<Task> PendingFireAndForget = new();
     private static string _lastPhase = "";
     private static object? _runStateRef;
     private static string _runId = "none";
@@ -41,33 +52,141 @@ public static class Signals
     private static CombatManager? _combat;
     private static NOverlayStack? _stack;
 
-    public static long Revision { get { lock (Gate) return _revision; } }
+    public static long Revision { get { lock (Gate) return PublicClock.Revision; } }
 
-    public static long TickCount { get { lock (Gate) return _tickCount; } }
+    public static long WorkRevision
+    {
+        get { lock (Gate) return SettlementClock.Revision; }
+    }
+
+    public static long TickCount { get { lock (Gate) return TickClock.Revision; } }
 
     public static string RunId { get { lock (Gate) return _runId; } }
 
-    public static int PendingAsyncCount { get { lock (Gate) return PendingAsync.Count; } }
+    // The follow probe must read votes through the same authenticated
+    // owner as the task sweep. RunManager retains an old synchronizer
+    // after State is cleared, so reading it directly can resurrect a
+    // dead run's unresolved vote window.
+    public static bool SharedVotePending()
+    {
+        lock (Gate) return EventOptions.SharedVotePending();
+    }
+
+    // Option tasks can enter the synchronizer's list outside any
+    // dispatch: a shared choice appends one RunSafely(Chosen()) task per
+    // player, and a multiplayer client's vote lands later via a network
+    // message. Sweep the list on EVERY tick — not just event frames: a
+    // delivered Chosen() runs synchronously to its first await and can
+    // open a picker or a combat before the next tick, and the task must
+    // still be found. Both boots run Tick, so GUI clients get the same
+    // coverage; the membership gate in TrackAsync makes re-scans
+    // idempotent. Main thread only, like every other engine read here.
+    private static void SweepPendingEventOptions()
+    {
+        var rm = RunManager.Instance;
+        var runState = rm?.DebugOnlyGetState();
+        var sync = runState is null ? null : rm?.EventSynchronizer;
+        if (sync is null) return;
+        // Tick refreshed the owner immediately before this sweep. Refuse
+        // a stale synchronizer even if RunManager keeps it after State is
+        // cleared during teardown.
+        lock (Gate)
+            if (!EventOptions.MatchesOwner(runState, sync)) return;
+        if (EventSync.PendingTasks(sync) is not { } pending) return;
+        foreach (var task in pending)
+            TrackEventOption(task);
+    }
+
+    // An abandoned run's option task can be parked on a combat or dialog
+    // that no longer exists — it will never complete, and one zombie
+    // would hold the follow probe's busy flag for every later run. Drop
+    // the tracker's busy membership and advance its generation. Orphaned
+    // continuations are then forbidden from publishing into a later run's
+    // revision/error window.
+    public static void DropEventOptionTracking()
+    {
+        lock (Gate) EventOptions.Drop();
+    }
+
+    // How a tracked task participates in the follow probe's busy logic.
+    // Fire-and-forget dispatcher work blocks settlement until done; an
+    // event option's task legitimately outlives one follow window (it
+    // awaits embedded combats and parked pickers), so its kind gets the
+    // three-state treatment in the probe instead of a flat "busy".
+    private enum TrackedKind { FireAndForget, EventOption }
+
+    // One atomic read of both counters — the probe must not reconstruct
+    // internal state from two independently-locked reads.
+    public readonly record struct PendingWork(
+        int FireAndForget, int EventOptions);
+
+    public static PendingWork PendingSnapshot()
+    {
+        lock (Gate)
+            return new PendingWork(
+                PendingFireAndForget.Count,
+                EventOptions.PendingCount);
+    }
 
     // Dispatcher fire-and-forget tasks are part of action settlement too.
     // Tracking them closes the gap where GUI work had left the pump job but
     // had not yet enqueued an engine action or changed phase.
-    public static void TrackAsync(Task task, string label)
+    public static void TrackAsync(Task task, string label) =>
+        TrackAsync(task, label, TrackedKind.FireAndForget);
+
+    private static void TrackAsync(
+        Task task, string label, TrackedKind kind)
     {
-        lock (Gate) PendingAsync.Add(task);
+        var isEventOption = kind == TrackedKind.EventOption;
+        var eventGeneration = 0L;
+        lock (Gate)
+        {
+            if (isEventOption)
+            {
+                if (!EventOptions.TryTrack(task, out eventGeneration)) return;
+            }
+            else
+                PendingFireAndForget.Add(task);
+        }
         _ = task.ContinueWith(completed =>
         {
-            lock (Gate) PendingAsync.Remove(task);
-            Bump(AsyncCompletionEvent(completed, label));
+            var type = AsyncCompletionEvent(completed, label);
+            List<TaskCompletionSource<bool>>? wake;
+            lock (Gate)
+            {
+                var currentOwner = true;
+                if (isEventOption)
+                {
+                    currentOwner = EventOptions.Complete(task, eventGeneration);
+                }
+                else
+                    PendingFireAndForget.Remove(task);
+                var resolvedLog = EngineLogs.ResolveForTask(
+                    completed,
+                    ManagedThreadId.Current,
+                    currentOwner
+                        ? EngineLogDisposition.Publish
+                        : EngineLogDisposition.Suppress);
+                if (!currentOwner)
+                {
+                    if (resolvedLog)
+                        EventOptions.MarkRetiredFaultLogResolved(task);
+                    return;
+                }
+                wake = RecordBumpLocked(type);
+            }
+            Wake(wake);
         }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously,
             TaskScheduler.Default);
     }
 
+    public static void TrackEventOption(Task task) =>
+        TrackAsync(task, "event-option", TrackedKind.EventOption);
+
     private static string AsyncCompletionEvent(Task task, string label)
     {
-        if (task.Exception is not { } aggregate) return $"async:{label}";
-        var cause = aggregate.Flatten().InnerExceptions.FirstOrDefault() ?? aggregate;
-        return ErrorEvents.FromAsyncFault(label, cause.GetType().Name, cause.Message);
+        if (TaskFault.From(task) is not { } fault) return $"async:{label}";
+        return ErrorEvents.FromAsyncFault(label, fault.TypeName, fault.Message);
     }
 
     // The engine catches exceptions from fire-and-forget task chains
@@ -96,7 +215,70 @@ public static class Signals
             combatInProgress = true;
             headlessHost = false;
         }
+        // TaskHelper logs just before its returned task transitions to
+        // Faulted. When dead-owner tasks exist, give the concrete task's
+        // same-thread completion continuation a short identity-correlation
+        // window. Text alone never suppresses a line. The window itself is
+        // tracked as pending work, so a live follow cannot settle before we
+        // either suppress that exact retired task or publish a genuine
+        // current-run engine error.
+        PendingEngineLog? pending = null;
+        lock (Gate)
+        {
+            if (EventOptions.HasRetired)
+                pending = EngineLogs.Register(
+                    text,
+                    combatInProgress,
+                    headlessHost,
+                    ManagedThreadId.Current);
+        }
+        if (pending is not null)
+        {
+            HoldAsyncSilently(
+                PublishEngineLogAfterRetiredCorrelation(pending));
+            return;
+        }
         Bump(ErrorEvents.FromLogLine(text, combatInProgress, headlessHost));
+    }
+
+    // Correlation is real pending work — follow must not settle while the
+    // log's owner is undecided — but resolving it is not itself an engine
+    // event. Wake waiters without incrementing revision or emitting a
+    // synthetic completion into the response.
+    private static void HoldAsyncSilently(Task task)
+    {
+        lock (Gate) PendingFireAndForget.Add(task);
+        _ = task.ContinueWith(_ =>
+        {
+            List<TaskCompletionSource<bool>>? wake = null;
+            lock (Gate)
+            {
+                PendingFireAndForget.Remove(task);
+                SettlementClock.Advance();
+                wake = DrainWaitersLocked(SettlementClock.Waiters);
+            }
+            Wake(wake);
+        }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
+    }
+
+    private static async Task PublishEngineLogAfterRetiredCorrelation(
+        PendingEngineLog pending)
+    {
+        try
+        {
+            await pending.Resolution.Task.WaitAsync(
+                TimeSpan.FromMilliseconds(RetiredLogCorrelationMs))
+                .ConfigureAwait(false);
+        }
+        catch (TimeoutException)
+        {
+            lock (Gate) EngineLogs.Expire(pending);
+        }
+        if (await pending.Resolution.Task.ConfigureAwait(false)
+            == EngineLogDisposition.Publish)
+            Bump(ErrorEvents.FromLogLine(
+                pending.Text, pending.CombatInProgress, pending.HeadlessHost));
     }
 
     // Error events accepted-to-settlement: the follow response surfaces
@@ -107,10 +289,7 @@ public static class Signals
     // must still reach the follow response and the runlog.
     public static string[] ErrorsSince(long since)
     {
-        lock (Gate)
-            return Errors.Where(e => e.rev > since)
-                .Select(e => e.type)
-                .ToArray();
+        lock (Gate) return ErrorJournal.TypesSince(since);
     }
 
     // Call from a main-thread pump job immediately before reading state or
@@ -123,40 +302,52 @@ public static class Signals
         // Using the player-gated context here would transiently publish
         // run:none for the same RunState, then mint a second token once the
         // player appeared.
-        var runState = LocalRunContext.StateOnly?.State;
+        var stateOnly = LocalRunContext.StateOnly;
+        var runState = stateOnly?.State;
+        var eventSync = stateOnly?.Manager.EventSynchronizer;
         string? changedTo = null;
+        var ownerChangedWithoutRun = false;
         lock (Gate)
         {
-            if (ReferenceEquals(runState, _runStateRef)) return _runId;
-            _runStateRef = runState;
-            _runId = runState is null ? "none" : Guid.NewGuid().ToString("N")[..8];
-            changedTo = _runId;
+            var runChanged = !ReferenceEquals(runState, _runStateRef);
+            var ownerChanged = EventOptions.ChangeOwner(runState, eventSync);
+            ownerChangedWithoutRun = ownerChanged && !runChanged;
+            if (runChanged)
+            {
+                _runStateRef = runState;
+                _runId = runState is null
+                    ? "none"
+                    : Guid.NewGuid().ToString("N")[..8];
+                changedTo = _runId;
+            }
         }
-        Bump($"run:{changedTo}");
-        return changedTo;
+        if (changedTo is not null) Bump($"run:{changedTo}");
+        else if (ownerChangedWithoutRun) Bump("event-option:owner-changed");
+        return RunId;
     }
 
     public static void Bump(string type)
     {
-        List<TaskCompletionSource<bool>>? wake = null;
-        lock (Gate)
-        {
-            _revision++;
-            Log.Add((_revision, type));
-            if (Log.Count > LogCap) Log.RemoveAt(0);
-            if (ErrorEvents.IsError(type))
-            {
-                Errors.Add((_revision, type));
-                if (Errors.Count > ErrorCap) Errors.RemoveAt(0);
-            }
-            if (Waiters.Count > 0)
-            {
-                wake = new List<TaskCompletionSource<bool>>(Waiters);
-                Waiters.Clear();
-            }
-        }
-        if (wake is null) return;
-        foreach (var w in wake) w.TrySetResult(true);
+        List<TaskCompletionSource<bool>>? wake;
+        lock (Gate) wake = RecordBumpLocked(type);
+        Wake(wake);
+    }
+
+    private static List<TaskCompletionSource<bool>>? RecordBumpLocked(string type)
+    {
+        PublicClock.Advance();
+        SettlementClock.Advance();
+        EventJournal.Add(PublicClock.Revision, type);
+        if (ErrorEvents.IsError(type))
+            ErrorJournal.Add(PublicClock.Revision, type);
+        return DrainWaitersLocked(
+            PublicClock.Waiters, SettlementClock.Waiters);
+    }
+
+    private static void Wake(List<TaskCompletionSource<bool>>? waiters)
+    {
+        if (waiters is null) return;
+        foreach (var waiter in waiters) waiter.TrySetResult(true);
     }
 
     // Runs on the pump every tick (GUI: each frame; host: after each
@@ -169,6 +360,7 @@ public static class Signals
         WatchSettlement();
         RefreshRunIdentity();
         var phase = PhaseDetector.Current().AsString();
+        SweepPendingEventOptions();
         if (phase != _lastPhase)
         {
             var from = _lastPhase;
@@ -179,59 +371,72 @@ public static class Signals
     }
 
     // True when the revision moved past `since`; false on timeout.
-    public static async Task<bool> WaitForChange(long since, int timeoutMs)
+    public static Task<bool> WaitForChange(long since, int timeoutMs) =>
+        WaitForCounterChange(since, timeoutMs, PublicClock);
+
+    // Follow observes both public revision changes and silent changes to
+    // tracked-work membership. Keeping this clock separate preserves the
+    // /obs?since contract: a correlation-only wake never claims the public
+    // state revision moved.
+    public static Task<bool> WaitForWorkChange(long since, int timeoutMs) =>
+        WaitForCounterChange(since, timeoutMs, SettlementClock);
+
+    private static async Task<bool> WaitForCounterChange(
+        long since, int timeoutMs, WaitClock clock)
     {
         TaskCompletionSource<bool> tcs;
         lock (Gate)
         {
-            if (_revision > since) return true;
-            tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-            Waiters.Add(tcs);
+            if (clock.Revision > since) return true;
+            tcs = new TaskCompletionSource<bool>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            clock.Waiters.Add(tcs);
         }
         try { return await tcs.Task.WaitAsync(TimeSpan.FromMilliseconds(timeoutMs)); }
         catch (TimeoutException) { return false; }
-        finally { lock (Gate) Waiters.Remove(tcs); }
+        finally { lock (Gate) clock.Waiters.Remove(tcs); }
     }
 
     // GUI callbacks do not all expose a Task or an engine event. Follow
     // therefore also observes distinct process frames before declaring a
     // quiet GUI action settled. Headless Tick calls remain useful to tests,
     // but headless follow resolves synchronously and does not wait on them.
-    public static async Task<bool> WaitForTick(long after, int timeoutMs)
-    {
-        TaskCompletionSource<bool> tcs;
-        lock (Gate)
-        {
-            if (_tickCount > after) return true;
-            tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-            TickWaiters.Add(tcs);
-        }
-        try { return await tcs.Task.WaitAsync(TimeSpan.FromMilliseconds(timeoutMs)); }
-        catch (TimeoutException) { return false; }
-        finally { lock (Gate) TickWaiters.Remove(tcs); }
-    }
+    public static Task<bool> WaitForTick(long after, int timeoutMs) =>
+        WaitForCounterChange(after, timeoutMs, TickClock);
 
     private static void AdvanceTick()
     {
         List<TaskCompletionSource<bool>>? wake = null;
         lock (Gate)
         {
-            _tickCount++;
-            if (TickWaiters.Count > 0)
-            {
-                wake = new List<TaskCompletionSource<bool>>(TickWaiters);
-                TickWaiters.Clear();
-            }
+            TickClock.Advance();
+            wake = DrainWaitersLocked(TickClock.Waiters);
         }
-        if (wake is null) return;
-        foreach (var waiter in wake) waiter.TrySetResult(true);
+        Wake(wake);
+    }
+
+    private static List<TaskCompletionSource<bool>>? DrainWaitersLocked(
+        List<TaskCompletionSource<bool>> first,
+        List<TaskCompletionSource<bool>>? second = null)
+    {
+        var count = first.Count + (second?.Count ?? 0);
+        if (count == 0) return null;
+        var wake = new List<TaskCompletionSource<bool>>(count);
+        wake.AddRange(first);
+        first.Clear();
+        if (second is not null)
+        {
+            wake.AddRange(second);
+            second.Clear();
+        }
+        return wake;
     }
 
     public static object[] EventsSince(long since)
     {
         lock (Gate)
-            return Log.Where(e => e.rev > since)
-                .Select(e => (object)new { rev = e.rev, type = e.type })
+            return EventJournal.Since(since)
+                .Select(e => (object)new { rev = e.Revision, type = e.Type })
                 .ToArray();
     }
 

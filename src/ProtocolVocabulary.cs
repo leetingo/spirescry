@@ -253,6 +253,13 @@ public static class ProtocolVocabulary
                 Shape("async-fault"),
                 Shape("engine-error"),
                 Shape("engine-error-delayed"),
+                Shape("event-fault-delayed"),
+                Shape("event-fault-late"),
+                Shape("event-complete-late"),
+                Shape("event-orphan"),
+                Shape("event-orphan-fault"),
+                Shape("event-orphan-collision"),
+                Shape("event-owner-rotate"),
             ]);
 
         private static CheatArgumentShape Shape(

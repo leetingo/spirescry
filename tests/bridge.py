@@ -245,9 +245,14 @@ def kill_current_combat(*, on_obs=None, timeout=60, initial=None):
                        if card["target"] == "anyenemy"
                        and card["cost"] <= energy), None)
         if attack:
+            # play wants the exact selector: an upgraded copy is
+            # "MODEL+", and the bare model no longer matches once an
+            # accumulated relic upgrades the deck (the 84/85 bestiary
+            # failure — thirty silent bad_index rejects in a row).
             d = _act_and_settle(
-                d, "play", attack["model"], "--target",
-                str(alive[0]["id"]), deadline=deadline, on_obs=on_obs)
+                d, "play", attack.get("selector") or attack["model"],
+                "--target", str(alive[0]["id"]), deadline=deadline,
+                on_obs=on_obs)
         else:
             d = _act_and_settle(
                 d, "end-turn", deadline=deadline, on_obs=on_obs)

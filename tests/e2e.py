@@ -224,6 +224,31 @@ def alive_enemy(d):
     return next(e for e in d["enemies"] if e["alive"])
 
 
+def latest_runlog_entry(action, *, cheat=None):
+    return next(
+        verb for verb in reversed(run("runlog")["verbs"])
+        if verb["action"] == action
+        and (cheat is None or verb.get("args", {}).get("name") == cheat)
+    )
+
+
+def open_amalgamator_picker():
+    to_map(seed="CIAMALG")
+    run("cheat", PHASE.EVENT, "AMALGAMATOR")
+    d = bridge.wait_phase(PHASE.EVENT)
+    combine = next(
+        option for option in d["options"]
+        if "defend" in (
+            (option.get("title") or "") + (option.get("description") or "")
+        ).lower()
+        and not option.get("locked")
+    )
+    deck_before = [card["model"] for card in obs()["player"]["deck"]]
+    picking = run("option", str(combine["idx"]), "--follow", "5000")
+    assert picking["obs"]["phase"] == PHASE.CARD_SELECT, picking["obs"]["phase"]
+    return deck_before
+
+
 # ---------- B: boot ----------
 
 @case("B1 health shape")
@@ -232,7 +257,8 @@ def b1():
     assert status == 200 and d["ok"] is True, d
     for k in ("mod", "version", "buildHash", "protocolVersion",
               "capabilities", "phase", "rev", "runId",
-              "executorStuckMs", "queues"):
+              "executorStuckMs", "pendingAsync", "pendingEventOptions",
+              "queues"):
         assert k in d, f"health missing {k}: {sorted(d)}"
     caps = d["capabilities"]
     assert "end-turn" in caps["verbs"], caps
@@ -588,12 +614,136 @@ def p13():
 
     # The fault survives into the diagnostic recipe: forensics must not
     # depend on the host log alone.
-    log = run("runlog")
-    entry = next(
-        v for v in reversed(log["verbs"])
-        if v["action"] == "cheat" and v.get("args", {}).get("name") == "engine-error"
-    )
+    entry = latest_runlog_entry("cheat", cheat="engine-error")
     assert any("forced engine log error" in e for e in entry.get("errors", [])), entry
+
+    # Delayed variant: the error line lands from a tracked continuation
+    # ~250ms after acceptance. Follow must stay busy across the delay and
+    # carry the fault in THIS response — a first-quiet-probe return would
+    # report errors: [] and leak the fault past the runlog entry too.
+    delayed = run("cheat", "engine-error-delayed", "--follow", "5000",
+                  allow_errors=True)
+    assert any(
+        error.startswith("engine_error:") and "delayed engine log error" in error
+        for error in delayed["errors"]
+    ), delayed["errors"]
+    to_menu()
+
+
+@case("P14 delayed event-option faults land in their own follow window")
+def p14():
+    # Integration regression for the synchronizer-boundary sweep: the
+    # cheat appends a RunSafely-wrapped delayed throw to the REAL
+    # _pendingOptionTasks list without telling the dispatcher — the way
+    # a multiplayer client's vote arrives via a network message. The
+    # per-tick sweep must discover the task, the three-state busy logic
+    # must hold the follow open across the delay (no combat, nothing
+    # parked), and the fault must land in this same response.
+    launch(seed="CIEVOPT")  # parked at the Neow event
+    faulted = run("cheat", "event-fault-delayed", "--follow", "5000",
+                  allow_errors=True)
+    assert faulted["settled"] is True, faulted
+    assert any(
+        error.startswith("async_fault:event-option:")
+        and "delayed event-option failure" in error
+        for error in faulted["errors"]
+    ), faulted["errors"]
+
+    entry = latest_runlog_entry("cheat", cheat="event-fault-delayed")
+    assert any("delayed event-option failure" in e
+               for e in entry.get("errors", [])), entry
+
+    # The full client window: the cheat leaves only a pending vote —
+    # NO task exists — and the "network" delivers the faulting task
+    # ~600ms later. Nothing but the vote can hold the follow open
+    # through the gap, so this fails if quiet frames close the response
+    # before delivery.
+    late = run("cheat", "event-fault-late", "--follow", "8000",
+               allow_errors=True)
+    assert late["settled"] is True, late
+    assert any(
+        error.startswith("async_fault:event-option:")
+        and "delayed event-option failure" in error
+        for error in late["errors"]
+    ), late["errors"]
+    entry = latest_runlog_entry("cheat", cheat="event-fault-late")
+    assert any("delayed event-option failure" in e
+               for e in entry.get("errors", [])), entry
+    to_menu()
+
+
+@case("P15 clean late event-option completion wakes its follow window")
+def p15():
+    # A client vote can resolve to a page-only Chosen() whose RunSafely
+    # task is already complete when the next Tick inspects the engine.
+    # Clearing the vote and observing that completed task must wake the
+    # originating follow; otherwise it sleeps until its full deadline.
+    launch(seed="CIEVOPTCLEAN")
+    started = time.monotonic()
+    completed = run("cheat", "event-complete-late", "--follow", "3000")
+    elapsed = time.monotonic() - started
+    assert completed["settled"] is True, completed
+    assert completed["outcome"] == "settled", completed
+    assert completed["errors"] == [], completed["errors"]
+    assert sum(event["type"] == "async:event-option"
+               for event in completed["events"]) == 1, completed["events"]
+    assert elapsed < 2.0, f"clean delivery did not wake follow ({elapsed:.2f}s)"
+    to_menu()
+
+
+@case("P16 abandoned event-option work cannot enter the next run")
+def p16():
+    launch(seed="CIEVOPTOLD")
+    run("cheat", "event-orphan")
+    status, health = http("GET", "/health")
+    assert status == 200 and health["pendingEventOptions"] == 1, health
+
+    abandoned = run("abandon", "--follow", "3000")
+    assert abandoned["outcome"] != "timeout", abandoned
+    assert abandoned["obs"]["phase"] == "main_menu", abandoned["obs"]
+    fresh = run("new-run", "IRONCLAD", "--seed", "CIEVOPTNEW",
+                "--follow", "3000")
+    assert fresh["outcome"] != "timeout", fresh
+    status, health = http("GET", "/health")
+    assert status == 200 and health["pendingEventOptions"] == 0, health
+
+    # Complete the old task while writing a genuine current-run Error with
+    # the SAME exception type/message. Text-only matching suppresses the
+    # marked current line and leaks the unmarked stale line. Task-identity
+    # correlation must do the reverse: exactly the marked engine_error is
+    # attributed to this verb, while the old async fault stays retired.
+    released = run("cheat", "event-orphan-collision", "--follow", "3000",
+                   allow_errors=True)
+    assert released["settled"] is True, released
+    collisions = [
+        error for error in released["errors"]
+        if "orphan event-option failure" in error
+    ]
+    assert len(collisions) == 1, collisions
+    assert collisions[0].startswith("engine_error:"), collisions
+    assert "current-run duplicate marker" in collisions[0], collisions
+    assert not any("engine-log-correlation" in event["type"]
+                   for event in released["events"]), released["events"]
+    entry = latest_runlog_entry("cheat", cheat="event-orphan-collision")
+    assert any("current-run duplicate marker" in error
+               for error in entry.get("errors", [])), entry
+    to_menu()
+
+
+@case("P17 retired tasks stay tombstoned while their synchronizer is live")
+def p17():
+    launch(seed="CIEVOPTSAME")
+    run("cheat", "event-orphan")
+    run("cheat", "event-owner-rotate")
+    released = run("cheat", "event-orphan-fault", "--follow", "3000",
+                   allow_errors=True)
+    assert released["settled"] is True, released
+    assert not any("orphan event-option failure" in error
+                   for error in released["errors"]), released["errors"]
+    assert not any("engine-log-correlation" in event["type"]
+                   for event in released["events"]), released["events"]
+    status, health = http("GET", "/health")
+    assert status == 200 and health["pendingEventOptions"] == 0, health
     to_menu()
 
 
@@ -1669,32 +1819,71 @@ def e2():
     # two Defends and granting the Ultimate Defend — unimmunized, the NRE
     # aborted there and the player paid two cards for nothing (the
     # follow guard also asserts the fault no longer fires at all).
-    to_map(seed="CIAMALG")
-    run("cheat", PHASE.EVENT, "AMALGAMATOR")
-    d = bridge.wait_phase(PHASE.EVENT)
-    combine = next(
-        o for o in d["options"]
-        if "defend" in ((o.get("title") or "") + (o.get("description") or "")).lower()
-        and not o.get("locked"))
-    models0 = [c["model"] for c in obs()["player"]["deck"]]
-
-    picking = run("option", str(combine["idx"]), "--follow", "5000")
-    assert picking["obs"]["phase"] == PHASE.CARD_SELECT, picking["obs"]["phase"]
+    models0 = open_amalgamator_picker()
     run("pick-card", "0", "--follow", "5000")
-    run("pick-card", "1", "--follow", "5000")  # max picks auto-resolve
+    done = run("pick-card", "1", "--follow", "5000")  # max picks auto-resolve
 
-    # The combine pauses on an engine-side Task.Delay between removing
-    # the Defends and granting the reward — wait for the grant, don't
-    # race it.
-    granted = bridge.wait_until(
-        lambda snapshot: any(
-            c.get("model") == "ULTIMATE_DEFEND"
-            for c in (snapshot.get("player") or {}).get("deck") or []),
-        timeout=10,
-        description="ultimate defend granted")
-    models = [c["model"] for c in granted["player"]["deck"]]
+    # The option task is tracked through settlement: the engine-side
+    # Task.Delay between removing the Defends and granting the reward
+    # counts as Busy, so THIS response must already carry the completed
+    # effect — no post-hoc polling. (Regression for delayed engine work
+    # escaping the follow window; the follow obs deck is the compact
+    # counts-by-specifier dict.)
+    deck_after = done["obs"]["player"]["deck"]
+    assert any(key.startswith("ULTIMATE_DEFEND") for key in deck_after), deck_after
+
+    models = [c["model"] for c in obs()["player"]["deck"]]
     assert models.count("DEFEND_IRONCLAD") == models0.count("DEFEND_IRONCLAD") - 2, \
         (models0, models)
+    to_menu()
+
+
+@case("E4 tasks appearing outside the event phase are still swept")
+def e4():
+    # A delivered Chosen() can synchronously open a picker before the
+    # sweep's next look — the sweep must find tasks by list state, not
+    # by the visible phase. Park the Amalgamator's combine picker
+    # (phase card_select), inject the fault task there, then resolve the
+    # picks: the final follow must span both the combine's own delay and
+    # the injected fault, and report both effects.
+    open_amalgamator_picker()
+
+    run("cheat", "event-fault-delayed", allow_errors=True)  # injected mid-picker
+    first = run("pick-card", "0", "--follow", "5000", allow_errors=True)
+    done = run("pick-card", "1", "--follow", "8000", allow_errors=True)
+
+    # The async_fault:event-option prefix exists only for swept/tracked
+    # tasks — its presence in either pick window proves the sweep found
+    # the task despite the non-event phase (window attribution precision
+    # is P14's job; the fault's 250ms timer races the two picks).
+    seen = (first.get("errors") or []) + (done.get("errors") or [])
+    assert any(
+        error.startswith("async_fault:event-option:")
+        and "delayed event-option failure" in error
+        for error in seen
+    ), seen
+    deck_after = done["obs"]["player"]["deck"]
+    assert any(key.startswith("ULTIMATE_DEFEND") for key in deck_after), deck_after
+    to_menu()
+
+
+@case("E3 trial double-down genuinely abandons the run")
+def e3():
+    # The confirm popup can't exist headless, so the host reroutes
+    # DoubleDown onto the popup's accepted action (the screen-free
+    # abandon teardown). The generic sweep can't tell that from an inert
+    # swallow — this asserts the real outcome: run over, cleanly.
+    to_map(seed="CITRIALDD")
+    run("cheat", "event", "TRIAL")
+    bridge.wait_phase("event")
+    run("option", "1", "--follow", "5000")  # Reject → the double-down page
+    down = bridge.wait_phase("event")
+    idx = next(o["idx"] for o in down["options"]
+               if "double" in (o.get("title") or "").lower())
+    ended = run("option", str(idx), "--follow", "8000", allow_errors=True)
+    assert ended["errors"] == [], ended["errors"]
+    assert ended["obs"]["phase"] == "game_over", ended["obs"]["phase"]
+    assert ended["obs"]["outcome"] == "abandoned", ended["obs"]
     to_menu()
 
 

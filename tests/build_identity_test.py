@@ -28,6 +28,8 @@ def health(build_hash):
         "rev": 0,
         "runId": "none",
         "executorStuckMs": 0,
+        "pendingAsync": 0,
+        "pendingEventOptions": 0,
         "queues": [],
     }
 

@@ -239,7 +239,7 @@ fn main() -> ExitCode {
         follow: cli.follow,
     };
     let result = match &cli.cmd {
-        Cmd::Health => client.get("/health", Duration::from_millis(DEFAULT_HTTP_TIMEOUT_MS)),
+        Cmd::Health => client.health(),
         Cmd::Models { kind } => client.compatible_get(
             &format!("/models?kind={}", kind),
             Duration::from_millis(DEFAULT_HTTP_TIMEOUT_MS),
@@ -1042,6 +1042,17 @@ struct Client {
 }
 
 impl Client {
+    fn health(&self) -> CliResult<Value> {
+        let expected_build = std::env::var("SPIRESCRY_EXPECT_BUILD").ok();
+        self.health_expecting(expected_build.as_deref())
+    }
+
+    fn health_expecting(&self, expected_build: Option<&str>) -> CliResult<Value> {
+        let health = self.get("/health", Duration::from_millis(DEFAULT_HTTP_TIMEOUT_MS))?;
+        validate_health_expecting(&health, None, None, expected_build)?;
+        Ok(health)
+    }
+
     fn get(&self, path: &str, timeout: Duration) -> CliResult<Value> {
         let url = format!("{}{}", self.base, path);
         self.exchange(format!("GET {}", url), || {
@@ -1138,7 +1149,7 @@ fn validate_health_expecting(
     // Protocol compatibility says the host speaks this CLI's contract;
     // it says nothing about which source revision is running. A play
     // session that must not trust a stale host exports
-    // SPIRESCRY_EXPECT_BUILD=<buildHash> and every verb then hard-fails
+    // SPIRESCRY_EXPECT_BUILD=<buildHash> and every command then hard-fails
     // on a host built from any other revision.
     if let Some(expected) = expected_build.filter(|e| !e.is_empty()) {
         let build = health
@@ -1281,6 +1292,7 @@ mod tests {
     use super::*;
     use clap::{CommandFactory, Parser};
     use std::cell::{Cell, RefCell};
+    use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::thread;
     use std::time::Instant;
@@ -1474,6 +1486,38 @@ mod tests {
 
         assert!(result.is_err());
         assert!(start.elapsed() < Duration::from_millis(200));
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn health_command_enforces_the_expected_build() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request).unwrap();
+            let body = health(PROTOCOL_VERSION, &["play"], &[]).to_string();
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                 Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body,
+            )
+            .unwrap();
+        });
+        let client = Client {
+            base: format!("http://{address}"),
+            verbose: false,
+            if_rev: None,
+            if_run: None,
+            follow: None,
+        };
+
+        let error = client.health_expecting(Some("wrong-build")).unwrap_err();
+
+        assert!(error.to_string().contains("host build mismatch"), "{error}");
         server.join().unwrap();
     }
 

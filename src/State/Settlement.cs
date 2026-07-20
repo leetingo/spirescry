@@ -28,11 +28,14 @@ internal sealed record SettlementRequest(
 
 internal sealed record SettlementProbe(
     long Tick,
+    long WorkRevision,
     bool RequiresFrameStability,
     SettlementActivity Activity,
     SnapshotContract Observation,
     IReadOnlyList<string> Errors)
 {
+    public bool OptionExecuting => Activity.EventOptionExecuting;
+
     public long Revision => Observation.Revision
         ?? throw new InvalidOperationException("settlement snapshot has no revision");
 
@@ -48,12 +51,16 @@ internal sealed record SettlementProbe(
 }
 
 internal readonly record struct SettlementActivity(
-    int PendingAsyncCount,
+    int FireAndForgetCount,
+    bool EventOptionExecuting,
     bool ExecutorRunning,
     int QueuedActionCount)
 {
     public bool IsBusy =>
-        PendingAsyncCount > 0 || ExecutorRunning || QueuedActionCount > 0;
+        FireAndForgetCount > 0
+        || EventOptionExecuting
+        || ExecutorRunning
+        || QueuedActionCount > 0;
 }
 
 internal sealed record SettlementResult(
@@ -63,7 +70,7 @@ internal sealed record SettlementResult(
 internal interface ISettlementTickSource
 {
     Task<SettlementProbe> Capture(long startedRevision);
-    Task WaitForChange(long afterRevision, int timeoutMs);
+    Task WaitForChange(long afterWorkRevision, int timeoutMs);
     Task WaitForTick(long afterTick, int timeoutMs);
 }
 
@@ -171,7 +178,7 @@ internal sealed class SettlementModule
             if (probe.RequiresFrameStability && outcome is not null)
                 await _ticks.WaitForTick(probe.Tick, remaining);
             else
-                await _ticks.WaitForChange(probe.Revision, remaining);
+                await _ticks.WaitForChange(probe.WorkRevision, remaining);
         }
     }
 
@@ -188,6 +195,11 @@ internal sealed class SettlementModule
     {
         if (probe.Errors.Count > 0) return SettlementOutcome.Fault;
         if (!probe.Activity.IsBusy) return SettlementOutcome.Settled;
+        // A mid-flight option effect can flip the phase back to event
+        // before its continuation finishes (and before a late fault
+        // logs) — the page on screen is transient, not a decision to
+        // report. Wait for the task to park or complete.
+        if (probe.OptionExecuting) return null;
         if (!probe.HasDecision) return null;
         if (probe.Phase != phaseBefore || IsNestedDecision(probe.Phase))
             return SettlementOutcome.NextDecision;

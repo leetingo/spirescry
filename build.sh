@@ -42,16 +42,18 @@ fi
 HOST_DLL="$REPO/headless/Host/bin/Release/spirescry_host.dll"
 
 # Stamped into both builds; /health reports it as buildHash so a running
-# host can be matched to its exact inputs. A git ref alone cannot do
+# host can be matched to its build inputs. A git ref alone cannot do
 # that: it misses source edits made after the build (dirty or not) and a
-# Steam-updated sts2.dll, so the stamp also hashes the build inputs —
-# every tracked + untracked (non-ignored) file under the source trees
-# plus every dll under lib/ (the compile base the mod and host build
-# against; third-party dlls under headless/build/lib come from the same
-# game install and are refreshed by the same headless-setup pass, but are
-# not part of the stamp). `./build.sh stamp` prints the value the
+# Steam-updated sts2.dll, so the stamp also hashes the binary inputs —
+# every tracked + untracked (non-ignored) file under the source trees,
+# every dll under lib/ (the compile base), and every third-party dll
+# under headless/build/lib (0Harmony and friends, which the host
+# compiles against and loads). sts2.headless.dll is excluded as derived:
+# it is produced by the (hashed) Patcher sources from the (hashed)
+# lib/sts2.dll. Extracted localization tables are likewise derived game
+# data outside the stamp. `./build.sh stamp` prints the value the
 # current checkout would produce; comparing it to a running host's
-# buildHash is content verification over those inputs.
+# buildHash verifies those inputs byte-for-byte.
 #
 # Computed lazily at every build point — never cached at script start:
 # `libs` / `headless-setup` refresh lib/*.dll first, and a stamp taken
@@ -68,7 +70,8 @@ content_stamp() {
             cli/Cargo.toml cli/Cargo.lock \
             protocol.json mods build.sh \
             | LC_ALL=C sort -z | xargs -0 $HASH_CMD
-        for dll in lib/*.dll; do
+        for dll in lib/*.dll headless/build/lib/*.dll; do
+            case "$dll" in */sts2.headless.dll) continue ;; esac
             if [ -f "$dll" ]; then $HASH_CMD "$dll"; fi
         done
     } 2>/dev/null | $HASH_CMD | cut -c1-12

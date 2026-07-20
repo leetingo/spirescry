@@ -111,6 +111,15 @@ public static class Dispatcher
             "energy" => SetCombatResource("Energy", args),
             "async-fault" => CheatAsyncFault(),
             "engine-error" => CheatEngineError(),
+            "engine-error-delayed" => CheatEngineErrorDelayed(),
+            "event-fault-delayed" => EventOptionCheats.FaultDelayed(),
+            "event-fault-late" => EventOptionCheats.FaultLate(),
+            "event-complete-late" => EventOptionCheats.CompleteLate(),
+            "event-orphan" => EventOptionCheats.ParkOrphan(),
+            "event-orphan-fault" => EventOptionCheats.FaultOrphan(),
+            "event-orphan-collision" =>
+                EventOptionCheats.FaultOrphanCollision(),
+            "event-owner-rotate" => EventOptionCheats.RotateOwner(),
             var n => DispatchResult.Reject(RejectionCodes.BadRequest,
                 $"unknown cheat '{n}' (supported: {string.Join(", ", Cheats)})"),
         };
@@ -130,6 +139,25 @@ public static class Dispatcher
         MegaCrit.Sts2.Core.Logging.Log.Error(
             "SpirescryForcedException: forced engine log error (cheat engine-error)");
         return DispatchResult.Success();
+    }
+
+    // The delayed variant: the error line lands from a continuation a
+    // moment after acceptance, like an engine effect faulting mid-chain.
+    // Fired through the shared decision-surface tracker, so a follow must
+    // stay busy across the delay and carry the error in ITS OWN response —
+    // the regression for delayed faults leaking past settlement.
+    private static DispatchResult CheatEngineErrorDelayed()
+    {
+        DecisionSurfaceActions.Track(
+            DelayedEngineError(), "engine-error-delayed");
+        return DispatchResult.Success();
+    }
+
+    private static async Task DelayedEngineError()
+    {
+        await Task.Delay(250).ConfigureAwait(false);
+        MegaCrit.Sts2.Core.Logging.Log.Error(
+            "SpirescryForcedException: forced delayed engine log error (cheat engine-error-delayed)");
     }
 
     private static async Task ForcedAsyncFault()
@@ -533,8 +561,33 @@ public static class Dispatcher
         if (opts[idx].IsLocked)
             return DispatchResult.Reject(RejectionCodes.NotPlayable, $"option {idx} is locked");
 
-        return FromDecisionSurface(
+        var sync = RunManager.Instance!.EventSynchronizer;
+        var before = EventSync.PendingTaskSnapshot(sync);
+        var result = FromDecisionSurface(
             DecisionSurface.Current.ChooseEventOption(idx));
+        TrackPendingEventOptions(sync, before);
+        return result;
+    }
+
+    // The synchronizer starts option Chosen() tasks through RunSafely and
+    // keeps them only in a private list (drained at room exit) — nothing
+    // the follow probe counts would otherwise cover a still-running
+    // option effect, so a continuation could fault after follow reported
+    // settled with errors: []. Track every task identity this dispatch
+    // added: a shared-event choice completing on the local vote adds one
+    // task PER PLAYER, not one, and the engine may clear/repopulate the
+    // list during dispatch. Reading the list leaves the engine's
+    // own room-exit await untouched, and Signals' per-tick sweep covers
+    // tasks appended outside any dispatch (a client's vote delivered by
+    // a network message). Shared dispatcher code — GUI boots get the
+    // same settlement coverage as the pure host.
+    private static void TrackPendingEventOptions(
+        MegaCrit.Sts2.Core.Multiplayer.Game.EventSynchronizer sync,
+        IReadOnlySet<Task> before)
+    {
+        if (EventSync.PendingTasks(sync) is not { } pending) return;
+        foreach (var task in pending)
+            if (!before.Contains(task)) Signals.TrackEventOption(task);
     }
 
     private static DispatchResult RestOption(int idx)

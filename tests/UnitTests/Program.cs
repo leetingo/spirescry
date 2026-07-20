@@ -337,11 +337,17 @@ internal static class Tests
         var activities = new[]
         {
             new SettlementActivity(
-                PendingAsyncCount: 1, ExecutorRunning: false, QueuedActionCount: 0),
+                FireAndForgetCount: 1, EventOptionExecuting: false,
+                ExecutorRunning: false, QueuedActionCount: 0),
             new SettlementActivity(
-                PendingAsyncCount: 0, ExecutorRunning: true, QueuedActionCount: 0),
+                FireAndForgetCount: 0, EventOptionExecuting: true,
+                ExecutorRunning: false, QueuedActionCount: 0),
             new SettlementActivity(
-                PendingAsyncCount: 0, ExecutorRunning: false, QueuedActionCount: 1),
+                FireAndForgetCount: 0, EventOptionExecuting: false,
+                ExecutorRunning: true, QueuedActionCount: 0),
+            new SettlementActivity(
+                FireAndForgetCount: 0, EventOptionExecuting: false,
+                ExecutorRunning: false, QueuedActionCount: 1),
         };
 
         foreach (var activity in activities)
@@ -357,6 +363,28 @@ internal static class Tests
             Equal(SettlementOutcome.Timeout, result.Outcome);
             Equal(1, ticks.ChangeWaits);
         }
+    }
+
+    public static void SettlementWaitsOutAnExecutingEventOptionEffect()
+    {
+        // An executing option effect must hold settlement open even though
+        // a decision is on screen and the phase moved — the transient page
+        // is not the boundary; the task must park or complete first.
+        var clock = new FakeSettlementClock();
+        var executing = new SettlementActivity(
+            FireAndForgetCount: 0, EventOptionExecuting: true,
+            ExecutorRunning: false, QueuedActionCount: 0);
+        var ticks = new FakeSettlementTicks(clock,
+            Probe(phase: Phase.Event, hasDecision: true, activity: executing),
+            Probe(revision: 6, tick: 3, busy: false));
+        var module = new SettlementModule(ticks, clock);
+
+        var result = module.Follow(Request(timeoutMs: 100))
+            .GetAwaiter().GetResult();
+
+        Equal(SettlementOutcome.Settled, result.Outcome);
+        Equal(2, ticks.Captures);
+        Equal(1, ticks.ChangeWaits);
     }
 
     public static void SettlementPreservesSamePhaseEventDecisionSemantics()
@@ -785,6 +813,74 @@ internal static class Tests
             "System.NullReferenceException: Object reference not set to an instance of an object.\n"
                 + "   at MegaCrit.Sts2.Core.Models.Monsters.SoulNexus.AfterDeath(Creature _)",
             combatInProgress: false, headlessHost: true)));
+    }
+
+    public static void EngineLogsRequireTaskIdentityBeforeRetiredSuppression()
+    {
+        const string duplicate =
+            "System.InvalidOperationException: duplicate failure";
+        var correlation = new EngineLogCorrelation();
+        var directCurrentLog = correlation.Register(
+            duplicate, combatInProgress: false,
+            headlessHost: false, thread: new ManagedThreadId(7));
+
+        // A current Error line with the same type/message as some retired
+        // task has no completing-task identity. It must time out to Publish,
+        // never be consumed merely because its text happens to collide.
+        True(correlation.Expire(directCurrentLog));
+        Equal(EngineLogDisposition.Publish,
+            directCurrentLog.Resolution.Task.GetAwaiter().GetResult());
+
+        var retiredLog = correlation.Register(
+            duplicate, combatInProgress: false,
+            headlessHost: false, thread: new ManagedThreadId(7));
+        var retiredTask = Task.FromException(
+            new InvalidOperationException("duplicate failure"));
+        True(correlation.ResolveForTask(
+            retiredTask, new ManagedThreadId(7), EngineLogDisposition.Suppress));
+        Equal(EngineLogDisposition.Suppress,
+            retiredLog.Resolution.Task.GetAwaiter().GetResult());
+
+        var currentTaskLog = correlation.Register(
+            duplicate, combatInProgress: false,
+            headlessHost: false, thread: new ManagedThreadId(7));
+        var currentTask = Task.FromException(
+            new InvalidOperationException("duplicate failure"));
+        True(correlation.ResolveForTask(
+            currentTask, new ManagedThreadId(7), EngineLogDisposition.Publish));
+        Equal(EngineLogDisposition.Publish,
+            currentTaskLog.Resolution.Task.GetAwaiter().GetResult());
+
+        // The real collision order is current direct log first, then the
+        // retired TaskHelper line immediately before its task completes.
+        // Resolve the most recent matching same-thread line, leaving the
+        // current marker to expire conservatively to Publish.
+        var collidingCurrent = correlation.Register(
+            duplicate + " [current marker]", false, false, new ManagedThreadId(11));
+        var collidingRetired = correlation.Register(
+            duplicate, false, false, new ManagedThreadId(11));
+        True(correlation.ResolveForTask(
+            retiredTask, new ManagedThreadId(11),
+            EngineLogDisposition.Suppress));
+        Equal(EngineLogDisposition.Suppress,
+            collidingRetired.Resolution.Task.GetAwaiter().GetResult());
+        True(correlation.Expire(collidingCurrent));
+        Equal(EngineLogDisposition.Publish,
+            collidingCurrent.Resolution.Task.GetAwaiter().GetResult());
+    }
+
+    public static void RevisionJournalsStayBoundedAndQueryByRevision()
+    {
+        var journal = new RevisionJournal(capacity: 2);
+        journal.Add(4, "first");
+        journal.Add(5, "second");
+        journal.Add(6, "third");
+
+        Equal("second,third", string.Join(',', journal.TypesSince(0)));
+        Equal("third", string.Join(',', journal.TypesSince(5)));
+        Equal("5:second,6:third", string.Join(',',
+            journal.Since(0).Select(entry =>
+                $"{entry.Revision}:{entry.Type}")));
     }
 
     public static void DecisionClosedChestAdvertisesTheOpeningPickRelic()
@@ -1347,6 +1443,7 @@ internal static class Tests
     private static SettlementProbe Probe(
         long revision = 4,
         long tick = 1,
+        long workRevision = 0,
         Phase phase = Phase.Map,
         bool requiresFrameStability = false,
         bool busy = false,
@@ -1355,9 +1452,11 @@ internal static class Tests
         string[]? errors = null,
         SettlementActivity? activity = null) => new(
             tick,
+            workRevision,
             requiresFrameStability,
             activity ?? new SettlementActivity(
-                busy ? 1 : 0, ExecutorRunning: false, QueuedActionCount: 0),
+                busy ? 1 : 0, EventOptionExecuting: false,
+                ExecutorRunning: false, QueuedActionCount: 0),
             new SnapshotContract(phase)
             {
                 Revision = revision,

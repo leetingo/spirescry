@@ -177,6 +177,34 @@
     {
       "name": "engine-error-delayed",
       "arguments": []
+    },
+    {
+      "name": "event-fault-delayed",
+      "arguments": []
+    },
+    {
+      "name": "event-fault-late",
+      "arguments": []
+    },
+    {
+      "name": "event-complete-late",
+      "arguments": []
+    },
+    {
+      "name": "event-orphan",
+      "arguments": []
+    },
+    {
+      "name": "event-orphan-fault",
+      "arguments": []
+    },
+    {
+      "name": "event-orphan-collision",
+      "arguments": []
+    },
+    {
+      "name": "event-owner-rotate",
+      "arguments": []
     }
   ],
   "consumerProjection": {
