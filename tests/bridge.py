@@ -14,6 +14,7 @@ import protocol
 
 # CI points this at the freshly built binary; default is the deployed one.
 BIN = os.environ.get("SPIRESCRY_BIN", "spirescry")
+FOLLOW_PROCESS_GRACE_SECONDS = 5
 PROTOCOL = protocol.DOCUMENT
 PHASE = protocol.PHASE
 REJECTION = protocol.REJECTION
@@ -133,7 +134,7 @@ def follow(*args, timeout_ms=10000, allow_errors=False):
     result = run(
         *args, "--follow", str(timeout_ms), allow_fail=True,
         allow_errors=allow_errors,
-        timeout=max(0.001, timeout_ms / 1000),
+        timeout=max(0.001, timeout_ms / 1000) + FOLLOW_PROCESS_GRACE_SECONDS,
     )
     if "_err" in result:
         raise AssertionError(f"{' '.join(args)}: {result['_err']}")

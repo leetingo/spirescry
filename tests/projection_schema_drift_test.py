@@ -122,6 +122,48 @@ class ProjectionSchemaDriftTests(unittest.TestCase):
         self.assertNotEqual(0, result.returncode, result.stdout + result.stderr)
         self.assertIn("PROJECTION_ITEM_MODEL", result.stderr)
 
+    def test_schema_field_addition_breaks_the_rust_compile_contract(self):
+        def add(document):
+            document["consumerProjection"]["item"].append(
+                {
+                    "symbol": "futureSemanticField",
+                    "wire": "futureSemanticField",
+                    "output": "futureSemanticField",
+                    "kind": "optionalString",
+                }
+            )
+
+        root = self.checkout_with(add)
+        result = self.cargo(root, "check")
+
+        self.assertNotEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertIn("projection field", result.stderr.lower())
+
+    def test_schema_field_addition_cannot_be_hidden_by_a_duplicate_consumer(self):
+        def add(document):
+            document["consumerProjection"]["item"].append(
+                {
+                    "symbol": "futureSemanticField",
+                    "wire": "futureSemanticField",
+                    "output": "futureSemanticField",
+                    "kind": "optionalString",
+                }
+            )
+
+        root = self.checkout_with(add)
+        source_path = os.path.join(root, "cli", "src", "main.rs")
+        with open(source_path, encoding="utf-8") as handle:
+            source = handle.read()
+        consumed = "    PROJECTION_ITEM_MODEL,\n"
+        self.assertIn(consumed, source)
+        with open(source_path, "w", encoding="utf-8") as handle:
+            handle.write(source.replace(consumed, consumed * 2, 1))
+
+        result = self.cargo(root, "check")
+
+        self.assertNotEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertIn("defined multiple times", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1158,7 +1158,10 @@ internal sealed class HeadlessDecisionSurface : IDecisionSurface
         Task? choice = null;
         HeadlessPicker.Around(() =>
             choice = run.Manager.RestSiteSynchronizer.ChooseLocalOption(idx));
-        DecisionSurfaceActions.Track(choice!, "rest-option");
+        if (choice is null)
+            return DecisionSurfaceResult.Reject(
+                DecisionSurfaceError.Internal, "rest option did not start");
+        DecisionSurfaceActions.Track(choice, "rest-option");
         return DecisionSurfaceResult.Success();
     }
 
@@ -1228,7 +1231,10 @@ internal sealed class HeadlessDecisionSurface : IDecisionSurface
         Task? purchase = null;
         HeadlessPicker.Around(() =>
             purchase = entry.OnTryPurchaseWrapper(inventory, false));
-        DecisionSurfaceActions.Track(purchase!, "buy");
+        if (purchase is null)
+            return DecisionSurfaceResult.Reject(
+                DecisionSurfaceError.Internal, "purchase did not start");
+        DecisionSurfaceActions.Track(purchase, "buy");
         return DecisionSurfaceResult.Success();
     }
 
@@ -1318,7 +1324,15 @@ internal sealed class HeadlessDecisionSurface : IDecisionSurface
             }
         };
         synchronizer.RelicsAwarded += award;
-        synchronizer.PickRelicLocally(idx);
+        try
+        {
+            synchronizer.PickRelicLocally(idx);
+        }
+        catch
+        {
+            synchronizer.RelicsAwarded -= award;
+            throw;
+        }
         return DecisionSurfaceResult.Success();
     }
 

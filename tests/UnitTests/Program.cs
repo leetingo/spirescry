@@ -869,6 +869,112 @@ internal static class Tests
             collidingCurrent.Resolution.Task.GetAwaiter().GetResult());
     }
 
+    public static void EventOptionTrackerRegistersEachTaskOncePerOwner()
+    {
+        var tracker = new EventOptionTracker();
+        var run = new object();
+        var synchronizer = new MegaCrit.Sts2.Core.Multiplayer.Game.EventSynchronizer();
+        var task = new TaskCompletionSource().Task;
+
+        True(tracker.ChangeOwner(run, synchronizer));
+        True(tracker.TryTrack(task, out var generation));
+        False(tracker.TryTrack(task, out _));
+        Equal(1, tracker.PendingCount);
+        True(tracker.Complete(task, generation));
+        Equal(0, tracker.PendingCount);
+    }
+
+    public static void EventOptionTrackerRotatesPendingWorkIntoTheRetiredWindow()
+    {
+        var tracker = new EventOptionTracker();
+        var task = new TaskCompletionSource().Task;
+
+        tracker.ChangeOwner(
+            new object(), new MegaCrit.Sts2.Core.Multiplayer.Game.EventSynchronizer());
+        True(tracker.TryTrack(task, out var oldGeneration));
+        True(tracker.ChangeOwner(
+            new object(), new MegaCrit.Sts2.Core.Multiplayer.Game.EventSynchronizer()));
+
+        Equal(0, tracker.PendingCount);
+        True(tracker.HasRetired);
+        False(tracker.Complete(task, oldGeneration));
+    }
+
+    public static void EventOptionTrackerDropInvalidatesPendingWorkWithoutRetrackingIt()
+    {
+        var tracker = new EventOptionTracker();
+        var run = new object();
+        var synchronizer = new MegaCrit.Sts2.Core.Multiplayer.Game.EventSynchronizer();
+        var task = new TaskCompletionSource().Task;
+
+        tracker.ChangeOwner(run, synchronizer);
+        True(tracker.TryTrack(task, out _));
+        tracker.Drop();
+
+        Equal(0, tracker.PendingCount);
+        True(tracker.HasRetired);
+        False(tracker.TryTrack(task, out _));
+    }
+
+    public static void EventOptionTrackerExpiresZombieAfterTwoOwnerRotations()
+    {
+        var tracker = new EventOptionTracker();
+        var task = new TaskCompletionSource().Task;
+
+        tracker.ChangeOwner(
+            new object(), new MegaCrit.Sts2.Core.Multiplayer.Game.EventSynchronizer());
+        True(tracker.TryTrack(task, out _));
+        tracker.Drop();
+
+        tracker.ChangeOwner(null, null);
+        True(tracker.HasRetired);
+        tracker.ChangeOwner(
+            new object(), new MegaCrit.Sts2.Core.Multiplayer.Game.EventSynchronizer());
+        False(tracker.HasRetired);
+    }
+
+    public static void EventOptionTrackerExpiresZombieAcrossAReusedSynchronizer()
+    {
+        // RunManager can hand the next run the same EventSynchronizer. The
+        // correlation window must still close — one abandoned option task
+        // would otherwise route every later engine error through it for the
+        // rest of the process — while the re-tracking block survives for as
+        // long as that synchronizer keeps owning the run, because the
+        // engine's own list can still offer the parked task back.
+        var tracker = new EventOptionTracker();
+        var shared = new MegaCrit.Sts2.Core.Multiplayer.Game.EventSynchronizer();
+        var zombie = new TaskCompletionSource().Task;
+
+        tracker.ChangeOwner(new object(), shared);
+        True(tracker.TryTrack(zombie, out _));
+        tracker.Drop();
+        tracker.ChangeOwner(null, null);
+        tracker.ChangeOwner(new object(), shared);
+
+        False(tracker.HasRetired);
+        False(tracker.TryTrack(zombie, out _));
+        Equal(0, tracker.PendingCount);
+    }
+
+    public static void EventOptionTrackerKeepsFaultSuppressionWithinTheRetiredWindow()
+    {
+        var tracker = new EventOptionTracker();
+        var source = new TaskCompletionSource();
+
+        tracker.ChangeOwner(
+            new object(), new MegaCrit.Sts2.Core.Multiplayer.Game.EventSynchronizer());
+        True(tracker.TryTrack(source.Task, out var generation));
+        tracker.Drop();
+        tracker.ChangeOwner(
+            new object(), new MegaCrit.Sts2.Core.Multiplayer.Game.EventSynchronizer());
+        source.SetException(new InvalidOperationException("retired failure"));
+
+        False(tracker.Complete(source.Task, generation));
+        True(tracker.HasRetired);
+        tracker.MarkRetiredFaultLogResolved(source.Task);
+        False(tracker.HasRetired);
+    }
+
     public static void RevisionJournalsStayBoundedAndQueryByRevision()
     {
         var journal = new RevisionJournal(capacity: 2);

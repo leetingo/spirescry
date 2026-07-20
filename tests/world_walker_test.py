@@ -74,7 +74,7 @@ class WorldWalkerTests(unittest.TestCase):
         observe.assert_called_once_with()
         act.assert_called_once_with(
             "option", "2", "--follow", "10000", allow_fail=True,
-            allow_errors=False, timeout=10.0)
+            allow_errors=False, timeout=15.0)
 
     def test_acceptance_revision_is_not_reprocessed_as_settlement(self):
         decision = {
@@ -227,7 +227,7 @@ class WorldWalkerTests(unittest.TestCase):
         self.assertEqual(response["obs"], settled)
         act.assert_called_once_with(
             "skip", "--follow", "250", allow_fail=True,
-            allow_errors=False, timeout=0.25)
+            allow_errors=False, timeout=5.25)
 
     def test_follow_rejects_an_unsettled_boundary(self):
         with mock.patch.object(

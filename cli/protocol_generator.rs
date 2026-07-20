@@ -113,10 +113,12 @@ fn emit_projection_schema(code: &mut String, document: &Value) {
     let projection = document["consumerProjection"]
         .as_object()
         .expect("consumerProjection must be an object");
+    let mut projection_field_count = 0;
     for group in PROJECTION_GROUPS {
         let fields = projection[*group]
             .as_array()
             .unwrap_or_else(|| panic!("consumerProjection.{group} must be an array"));
+        projection_field_count += fields.len();
         let mut symbols = HashSet::new();
         for field in fields {
             let symbol = field_string(field, "symbol", group);
@@ -157,6 +159,9 @@ fn emit_projection_schema(code: &mut String, document: &Value) {
             code.push_str("];\n");
         }
     }
+    code.push_str(&format!(
+        "const PROJECTION_FIELD_COUNT: usize = {projection_field_count};\n"
+    ));
 }
 
 fn field_string<'a>(field: &'a Value, key: &str, group: &str) -> &'a str {
