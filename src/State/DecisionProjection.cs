@@ -65,6 +65,13 @@ internal static class DecisionProjection
                     Add("pick-relic");
                     Add("skip");
                 }
+                // A closed chest offers nothing yet — pick-relic is the verb
+                // that opens it (headless: runs the room rewards and asks
+                // for a rescry; GUI: clicks the chest). Without this the
+                // opening step is never advertised and an agent that only
+                // fires legal verbs can't reach the relic at all.
+                else if (snapshot["chestOpened"]?.GetValue<bool>() == false)
+                    Add("pick-relic");
                 if (snapshot["proceedAvailable"]?.GetValue<bool>() == true) Add("proceed");
                 break;
             case "rewards":

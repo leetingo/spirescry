@@ -73,7 +73,10 @@ public static class Dispatcher
     {
         "goto", "gold", "heal", "hp", "wound-enemies", "event", "combat",
         "card", "card-upgraded", "relic", "potion", "stars", "energy",
-        "async-fault",
+        "async-fault", "engine-error", "engine-error-delayed",
+        "event-fault-delayed", "event-fault-late", "event-complete-late",
+        "event-orphan", "event-orphan-fault", "event-orphan-collision",
+        "event-owner-rotate",
     };
 
     public static DispatchResult Dispatch(string action, JsonElement args) => action switch
@@ -120,6 +123,16 @@ public static class Dispatcher
             "stars" => SetCombatResource("Stars", args),
             "energy" => SetCombatResource("Energy", args),
             "async-fault" => CheatAsyncFault(),
+            "engine-error" => CheatEngineError(),
+            "engine-error-delayed" => CheatEngineErrorDelayed(),
+            "event-fault-delayed" => EventOptionCheats.FaultDelayed(),
+            "event-fault-late" => EventOptionCheats.FaultLate(),
+            "event-complete-late" => EventOptionCheats.CompleteLate(),
+            "event-orphan" => EventOptionCheats.ParkOrphan(),
+            "event-orphan-fault" => EventOptionCheats.FaultOrphan(),
+            "event-orphan-collision" =>
+                EventOptionCheats.FaultOrphanCollision(),
+            "event-owner-rotate" => EventOptionCheats.RotateOwner(),
             var n => DispatchResult.Reject(RejectionCodes.BadRequest,
                 $"unknown cheat '{n}' (supported: {string.Join(", ", Cheats)})"),
         };
@@ -129,6 +142,34 @@ public static class Dispatcher
     {
         Fire(ForcedAsyncFault(), "forced-async-fault");
         return DispatchResult.Success();
+    }
+
+    // Drives the engine's own Error logger synchronously — the regression
+    // hook for the engine_error follow channel (async-fault covers the
+    // tracked-task stream; this covers log-and-swallow faults).
+    private static DispatchResult CheatEngineError()
+    {
+        MegaCrit.Sts2.Core.Logging.Log.Error(
+            "SpirescryForcedException: forced engine log error (cheat engine-error)");
+        return DispatchResult.Success();
+    }
+
+    // The delayed variant: the error line lands from a continuation a
+    // moment after acceptance, like an engine effect faulting mid-chain.
+    // Fired through the same tracking Fire() uses, so a follow must stay
+    // busy across the delay and carry the error in ITS OWN response —
+    // the regression for delayed faults leaking past settlement.
+    private static DispatchResult CheatEngineErrorDelayed()
+    {
+        Fire(DelayedEngineError(), "engine-error-delayed");
+        return DispatchResult.Success();
+    }
+
+    private static async Task DelayedEngineError()
+    {
+        await Task.Delay(250).ConfigureAwait(false);
+        MegaCrit.Sts2.Core.Logging.Log.Error(
+            "SpirescryForcedException: forced delayed engine log error (cheat engine-error-delayed)");
     }
 
     private static async Task ForcedAsyncFault()
@@ -386,7 +427,9 @@ public static class Dispatcher
         var rm = RunManager.Instance;
         if (rm is null || rm.DebugOnlyGetState() is null)
             return DispatchResult.Reject(RejectionCodes.BadPhase, "no run to abandon");
-        var game = NGame.Instance;
+        // The host installs an inert NGame dummy (display no-ops), so
+        // mode comes from RunMode, not from this instance's null-ness.
+        var game = RunMode.GuiGame;
         if (!rm.IsAbandoned && !rm.IsGameOver)
         {
             if (game is null) HeadlessAbandonTeardown(rm);
@@ -420,21 +463,22 @@ public static class Dispatcher
         Reflect.SetPropertyOrBackingField(rm, "State", null);
         Reflect.SetPropertyOrBackingField(rm, "IsAbandoned", false);
         HeadlessState.ResetAll();
-        _openedHeadlessTreasure = null;
         _normalRewardsGrantedFor = null;
         return DispatchResult.Success();
     }
 
     // The engine's Abandon() is UI-first and fire-and-forget: AbandonInternal
-    // closes screens (null headless — the engine swallows the NRE) and then
-    // kills the players ASYNCHRONOUSLY (per player: forced kill + a scaled
-    // wait). Calling it and wiping state right after raced that teardown —
-    // its parked continuations fired into the NEXT run's combat, ending it
-    // the moment it loaded (instant combat_ended, transition queue left
-    // paused, phase parked at unknown). Replicate the meaningful half here,
-    // synchronously: same forced-kill pipeline, no UI closes, bounded wait
-    // so the wipe below always runs against a quiescent engine.
-    private static void HeadlessAbandonTeardown(RunManager rm)
+    // closes screens (null headless — the engine catches the NRE but logs
+    // an error line) and then kills the players ASYNCHRONOUSLY (per
+    // player: forced kill + a scaled wait). Calling it and wiping state
+    // right after raced that teardown — its parked continuations fired
+    // into the NEXT run's combat, ending it the moment it loaded (instant
+    // combat_ended, transition queue left paused, phase parked at
+    // unknown). Replicate the meaningful half here, synchronously: same
+    // forced-kill pipeline, no UI closes, bounded wait so the wipe below
+    // always runs against a quiescent engine. Internal: the host boot's
+    // Trial double-down reroute runs the same screen-free abandon.
+    internal static void HeadlessAbandonTeardown(RunManager rm)
     {
         try
         {
@@ -742,7 +786,7 @@ public static class Dispatcher
             return DispatchResult.Reject(RejectionCodes.BadRequest,
                 "args.ascension must be a non-negative 32-bit integer");
 
-        var game = NGame.Instance;
+        var game = RunMode.GuiGame;
         if (game is null) return NewRunHeadless(character, seed, ascension);
 
         // The same gate a human click passes: the menu enables its
@@ -915,9 +959,32 @@ public static class Dispatcher
         // Headless: an option that opens a deck picker (transform,
         // upgrade, …) awaits a card selection with no screen to serve it —
         // Around pre-arms the deferred picker for that.
-        HeadlessPicker.Around(() =>
-            RunManager.Instance!.EventSynchronizer.ChooseLocalOption(idx));
+        var sync = RunManager.Instance!.EventSynchronizer;
+        var before = EventSync.PendingTaskSnapshot(sync);
+        HeadlessPicker.Around(() => sync.ChooseLocalOption(idx));
+        TrackPendingEventOptions(sync, before);
         return DispatchResult.Success();
+    }
+
+    // The synchronizer starts option Chosen() tasks through RunSafely and
+    // keeps them only in a private list (drained at room exit) — nothing
+    // the follow probe counts would otherwise cover a still-running
+    // option effect, so a continuation could fault after follow reported
+    // settled with errors: []. Track every task identity this dispatch
+    // added: a shared-event choice completing on the local vote adds one
+    // task PER PLAYER, not one, and the engine may clear/repopulate the
+    // list during dispatch. Reading the list leaves the engine's
+    // own room-exit await untouched, and Signals' per-tick sweep covers
+    // tasks appended outside any dispatch (a client's vote delivered by
+    // a network message). Shared dispatcher code — GUI boots get the
+    // same settlement coverage as the pure host.
+    private static void TrackPendingEventOptions(
+        MegaCrit.Sts2.Core.Multiplayer.Game.EventSynchronizer sync,
+        IReadOnlySet<Task> before)
+    {
+        if (EventSync.PendingTasks(sync) is not { } pending) return;
+        foreach (var task in pending)
+            if (!before.Contains(task)) Signals.TrackEventOption(task);
     }
 
     private static DispatchResult RestOption(int idx)
@@ -956,7 +1023,9 @@ public static class Dispatcher
         switch (PhaseDetector.Current())
         {
             case Phase.Event:
-                if (NEventRoom.Instance is { })
+                // The host installs an inert NEventRoom dummy; mode comes
+                // from RunMode, not from this instance's null-ness.
+                if (RunMode.GuiEventRoom is { })
                 {
                     Fire(NEventRoom.Proceed(), "proceed");
                     return DispatchResult.Success();
@@ -1159,8 +1228,9 @@ public static class Dispatcher
     // DoNormalRewards grants gold as well as creating the relic offer, so
     // guard it by room identity. Observation is deliberately read-only;
     // the first headless pick-relic/skip opens the chest and asks the agent
-    // to rescry before making the actual selection.
-    private static TreasureRoom? _openedHeadlessTreasure;
+    // to rescry before making the actual selection. The opened-room
+    // reference lives on HeadlessTreasure so the snapshot can report
+    // chestOpened after the offer resolves.
     private static TreasureRoom? _normalRewardsGrantedFor;
 
     private static DispatchResult? OpenHeadlessTreasureIfNeeded(
@@ -1170,7 +1240,7 @@ public static class Dispatcher
         if (RunManager.Instance?.DebugOnlyGetState()?.CurrentRoom is not TreasureRoom room)
             return DispatchResult.Reject(
                 RejectionCodes.NotReady, "treasure room not available");
-        if (ReferenceEquals(_openedHeadlessTreasure, room))
+        if (ReferenceEquals(HeadlessTreasure.OpenedRoom, room))
             return sync.CurrentRelics is { Count: > 0 }
                 ? null
                 : DispatchResult.Reject(
@@ -1186,7 +1256,7 @@ public static class Dispatcher
                 _normalRewardsGrantedFor = room;
             }
             room.DoExtraRewardsIfNeeded().GetAwaiter().GetResult();
-            _openedHeadlessTreasure = room;
+            HeadlessTreasure.OpenedRoom = room;
             return DispatchResult.Success("chest opened — rescry, then pick-relic / skip");
         }
         catch (Exception ex)
@@ -1563,7 +1633,7 @@ public static class Dispatcher
                     if (RunManager.Instance?.DebugOnlyGetState()?.CurrentRoom is not TreasureRoom room)
                         return DispatchResult.Reject(
                             RejectionCodes.NotReady, "treasure room not available");
-                    if (!ReferenceEquals(_openedHeadlessTreasure, room)
+                    if (!ReferenceEquals(HeadlessTreasure.OpenedRoom, room)
                         && OpenHeadlessTreasureIfNeeded(sync) is { } headlessOpen)
                         return headlessOpen;
                 }

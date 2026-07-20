@@ -235,6 +235,195 @@ internal static class Tests
         Equal("pick-card,skip,abandon", string.Join(',', legal));
     }
 
+    public static void ErrorEventsCondenseLogLinesIntoBoundedTokens()
+    {
+        // Multi-line exception dumps become one whitespace-collapsed token.
+        Equal("engine_error:TestException: kaboom at Some.Frame()",
+            ErrorEvents.FromLogLine(
+                "TestException: kaboom\n   at Some.Frame()", combatInProgress: false));
+        Equal("async_fault:option:NullReferenceException:object was null",
+            ErrorEvents.FromAsyncFault(
+                "option", "NullReferenceException", "object  was\nnull"));
+
+        // Journal entries stay bounded no matter how long the dump is.
+        var flooded = ErrorEvents.FromLogLine(new string('x', 500), combatInProgress: false);
+        Equal("engine_error:".Length + 160, flooded.Length);
+    }
+
+    public static void ErrorEventsRecognizeExactlyTheTwoFaultStreams()
+    {
+        True(ErrorEvents.IsError("engine_error:TestException: kaboom"));
+        True(ErrorEvents.IsError("async_fault:option:TestException:kaboom"));
+        False(ErrorEvents.IsError("async:option"));
+        False(ErrorEvents.IsError("phase:map->combat"));
+        False(ErrorEvents.IsError("wedge:DeadBoard"));
+        False(ErrorEvents.IsError("engine_note:System.InvalidOperationException: benign"));
+    }
+
+    public static void ErrorEventsDowngradeTheVictoryStalePopToANote()
+    {
+        // The exact line the engine logs on the healthy victory path
+        // (exception ToString: type, message, then stack) — a note, not
+        // an error, or every clean victory could read as polluted.
+        var victoryLine =
+            "System.InvalidOperationException: Tried to pop action "
+            + "EndPlayerTurnAction, but we didn't find it in any queue!\n"
+            + "   at MegaCrit.Sts2.Core.GameActions.ActionQueue.Pop()";
+        var evt = ErrorEvents.FromLogLine(victoryLine, combatInProgress: false);
+        True(evt.StartsWith("engine_note:", StringComparison.Ordinal));
+        False(ErrorEvents.IsError(evt));
+
+        // The identical text mid-combat is queue corruption, not victory
+        // cleanup — same context requirement as VictorySettled.
+        True(ErrorEvents.IsError(
+            ErrorEvents.FromLogLine(victoryLine, combatInProgress: true)));
+
+        // A different action or exception type merely mentioning queues
+        // stays a real error.
+        True(ErrorEvents.IsError(ErrorEvents.FromLogLine(
+            "System.InvalidOperationException: Tried to pop action "
+            + "PlayCardAction, but we didn't find it in any queue!",
+            combatInProgress: false)));
+        True(ErrorEvents.IsError(ErrorEvents.FromLogLine(
+            "System.NullReferenceException: Tried to pop action "
+            + "EndPlayerTurnAction, but we didn't find it in any queue!",
+            combatInProgress: false)));
+    }
+
+    public static void EngineLogsRequireTaskIdentityBeforeRetiredSuppression()
+    {
+        const string duplicate =
+            "System.InvalidOperationException: duplicate failure";
+        var correlation = new EngineLogCorrelation();
+        var directCurrentLog = correlation.Register(
+            duplicate, combatInProgress: false,
+            thread: new ManagedThreadId(7));
+
+        // A current Error line with the same type/message as some retired
+        // task has no completing-task identity. It must time out to Publish,
+        // never be consumed merely because its text happens to collide.
+        True(correlation.Expire(directCurrentLog));
+        Equal(EngineLogDisposition.Publish,
+            directCurrentLog.Resolution.Task.GetAwaiter().GetResult());
+
+        var retiredLog = correlation.Register(
+            duplicate, combatInProgress: false,
+            thread: new ManagedThreadId(7));
+        var retiredTask = Task.FromException(
+            new InvalidOperationException("duplicate failure"));
+        True(correlation.ResolveForTask(
+            retiredTask, new ManagedThreadId(7), EngineLogDisposition.Suppress));
+        Equal(EngineLogDisposition.Suppress,
+            retiredLog.Resolution.Task.GetAwaiter().GetResult());
+
+        var currentTaskLog = correlation.Register(
+            duplicate, combatInProgress: false,
+            thread: new ManagedThreadId(7));
+        var currentTask = Task.FromException(
+            new InvalidOperationException("duplicate failure"));
+        True(correlation.ResolveForTask(
+            currentTask, new ManagedThreadId(7), EngineLogDisposition.Publish));
+        Equal(EngineLogDisposition.Publish,
+            currentTaskLog.Resolution.Task.GetAwaiter().GetResult());
+
+        // The real collision order is current direct log first, then the
+        // retired TaskHelper line immediately before its task completes.
+        // Resolve the most recent matching same-thread line, leaving the
+        // current marker to expire conservatively to Publish.
+        var collidingCurrent = correlation.Register(
+            duplicate + " [current marker]", false, new ManagedThreadId(11));
+        var collidingRetired = correlation.Register(
+            duplicate, false, new ManagedThreadId(11));
+        True(correlation.ResolveForTask(
+            retiredTask, new ManagedThreadId(11),
+            EngineLogDisposition.Suppress));
+        Equal(EngineLogDisposition.Suppress,
+            collidingRetired.Resolution.Task.GetAwaiter().GetResult());
+        True(correlation.Expire(collidingCurrent));
+        Equal(EngineLogDisposition.Publish,
+            collidingCurrent.Resolution.Task.GetAwaiter().GetResult());
+    }
+
+    public static void RevisionJournalsStayBoundedAndQueryByRevision()
+    {
+        var journal = new RevisionJournal(capacity: 2);
+        journal.Add(4, "first");
+        journal.Add(5, "second");
+        journal.Add(6, "third");
+
+        Equal("second,third", string.Join(',', journal.TypesSince(0)));
+        Equal("third", string.Join(',', journal.TypesSince(5)));
+        Equal("5:second,6:third", string.Join(',',
+            journal.Since(0).Select(entry =>
+                $"{entry.Revision}:{entry.Type}")));
+    }
+
+    public static void DecisionClosedChestAdvertisesTheOpeningPickRelic()
+    {
+        // Headless closed chest: relics empty, proceed always available.
+        // pick-relic is the verb that opens the chest — omitting it left
+        // "proceed" as the only advertised action and a legal-verbs-only
+        // agent had to walk past every treasure room.
+        var headless = System.Text.Json.Nodes.JsonNode.Parse("""
+            {
+              "phase":"treasure",
+              "chestOpened":false,
+              "proceedAvailable":true,
+              "relics":[],
+              "player":{"potions":[]}
+            }
+            """)!.AsObject();
+
+        Equal("pick-relic,proceed,abandon", string.Join(',',
+            DecisionProjection.LegalVerbs(headless, runActive: true)));
+
+        // GUI closed chest: the proceed button hides until the chest is
+        // resolved, so opening is the only advertised move.
+        var gui = System.Text.Json.Nodes.JsonNode.Parse("""
+            {
+              "phase":"treasure",
+              "chestOpened":false,
+              "proceedAvailable":false,
+              "relics":[],
+              "player":{"potions":[]}
+            }
+            """)!.AsObject();
+
+        Equal("pick-relic,abandon", string.Join(',',
+            DecisionProjection.LegalVerbs(gui, runActive: true)));
+    }
+
+    public static void DecisionOpenChestOffersPickAndSkipThenOnlyProceed()
+    {
+        var offering = System.Text.Json.Nodes.JsonNode.Parse("""
+            {
+              "phase":"treasure",
+              "chestOpened":true,
+              "proceedAvailable":true,
+              "relics":[{"idx":0}],
+              "player":{"potions":[]}
+            }
+            """)!.AsObject();
+
+        Equal("pick-relic,skip,proceed,abandon", string.Join(',',
+            DecisionProjection.LegalVerbs(offering, runActive: true)));
+
+        // Resolved offer: the chest stays open and empty — pick-relic must
+        // not be advertised again (the dispatcher would reject it).
+        var resolved = System.Text.Json.Nodes.JsonNode.Parse("""
+            {
+              "phase":"treasure",
+              "chestOpened":true,
+              "proceedAvailable":true,
+              "relics":[],
+              "player":{"potions":[]}
+            }
+            """)!.AsObject();
+
+        Equal("proceed,abandon", string.Join(',',
+            DecisionProjection.LegalVerbs(resolved, runActive: true)));
+    }
+
     public static void DecisionUnavailableTransitionsDoNotAdvertiseActions()
     {
         foreach (var phase in new[] { "event", "rewards" })

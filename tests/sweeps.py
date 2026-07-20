@@ -477,4 +477,9 @@ if __name__ == "__main__":
     }
     if sweep not in choices:
         sys.exit("usage: sweeps.py encounters|cards|potions|relics")
-    sys.exit(1 if choices[sweep]() else 0)
+    failed = choices[sweep]()
+    # Name the failures — a bare exit code forces a full re-run under a
+    # debugger just to learn WHICH entry broke.
+    for name, why in failed.items():
+        print(f"SWEEP FAILURE: {name}: {why}")
+    sys.exit(1 if failed else 0)

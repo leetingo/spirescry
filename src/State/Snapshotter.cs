@@ -495,9 +495,11 @@ public static class Snapshotter
         };
     }
 
-    // Observation never opens the chest. In headless mode pick-relic/skip
-    // run the room rewards once; the synchronizer then makes the offer
-    // visible here just as the GUI's chest-open callback does.
+    // Observation never opens the chest. In headless mode the first
+    // pick-relic/skip runs the room rewards once; the synchronizer then
+    // makes the offer visible here just as the GUI's chest-open callback
+    // does. chestOpened=false therefore means "unopened", never "empty":
+    // an empty relics array with an open chest is a resolved offer.
     private static object TreasureSnapshot(string phase)
     {
         var room = NRun.Instance?.TreasureRoom;
@@ -505,11 +507,20 @@ public static class Snapshotter
         var sync = RunManager.Instance?.TreasureRoomRelicSynchronizer;
 
         var relics = sync?.CurrentRelics;
+        // Headless has no chest-flag node: the offer being visible marks
+        // the chest open, and HeadlessTreasure keeps it open after a
+        // pick/skip empties the offer (relics resolve; the chest doesn't
+        // close again).
+        var headlessOpened = RunMode.IsHeadless && ReferenceEquals(
+            HeadlessTreasure.OpenedRoom,
+            RunManager.Instance?.DebugOnlyGetState()?.CurrentRoom);
         return new
         {
             phase,
-            // Headless has no chest-flag node; offered relics == open chest.
-            chestOpened = opened || relics is { Count: > 0 },
+            chestOpened = opened || headlessOpened || relics is { Count: > 0 },
+            // Headless can always leave the room (proceed declines a
+            // pending offer first); the GUI gates leaving on resolving
+            // the chest.
             proceedAvailable = RunMode.IsHeadless
                 || NRun.Instance?.TreasureRoom?.ProceedButton is { Visible: true },
             player = FooterView(),

@@ -32,15 +32,23 @@ def cli(*args, timeout=30):
     return r
 
 
-def run(*args, allow_fail=False, timeout=30):
+def run(*args, allow_fail=False, allow_errors=False, timeout=30):
     """One CLI call that must succeed. allow_fail=True tolerates failure and
-    returns {"_err": stderr}; otherwise a failure ends the harness."""
+    returns {"_err": stderr}; otherwise a failure ends the harness.
+    allow_errors=True is for deliberate fault injection: by default any
+    followed response carrying engine errors fails the suite, so every
+    ordinary action across every case doubles as a noise regression for
+    the errors channel."""
     r = cli(*args, timeout=timeout)
     if r.returncode != 0:
         if allow_fail:
             return {"_err": r.stderr.strip()}
         sys.exit(f"FAIL: spirescry {' '.join(args)} -> {r.stderr.strip()}")
-    return json.loads(r.stdout) if r.stdout.strip() else {}
+    data = json.loads(r.stdout) if r.stdout.strip() else {}
+    if not allow_errors and isinstance(data, dict) and data.get("errors"):
+        sys.exit(f"FAIL: spirescry {' '.join(args)} -> "
+                 f"engine errors on a clean action: {data['errors']}")
+    return data
 
 
 def obs(since=None, wait_ms=2000):
@@ -145,8 +153,12 @@ def kill_current_combat(*, on_obs=None):
                        if card["target"] == "anyenemy"
                        and card["cost"] <= energy), None)
         if attack:
-            run("play", attack["model"], "--target", str(alive[0]["id"]),
-                allow_fail=True)
+            # play wants the exact selector: an upgraded copy is
+            # "MODEL+", and the bare model no longer matches once an
+            # accumulated relic upgrades the deck (the 84/85 bestiary
+            # failure — thirty silent bad_index rejects in a row).
+            run("play", attack.get("selector") or attack["model"],
+                "--target", str(alive[0]["id"]), allow_fail=True)
             time.sleep(1)
         else:
             run("end-turn", allow_fail=True)

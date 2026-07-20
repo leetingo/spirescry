@@ -238,7 +238,7 @@ fn main() -> ExitCode {
         follow: cli.follow,
     };
     let result = match &cli.cmd {
-        Cmd::Health => client.get("/health", Duration::from_millis(DEFAULT_HTTP_TIMEOUT_MS)),
+        Cmd::Health => client.health(),
         Cmd::Models { kind } => client.compatible_get(
             &format!("/models?kind={}", kind),
             Duration::from_millis(DEFAULT_HTTP_TIMEOUT_MS),
@@ -312,6 +312,18 @@ fn main() -> ExitCode {
     };
     match result {
         Ok(v) => {
+            // Engine faults logged between acceptance and settlement ride
+            // the response's "errors" array; an outcome of "settled" alone
+            // must not read as proof the effect executed cleanly.
+            if let Some(errors) = v.get("errors").and_then(Value::as_array) {
+                if !errors.is_empty() {
+                    eprintln!(
+                        "spirescry: host logged {} engine error(s) during this action — \
+                         the outcome is suspect; inspect the 'errors' field before the next verb",
+                        errors.len()
+                    );
+                }
+            }
             let text = serde_json::to_string_pretty(&v).unwrap();
             // A plain println! panics on a closed pipe (e.g. `| head -1`);
             // write directly so that just exits quietly instead.
@@ -632,6 +644,17 @@ struct Client {
 }
 
 impl Client {
+    fn health(&self) -> CliResult<Value> {
+        let expected_build = std::env::var("SPIRESCRY_EXPECT_BUILD").ok();
+        self.health_expecting(expected_build.as_deref())
+    }
+
+    fn health_expecting(&self, expected_build: Option<&str>) -> CliResult<Value> {
+        let health = self.get("/health", Duration::from_millis(DEFAULT_HTTP_TIMEOUT_MS))?;
+        validate_health_expecting(&health, None, None, expected_build)?;
+        Ok(health)
+    }
+
     fn get(&self, path: &str, timeout: Duration) -> CliResult<Value> {
         let url = format!("{}{}", self.base, path);
         self.exchange(format!("GET {}", url), || {
@@ -715,6 +738,35 @@ impl ReplayTransport for Client {
 }
 
 fn validate_health(health: &Value, action: Option<&str>, cheat: Option<&str>) -> CliResult<()> {
+    let expected_build = std::env::var("SPIRESCRY_EXPECT_BUILD").ok();
+    validate_health_expecting(health, action, cheat, expected_build.as_deref())
+}
+
+fn validate_health_expecting(
+    health: &Value,
+    action: Option<&str>,
+    cheat: Option<&str>,
+    expected_build: Option<&str>,
+) -> CliResult<()> {
+    // Protocol compatibility says the host speaks this CLI's contract;
+    // it says nothing about which source revision is running. A play
+    // session that must not trust a stale host exports
+    // SPIRESCRY_EXPECT_BUILD=<buildHash> and every command then hard-fails
+    // on a host built from any other revision.
+    if let Some(expected) = expected_build.filter(|e| !e.is_empty()) {
+        let build = health
+            .get("buildHash")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        if build != expected {
+            return Err(CliError::fatal(format!(
+                "host build mismatch: running '{}' but SPIRESCRY_EXPECT_BUILD is '{}' — \
+                 restart the host from the expected build or unset the variable",
+                build, expected
+            )));
+        }
+    }
+
     let host_protocol = health
         .get("protocolVersion")
         .and_then(Value::as_u64)
@@ -842,6 +894,7 @@ mod tests {
     use super::*;
     use clap::{CommandFactory, Parser};
     use std::cell::{Cell, RefCell};
+    use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::thread;
     use std::time::Instant;
@@ -1035,6 +1088,38 @@ mod tests {
 
         assert!(result.is_err());
         assert!(start.elapsed() < Duration::from_millis(200));
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn health_command_enforces_the_expected_build() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request).unwrap();
+            let body = health(PROTOCOL_VERSION, &["play"], &[]).to_string();
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                 Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body,
+            )
+            .unwrap();
+        });
+        let client = Client {
+            base: format!("http://{address}"),
+            verbose: false,
+            if_rev: None,
+            if_run: None,
+            follow: None,
+        };
+
+        let error = client.health_expecting(Some("wrong-build")).unwrap_err();
+
+        assert!(error.to_string().contains("host build mismatch"), "{error}");
         server.join().unwrap();
     }
 
@@ -1414,6 +1499,47 @@ mod tests {
 
         let cheat_err = validate_health(&value, Some("cheat"), Some("relic")).unwrap_err();
         assert!(cheat_err.contains("cheat 'relic'"), "{cheat_err}");
+    }
+
+    #[test]
+    fn expected_build_mismatch_fails_every_health_gate() {
+        let value = health(PROTOCOL_VERSION, &["play"], &[]);
+
+        let err =
+            validate_health_expecting(&value, Some("play"), None, Some("fff9999")).unwrap_err();
+        assert!(err.contains("host build mismatch"), "{err}");
+        assert!(err.contains("abc1234"), "{err}");
+        assert!(err.contains("fff9999"), "{err}");
+
+        // A host that predates buildHash reporting must not slip through
+        // as a silent match.
+        let err = validate_health_expecting(
+            &json!({ "ok": true, "protocolVersion": PROTOCOL_VERSION }),
+            None,
+            None,
+            Some("abc1234"),
+        )
+        .unwrap_err();
+        assert!(err.contains("'unknown'"), "{err}");
+    }
+
+    #[test]
+    fn expected_build_match_or_absence_changes_nothing() {
+        let value = health(PROTOCOL_VERSION, &["play"], &[]);
+
+        assert_eq!(
+            validate_health_expecting(&value, Some("play"), None, Some("abc1234")),
+            Ok(())
+        );
+        assert_eq!(
+            validate_health_expecting(&value, Some("play"), None, None),
+            Ok(())
+        );
+        // An empty export (SPIRESCRY_EXPECT_BUILD=) means "not enforcing".
+        assert_eq!(
+            validate_health_expecting(&value, Some("play"), None, Some("")),
+            Ok(())
+        );
     }
 
     #[test]

@@ -72,7 +72,8 @@ public static class RunLog
         }
     }
 
-    public static void RecordOutcome(long entryId, string outcome, JsonObject observation)
+    public static void RecordOutcome(
+        long entryId, string outcome, JsonObject observation, string[]? errors = null)
     {
         lock (Gate)
         {
@@ -85,6 +86,12 @@ public static class RunLog
                 AdoptRun(observedRunId, captureMetadata: false);
             entry["outcome"] = outcome;
             entry["phaseAfter"] = observation["phase"]?.GetValue<string>();
+            // Engine faults during this verb's window: preserved in the
+            // diagnostic recipe so a polluted run stays attributable even
+            // after the host log rotates away.
+            if (errors is { Length: > 0 })
+                entry["errors"] = new JsonArray(
+                    errors.Select(e => (JsonNode)e).ToArray());
             if (outcome != "timeout")
                 entry["fingerprint"] = Fingerprint(observation);
         }

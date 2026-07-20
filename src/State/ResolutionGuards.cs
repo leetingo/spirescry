@@ -34,13 +34,19 @@ internal static class ResolutionGuards
         if (!combatInProgress
             && actionName == "EndPlayerTurnAction"
             && ex is InvalidOperationException
-            && ex.Message.Contains(
-                "Tried to pop action EndPlayerTurnAction", StringComparison.Ordinal)
-            && ex.Message.Contains("didn't find it in any queue", StringComparison.Ordinal))
+            && IsStalePopMessage(ex.Message))
             return InlineFaultKind.VictorySettled;
 
         return revisionChanged ? InlineFaultKind.Partial : InlineFaultKind.Failed;
     }
+
+    // The one engine fault message known benign after combat teardown.
+    // Single owner of the pattern — ErrorEvents' log-line triage matches
+    // the same text, so the two classifiers cannot drift apart.
+    public static bool IsStalePopMessage(string message) =>
+        message.Contains(
+            "Tried to pop action EndPlayerTurnAction", StringComparison.Ordinal)
+        && message.Contains("didn't find it in any queue", StringComparison.Ordinal);
 
     public static bool IsDeadBoardCandidate(
         bool actionRunning,

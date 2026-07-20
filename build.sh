@@ -15,6 +15,8 @@
 #                (--foreground: exec in this process; for sandboxed
 #                executors that reap background children)
 #   verify       conformance: tests/parity.py on both boots + key-set diff
+#   stamp        print the buildHash this checkout would stamp (git ref +
+#                content hash of the source trees and every lib/*.dll)
 #   stop         stop a running game or host
 #
 # Env (overridable):
@@ -40,18 +42,49 @@ fi
 HOST_DLL="$REPO/headless/Host/bin/Release/spirescry_host.dll"
 
 # Stamped into both builds; /health reports it as buildHash so a running
-# host can be matched to a source revision.
-GIT_HASH=unknown
-if command -v git >/dev/null 2>&1 &&
-   git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-    GIT_HASH="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
-    if [ -n "$(git status --porcelain --untracked-files=all 2>/dev/null)" ]; then
-        GIT_HASH="$GIT_HASH-dirty"
+# host can be matched to its build inputs. A git ref alone cannot do
+# that: it misses source edits made after the build (dirty or not) and a
+# Steam-updated sts2.dll, so the stamp also hashes the binary inputs —
+# every tracked + untracked (non-ignored) file under the source trees,
+# every dll under lib/ (the compile base), and every third-party dll
+# under headless/build/lib (0Harmony and friends, which the host
+# compiles against and loads). sts2.headless.dll is excluded as derived:
+# it is produced by the (hashed) Patcher sources from the (hashed)
+# lib/sts2.dll. Extracted localization tables are likewise derived game
+# data outside the stamp. `./build.sh stamp` prints the value the
+# current checkout would produce; comparing it to a running host's
+# buildHash verifies those inputs byte-for-byte.
+#
+# Computed lazily at every build point — never cached at script start:
+# `libs` / `headless-setup` refresh lib/*.dll first, and a stamp taken
+# before the refresh would brand the fresh binary with the old dll hash
+# (instantly "stale" to the host check).
+if command -v shasum >/dev/null 2>&1; then HASH_CMD="shasum -a 256"; else HASH_CMD="sha256sum"; fi
+
+content_stamp() {
+    {
+        git ls-files -co -z --exclude-standard -- \
+            src headless cli/src cli/Cargo.toml cli/Cargo.lock mods build.sh \
+            | LC_ALL=C sort -z | xargs -0 $HASH_CMD
+        for dll in lib/*.dll headless/build/lib/*.dll; do
+            case "$dll" in */sts2.headless.dll) continue ;; esac
+            if [ -f "$dll" ]; then $HASH_CMD "$dll"; fi
+        done
+    } 2>/dev/null | $HASH_CMD | cut -c1-12
+}
+
+current_stamp() {
+    local git_hash=unknown content=unknown
+    if command -v git >/dev/null 2>&1 &&
+       git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        git_hash="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+        if [ -n "$(git status --porcelain --untracked-files=all 2>/dev/null)" ]; then
+            git_hash="$git_hash-dirty"
+        fi
+        content="$(content_stamp)"
     fi
-fi
-# Prefix our explicit stamp so Mod can distinguish it from the SDK's
-# automatic full-commit metadata in ordinary `dotnet build` output.
-SOURCE_REVISION_ID="spirescry.$GIT_HASH"
+    printf '%s.%s\n' "$git_hash" "$content"
+}
 
 step() { printf '\033[1;34m▶\033[0m %s\n' "$*"; }
 ok()   { printf '\033[1;32m✓\033[0m %s\n' "$*"; }
@@ -132,7 +165,8 @@ headless_setup() {
     fi
 
     step "build host"
-    dotnet build -c Release -p:SourceRevisionId="$SOURCE_REVISION_ID" \
+    # Stamp taken now — after the lib/ and dependency refreshes above.
+    dotnet build -c Release -p:SourceRevisionId="spirescry.$(current_stamp)" \
         headless/Host/Host.csproj --nologo --verbosity minimal
     [ -x headless/Host/bin/Release/spirescry_host ] || die "host build produced no binary"
     ok "headless/Host/bin/Release/spirescry_host"
@@ -352,7 +386,9 @@ launch_host() {
 build_mod() {
     [ -f lib/sts2.dll ] || die "lib/sts2.dll missing — run: ./build.sh libs"
     step "build mod (Release)"
-    dotnet build -c Release -p:SourceRevisionId="$SOURCE_REVISION_ID" \
+    # Stamp taken now, so a preceding `libs` refresh in the same
+    # invocation is already reflected.
+    dotnet build -c Release -p:SourceRevisionId="spirescry.$(current_stamp)" \
         src/Spirescry.csproj --nologo --verbosity minimal
     [ -f src/bin/Release/spirescry.dll ] || die "mod build did not produce spirescry.dll"
     ok "src/bin/Release/spirescry.dll"
@@ -549,6 +585,7 @@ while [ "$#" -gt 0 ]; do
                 launch_host
             fi ;;
         verify)     verify ;;
+        stamp)      current_stamp ;;
         stop)       stop_game ;;
         -h|--help|help) usage ;;
         *) die "unknown command: $1 (run with --help)" ;;

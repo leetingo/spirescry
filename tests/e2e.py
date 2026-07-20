@@ -188,6 +188,31 @@ def alive_enemy(d):
     return next(e for e in d["enemies"] if e["alive"])
 
 
+def latest_runlog_entry(action, *, cheat=None):
+    return next(
+        verb for verb in reversed(run("runlog")["verbs"])
+        if verb["action"] == action
+        and (cheat is None or verb.get("args", {}).get("name") == cheat)
+    )
+
+
+def open_amalgamator_picker():
+    to_map(seed="CIAMALG")
+    run("cheat", "event", "AMALGAMATOR")
+    d = bridge.wait_phase("event")
+    combine = next(
+        option for option in d["options"]
+        if "defend" in (
+            (option.get("title") or "") + (option.get("description") or "")
+        ).lower()
+        and not option.get("locked")
+    )
+    deck_before = [card["model"] for card in obs()["player"]["deck"]]
+    picking = run("option", str(combine["idx"]), "--follow", "5000")
+    assert picking["obs"]["phase"] == "card_select", picking["obs"]["phase"]
+    return deck_before
+
+
 # ---------- B: boot ----------
 
 @case("B1 health shape")
@@ -196,15 +221,26 @@ def b1():
     assert status == 200 and d["ok"] is True, d
     for k in ("mod", "version", "buildHash", "protocolVersion",
               "capabilities", "phase", "rev", "runId",
-              "executorStuckMs", "queues"):
+              "executorStuckMs", "pendingAsync", "pendingEventOptions",
+              "queues"):
         assert k in d, f"health missing {k}: {sorted(d)}"
     caps = d["capabilities"]
     assert "end-turn" in caps["verbs"], caps
     assert "relic" in caps["cheats"], caps
     assert d["protocolVersion"] == 2, d["protocolVersion"]
+    # The identity contract: buildHash is <gitref>[-dirty].<12-hex content
+    # hash> and must match what this checkout stamps right now. A host
+    # reporting "unknown" was not built through build.sh — reject it, or
+    # the suite validates liveness against a host it cannot identify.
     build_hash = d["buildHash"]
-    assert (build_hash == "unknown" or
-            re.fullmatch(r"[0-9a-f]{7,12}(?:-dirty)?", build_hash)), build_hash
+    assert re.fullmatch(r"[0-9a-f]{7,12}(?:-dirty)?\.[0-9a-f]{12}", build_hash), \
+        (f"buildHash '{build_hash}' is not a content stamp — "
+         f"build the host via ./build.sh (headless-setup) so identity is verifiable")
+    expected = subprocess.run(
+        [os.path.join(REPO, "build.sh"), "stamp"],
+        capture_output=True, text=True, timeout=60).stdout.strip()
+    assert build_hash == expected, \
+        f"host build '{build_hash}' != checkout stamp '{expected}' — stale host"
 
 
 @case("B2 boot log: patches landed, models clean", boot_only=True)
@@ -403,6 +439,9 @@ def p10():
     assert launched["runId"] == launched["obs"]["runId"], launched
     assert launched["obs"]["phase"] == "event", launched["obs"]
     assert launched["obs"].get("legal"), launched["obs"]
+    # The engine-fault channel is part of the follow contract: present,
+    # and empty on a clean action.
+    assert launched["errors"] == [], launched["errors"]
 
     for bad_follow in ("5000", -1, 60001):
         status, d = http("POST", "/step", {
@@ -509,6 +548,163 @@ def p12():
     assert changed.get("changed") is True, changed
     assert fault_events, changed.get("events")
     assert took < 1.5, f"fault event did not wake parked obs ({took:.2f}s)"
+
+    # A followed verb whose async work faults must say so in `errors` —
+    # "settled" alone is engine quiescence, not proof of a clean effect.
+    followed = run("cheat", "async-fault", "--follow", "5000", allow_errors=True)
+    assert any(
+        error.startswith("async_fault:forced-async-fault:")
+        for error in followed["errors"]
+    ), followed["errors"]
+
+
+@case("P13 engine log errors surface in follow errors and the runlog")
+def p13():
+    # The engine logs-and-swallows faults inside its own task chains; the
+    # engine-error cheat writes through that same Error logger, so this
+    # regression covers the log-line channel end to end (async-fault in
+    # P12 covers the tracked-task stream).
+    launch(seed="CIENGERR")
+    faulted = run("cheat", "engine-error", "--follow", "5000", allow_errors=True)
+    assert faulted["settled"] is True, faulted
+    assert any(
+        error.startswith("engine_error:") and "forced engine log error" in error
+        for error in faulted["errors"]
+    ), faulted["errors"]
+
+    # The fault survives into the diagnostic recipe: forensics must not
+    # depend on the host log alone.
+    entry = latest_runlog_entry("cheat", cheat="engine-error")
+    assert any("forced engine log error" in e for e in entry.get("errors", [])), entry
+
+    # Delayed variant: the error line lands from a tracked continuation
+    # ~250ms after acceptance. Follow must stay busy across the delay and
+    # carry the fault in THIS response — a first-quiet-probe return would
+    # report errors: [] and leak the fault past the runlog entry too.
+    delayed = run("cheat", "engine-error-delayed", "--follow", "5000",
+                  allow_errors=True)
+    assert any(
+        error.startswith("engine_error:") and "delayed engine log error" in error
+        for error in delayed["errors"]
+    ), delayed["errors"]
+    to_menu()
+
+
+@case("P14 delayed event-option faults land in their own follow window")
+def p14():
+    # Integration regression for the synchronizer-boundary sweep: the
+    # cheat appends a RunSafely-wrapped delayed throw to the REAL
+    # _pendingOptionTasks list without telling the dispatcher — the way
+    # a multiplayer client's vote arrives via a network message. The
+    # per-tick sweep must discover the task, the three-state busy logic
+    # must hold the follow open across the delay (no combat, nothing
+    # parked), and the fault must land in this same response.
+    launch(seed="CIEVOPT")  # parked at the Neow event
+    faulted = run("cheat", "event-fault-delayed", "--follow", "5000",
+                  allow_errors=True)
+    assert faulted["settled"] is True, faulted
+    assert any(
+        error.startswith("async_fault:event-option:")
+        and "delayed event-option failure" in error
+        for error in faulted["errors"]
+    ), faulted["errors"]
+
+    entry = latest_runlog_entry("cheat", cheat="event-fault-delayed")
+    assert any("delayed event-option failure" in e
+               for e in entry.get("errors", [])), entry
+
+    # The full client window: the cheat leaves only a pending vote —
+    # NO task exists — and the "network" delivers the faulting task
+    # ~600ms later. Nothing but the vote can hold the follow open
+    # through the gap, so this fails if quiet frames close the response
+    # before delivery.
+    late = run("cheat", "event-fault-late", "--follow", "8000",
+               allow_errors=True)
+    assert late["settled"] is True, late
+    assert any(
+        error.startswith("async_fault:event-option:")
+        and "delayed event-option failure" in error
+        for error in late["errors"]
+    ), late["errors"]
+    entry = latest_runlog_entry("cheat", cheat="event-fault-late")
+    assert any("delayed event-option failure" in e
+               for e in entry.get("errors", [])), entry
+    to_menu()
+
+
+@case("P15 clean late event-option completion wakes its follow window")
+def p15():
+    # A client vote can resolve to a page-only Chosen() whose RunSafely
+    # task is already complete when the next Tick inspects the engine.
+    # Clearing the vote and observing that completed task must wake the
+    # originating follow; otherwise it sleeps until its full deadline.
+    launch(seed="CIEVOPTCLEAN")
+    started = time.monotonic()
+    completed = run("cheat", "event-complete-late", "--follow", "3000")
+    elapsed = time.monotonic() - started
+    assert completed["settled"] is True, completed
+    assert completed["outcome"] == "settled", completed
+    assert completed["errors"] == [], completed["errors"]
+    assert sum(event["type"] == "async:event-option"
+               for event in completed["events"]) == 1, completed["events"]
+    assert elapsed < 2.0, f"clean delivery did not wake follow ({elapsed:.2f}s)"
+    to_menu()
+
+
+@case("P16 abandoned event-option work cannot enter the next run")
+def p16():
+    launch(seed="CIEVOPTOLD")
+    run("cheat", "event-orphan")
+    status, health = http("GET", "/health")
+    assert status == 200 and health["pendingEventOptions"] == 1, health
+
+    abandoned = run("abandon", "--follow", "3000")
+    assert abandoned["outcome"] != "timeout", abandoned
+    assert abandoned["obs"]["phase"] == "main_menu", abandoned["obs"]
+    fresh = run("new-run", "IRONCLAD", "--seed", "CIEVOPTNEW",
+                "--follow", "3000")
+    assert fresh["outcome"] != "timeout", fresh
+    status, health = http("GET", "/health")
+    assert status == 200 and health["pendingEventOptions"] == 0, health
+
+    # Complete the old task while writing a genuine current-run Error with
+    # the SAME exception type/message. Text-only matching suppresses the
+    # marked current line and leaks the unmarked stale line. Task-identity
+    # correlation must do the reverse: exactly the marked engine_error is
+    # attributed to this verb, while the old async fault stays retired.
+    released = run("cheat", "event-orphan-collision", "--follow", "3000",
+                   allow_errors=True)
+    assert released["settled"] is True, released
+    collisions = [
+        error for error in released["errors"]
+        if "orphan event-option failure" in error
+    ]
+    assert len(collisions) == 1, collisions
+    assert collisions[0].startswith("engine_error:"), collisions
+    assert "current-run duplicate marker" in collisions[0], collisions
+    assert not any("engine-log-correlation" in event["type"]
+                   for event in released["events"]), released["events"]
+    entry = latest_runlog_entry("cheat", cheat="event-orphan-collision")
+    assert any("current-run duplicate marker" in error
+               for error in entry.get("errors", [])), entry
+    to_menu()
+
+
+@case("P17 retired tasks stay tombstoned while their synchronizer is live")
+def p17():
+    launch(seed="CIEVOPTSAME")
+    run("cheat", "event-orphan")
+    run("cheat", "event-owner-rotate")
+    released = run("cheat", "event-orphan-fault", "--follow", "3000",
+                   allow_errors=True)
+    assert released["settled"] is True, released
+    assert not any("orphan event-option failure" in error
+                   for error in released["errors"]), released["errors"]
+    assert not any("engine-log-correlation" in event["type"]
+                   for event in released["events"]), released["events"]
+    status, health = http("GET", "/health")
+    assert status == 200 and health["pendingEventOptions"] == 0, health
+    to_menu()
 
 
 # ---------- R: run lifecycle ----------
@@ -825,7 +1021,11 @@ def w1():
     assert obs().get("relics"), "opened treasure offered no relics"
     run("skip")  # declines the visible offer
     time.sleep(1)
-    assert len(obs()["player"]["relics"]) == relics0, "skip still granted a relic"
+    after = obs()
+    assert len(after["player"]["relics"]) == relics0, "skip still granted a relic"
+    # The offer resolved but the chest does not close again: reading
+    # chestOpened=false here would re-advertise the opening pick-relic.
+    assert after["chestOpened"] is True, after
     to_menu()
 
 
@@ -868,12 +1068,21 @@ def w3():
     assert first["player"]["gold"] == second["player"]["gold"], \
         "observing the closed chest changed gold"
 
+    # The closed chest must advertise its opening verb: an agent that
+    # only fires legal verbs otherwise walks past every treasure room.
+    closed = run("obs", "--decision")
+    assert "pick-relic" in closed["legal"], closed["legal"]
+
     relics0 = len(first["player"]["relics"])
     run("pick-relic", "0")  # first verb opens the headless chest
     opened = obs()
     assert opened["chestOpened"] is True and opened["relics"], opened
     run("pick-relic", "0")  # second selects from the now-visible offer
     assert len(obs()["player"]["relics"]) == relics0 + 1
+    # Resolved offer: chest stays open, pick-relic is no longer legal.
+    resolved = run("obs", "--decision")
+    assert resolved["chestOpened"] is True, resolved
+    assert "pick-relic" not in resolved["legal"], resolved["legal"]
     run("proceed")
     bridge.wait_phase("map")
     to_menu()
@@ -1497,6 +1706,81 @@ def e1():
     if not ARGS.quick:
         args.append("--all-options")
     run_test_script("eventsweep.py", *args)
+
+
+@case("E2 amalgamator combine grants the ultimate defend it promises")
+def e2():
+    # Regression for the half-executed event effect: NGame.Instance is
+    # null headless and CombineDefends screen-shakes between removing the
+    # two Defends and granting the Ultimate Defend — unimmunized, the NRE
+    # aborted there and the player paid two cards for nothing (the
+    # follow guard also asserts the fault no longer fires at all).
+    models0 = open_amalgamator_picker()
+    run("pick-card", "0", "--follow", "5000")
+    done = run("pick-card", "1", "--follow", "5000")  # max picks auto-resolve
+
+    # The option task is tracked through settlement: the engine-side
+    # Task.Delay between removing the Defends and granting the reward
+    # counts as Busy, so THIS response must already carry the completed
+    # effect — no post-hoc polling. (Regression for delayed engine work
+    # escaping the follow window; the follow obs deck is the compact
+    # counts-by-specifier dict.)
+    deck_after = done["obs"]["player"]["deck"]
+    assert any(key.startswith("ULTIMATE_DEFEND") for key in deck_after), deck_after
+
+    models = [c["model"] for c in obs()["player"]["deck"]]
+    assert models.count("DEFEND_IRONCLAD") == models0.count("DEFEND_IRONCLAD") - 2, \
+        (models0, models)
+    to_menu()
+
+
+@case("E4 tasks appearing outside the event phase are still swept")
+def e4():
+    # A delivered Chosen() can synchronously open a picker before the
+    # sweep's next look — the sweep must find tasks by list state, not
+    # by the visible phase. Park the Amalgamator's combine picker
+    # (phase card_select), inject the fault task there, then resolve the
+    # picks: the final follow must span both the combine's own delay and
+    # the injected fault, and report both effects.
+    open_amalgamator_picker()
+
+    run("cheat", "event-fault-delayed", allow_errors=True)  # injected mid-picker
+    first = run("pick-card", "0", "--follow", "5000", allow_errors=True)
+    done = run("pick-card", "1", "--follow", "8000", allow_errors=True)
+
+    # The async_fault:event-option prefix exists only for swept/tracked
+    # tasks — its presence in either pick window proves the sweep found
+    # the task despite the non-event phase (window attribution precision
+    # is P14's job; the fault's 250ms timer races the two picks).
+    seen = (first.get("errors") or []) + (done.get("errors") or [])
+    assert any(
+        error.startswith("async_fault:event-option:")
+        and "delayed event-option failure" in error
+        for error in seen
+    ), seen
+    deck_after = done["obs"]["player"]["deck"]
+    assert any(key.startswith("ULTIMATE_DEFEND") for key in deck_after), deck_after
+    to_menu()
+
+
+@case("E3 trial double-down genuinely abandons the run")
+def e3():
+    # The confirm popup can't exist headless, so the host reroutes
+    # DoubleDown onto the popup's accepted action (the screen-free
+    # abandon teardown). The generic sweep can't tell that from an inert
+    # swallow — this asserts the real outcome: run over, cleanly.
+    to_map(seed="CITRIALDD")
+    run("cheat", "event", "TRIAL")
+    bridge.wait_phase("event")
+    run("option", "1", "--follow", "5000")  # Reject → the double-down page
+    down = bridge.wait_phase("event")
+    idx = next(o["idx"] for o in down["options"]
+               if "double" in (o.get("title") or "").lower())
+    ended = run("option", str(idx), "--follow", "8000", allow_errors=True)
+    assert ended["errors"] == [], ended["errors"]
+    assert ended["obs"]["phase"] == "game_over", ended["obs"]["phase"]
+    assert ended["obs"]["outcome"] == "abandoned", ended["obs"]
+    to_menu()
 
 
 # ---------- M: exhaustive content sweeps ----------

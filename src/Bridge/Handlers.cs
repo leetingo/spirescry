@@ -19,6 +19,7 @@ public static class Handlers
             var rm = MegaCrit.Sts2.Core.Runs.RunManager.Instance;
             var exec = rm?.ActionExecutor;
             var running = exec?.CurrentlyRunningAction;
+            var pending = Signals.PendingSnapshot();
             var queues = new List<object>();
             foreach (var (owner, depth, paused) in EngineQueues.All(rm))
                 queues.Add(new { owner, depth, paused });
@@ -31,6 +32,11 @@ public static class Handlers
                     ? null
                     : $"{running.GetType().Name}:{running.State}",
                 executorStuckMs = Signals.ExecutorStuckMs,
+                // The two counters behind the follow probe's busy flag —
+                // a follow that times out with an idle executor is almost
+                // always one of these stuck above zero.
+                pendingAsync = pending.FireAndForget + pending.EventOptions,
+                pendingEventOptions = pending.EventOptions,
                 queues,
             };
         });
@@ -47,6 +53,8 @@ public static class Handlers
             snapshot.runId,
             snapshot.executor,
             snapshot.executorStuckMs,
+            snapshot.pendingAsync,
+            snapshot.pendingEventOptions,
             snapshot.queues,
         });
     }
@@ -234,7 +242,6 @@ public static class Handlers
         long? logEntryId)
     {
         var deadline = DateTime.UtcNow.AddMilliseconds(timeoutMs);
-        var since = acceptedRev;
         string? candidateOutcome = null;
         string? candidateState = null;
         long candidateTick = acceptedTick;
@@ -281,8 +288,7 @@ public static class Handlers
             if (!probe.Headless && outcome is not null)
                 await Signals.WaitForTick(probe.Tick, remaining);
             else
-                await Signals.WaitForChange(since, remaining);
-            since = Signals.Revision;
+                await Signals.WaitForWorkChange(probe.WorkRev, remaining);
         }
     }
 
@@ -294,8 +300,13 @@ public static class Handlers
         FollowProbe probe,
         long? logEntryId)
     {
+        // Engine-side faults between acceptance and settlement: an outcome
+        // of "settled" only says tracked work went quiet, and the engine
+        // logs-and-swallows exceptions inside its own task chains — a verb
+        // whose effect half-executed would otherwise read as clean.
+        var errors = Signals.ErrorsSince(startedRev);
         if (logEntryId is { } id)
-            RunLog.RecordOutcome(id, outcome, probe.Observation);
+            RunLog.RecordOutcome(id, outcome, probe.Observation, errors);
         var node = new JsonObject
         {
             ["ok"] = true,
@@ -306,6 +317,7 @@ public static class Handlers
             ["runId"] = probe.RunId,
             ["settled"] = outcome != "timeout",
             ["outcome"] = outcome,
+            ["errors"] = JsonSerializer.SerializeToNode(errors),
             ["events"] = JsonSerializer.SerializeToNode(Signals.EventsSince(startedRev)),
             ["obs"] = probe.Observation,
         };
@@ -314,11 +326,13 @@ public static class Handlers
 
     private sealed record FollowProbe(
         long Rev,
+        long WorkRev,
         long Tick,
         string RunId,
         string Phase,
         bool Headless,
         bool Busy,
+        bool OptionExecuting,
         bool HasDecision,
         string StateKey,
         JsonObject Observation)
@@ -330,6 +344,7 @@ public static class Handlers
                 compact: false, decision: true, knownCardTexts: []);
             var node = JsonSerializer.SerializeToNode(snapshot)!.AsObject();
             var rev = Signals.Revision;
+            var workRev = Signals.WorkRevision;
             node["rev"] = rev;
             node["runId"] = runId;
             var legal = DecisionProjection.LegalVerbs(node, runId != "none");
@@ -337,20 +352,53 @@ public static class Handlers
             var stateKey = node.ToJsonString();
 
             var rm = MegaCrit.Sts2.Core.Runs.RunManager.Instance;
-            var busy = Signals.PendingAsyncCount > 0
+            // An event option's task legitimately outlives a follow window
+            // when it awaits an embedded combat or a parked picker — the
+            // agent must act for it to ever complete, so those states must
+            // not read as busy (combat plays would time out; picker parks
+            // would never report next_decision). A pending option task
+            // outside both states is an engine continuation still
+            // executing (a delay between removing cards and granting the
+            // reward, say): THAT blocks settlement, so the response can't
+            // report a half-applied board with errors: []. Parked means a
+            // headless stand-in holds the choice (HeadlessState owns that
+            // list) or, in a GUI boot, a nested decision screen does.
+            var phaseString = node["phase"]?.GetValue<string>() ?? "unknown";
+            var parkedDecision = RunMode.IsHeadless
+                ? HeadlessState.HasParkedDecision
+                : IsNestedDecision(phaseString) || phaseString == "crystal_sphere";
+            var combatLive = MegaCrit.Sts2.Core.Combat.CombatManager.Instance
+                is { IsInProgress: true };
+            var pending = Signals.PendingSnapshot();
+            // A shared-event vote on a multiplayer client owes option
+            // work before any task exists — the resolution arrives by
+            // network message, possibly seconds later. The pending vote
+            // holds this verb's window open until the delivered tasks
+            // take over (the Tick sweep picks them up), so a late fault
+            // still lands in the response that caused it.
+            var optionWorkOwed = pending.EventOptions > 0
+                || Signals.SharedVotePending();
+            var eventOptionExecuting = optionWorkOwed
+                && !combatLive && !parkedDecision;
+            var busy = pending.FireAndForget > 0
+                || eventOptionExecuting
                 || rm?.ActionExecutor?.CurrentlyRunningAction is not null
                 || EngineQueues.All(rm).Any(queue => queue.depth > 0);
             var hasDecision = legal.Any(verb => verb is not ("abandon" or "potion-discard"));
             return new FollowProbe(
-                rev, Signals.TickCount, runId,
-                node["phase"]?.GetValue<string>() ?? "unknown", RunMode.IsHeadless,
-                busy, hasDecision, stateKey, node);
+                rev, workRev, Signals.TickCount, runId, phaseString, RunMode.IsHeadless,
+                busy, eventOptionExecuting, hasDecision, stateKey, node);
         }
 
         public static string? CandidateOutcome(
             FollowProbe probe, string phaseBefore, long acceptedRev)
         {
             if (!probe.Busy) return "settled";
+            // A mid-flight option effect can flip the phase back to event
+            // before its continuation finishes (and before a late fault
+            // logs) — the page on screen is transient, not a decision to
+            // report. Wait for the task to park or complete.
+            if (probe.OptionExecuting) return null;
             if (!probe.HasDecision) return null;
             if (probe.Phase != phaseBefore || IsNestedDecision(probe.Phase))
                 return "next_decision";

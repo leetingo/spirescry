@@ -161,7 +161,10 @@ def explore_all_event_options(ev):
             current, err = replay_event_path(ev, path)
             if err:
                 return outcomes, clicked, locked, err
-            result = run("option", str(idx), allow_fail=True)
+            # Followed so the response carries `errors`: bridge.run fails
+            # the sweep on any engine fault an option swallows — every
+            # option click doubles as an engine_error noise regression.
+            result = run("option", str(idx), "--follow", "4000", allow_fail=True)
             if "_err" in result:
                 return outcomes, clicked, locked, (
                     f"path {path} option {idx} rejected: {result['_err'][:120]}")
@@ -238,7 +241,7 @@ def sweep(all_options=False):
             if idx >= len(opts_now) or opts_now[idx].get("locked"):
                 locked_skipped += 1
                 continue
-            run("option", str(idx), allow_fail=True)
+            run("option", str(idx), "--follow", "4000", allow_fail=True)
             time.sleep(0.5)
             options_clicked += 1
             landed = drain()
