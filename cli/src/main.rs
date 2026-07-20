@@ -128,6 +128,9 @@ enum Cmd {
         /// Card text keys already cached by the caller (repeatable)
         #[arg(long = "known-card", requires = "decision")]
         known_cards: Vec<String>,
+        /// Include expanded internal semantic replay tokens (diagnostic)
+        #[arg(long = "semantic-state")]
+        semantic_state: bool,
     },
     /// Start a singleplayer run from the main menu
     NewRun {
@@ -222,6 +225,8 @@ enum Cmd {
     },
     /// Dump the current run's diagnostic reconstruction recipe
     Runlog,
+    /// Capture one read-only forensic bundle before any recovery verb
+    FaultBundle,
     /// Re-drive and verify a saved diagnostic recipe from a clean menu
     Replay {
         /// JSON file saved from `spirescry runlog`
@@ -250,6 +255,7 @@ fn main() -> ExitCode {
             compact,
             decision,
             known_cards,
+            semantic_state,
         } => obs_request(*since, *wait, *compact)
             .map_err(CliError::from)
             .and_then(|(mut path, timeout)| {
@@ -259,6 +265,10 @@ fn main() -> ExitCode {
                     for key in known_cards {
                         path = format!("{path}&known={}", query_component(key));
                     }
+                }
+                if *semantic_state {
+                    let separator = if path.contains('?') { '&' } else { '?' };
+                    path = format!("{path}{separator}semanticState=1");
                 }
                 client.compatible_get(&path, timeout)
             }),
@@ -309,6 +319,7 @@ fn main() -> ExitCode {
         Cmd::Runlog => {
             client.compatible_get("/runlog", Duration::from_millis(DEFAULT_HTTP_TIMEOUT_MS))
         }
+        Cmd::FaultBundle => Ok(capture_fault_bundle(&client)),
         Cmd::Replay { file } => replay(&client, file),
     };
     match result {
@@ -325,6 +336,12 @@ fn main() -> ExitCode {
                         settlement_outcome,
                     );
                 }
+            }
+            if settlement_outcome == Some(SettlementOutcome::Fault) {
+                eprintln!(
+                    "spirescry: accepted action faulted after dispatch; do not retry it blindly — \
+                     capture a fault-bundle and inspect acceptedRev/runId first"
+                );
             }
             let text = serde_json::to_string_pretty(&v).unwrap();
             // A plain println! panics on a closed pipe (e.g. `| head -1`);
@@ -428,6 +445,199 @@ fn cheat_args(name: &str, values: &[String]) -> Result<Value, String> {
 trait ReplayTransport {
     fn get(&self, path: &str) -> CliResult<Value>;
     fn post(&self, path: &str, body: Value) -> CliResult<Value>;
+}
+
+trait FaultBundleTransport {
+    fn get(&self, path: &str) -> CliResult<Value>;
+}
+
+fn available_section(value: Value) -> Value {
+    json!({ "available": true, "value": value })
+}
+
+fn unavailable_section(message: impl Into<String>) -> Value {
+    json!({
+        "available": false,
+        "error": {
+            "kind": "capture_failed",
+            "message": message.into(),
+        }
+    })
+}
+
+fn captured_section(result: &CliResult<Value>) -> Value {
+    match result {
+        Ok(value) => available_section(value.clone()),
+        Err(error) => unavailable_section(error.message()),
+    }
+}
+
+fn diagnostic_health(value: &Value) -> Value {
+    const SAFE_FIELDS: &[&str] = &[
+        "ok",
+        "mod",
+        "version",
+        "buildHash",
+        "protocolVersion",
+        "capabilities",
+        "phase",
+        "rev",
+        "runId",
+        "executor",
+        "executorStuckMs",
+        "pendingAsync",
+        "pendingEventOptions",
+        "queues",
+    ];
+    let mut safe = Map::new();
+    for field in SAFE_FIELDS {
+        if let Some(value) = value.get(*field) {
+            safe.insert((*field).to_string(), value.clone());
+        }
+    }
+    Value::Object(safe)
+}
+
+fn capture_fault_bundle(client: &impl FaultBundleTransport) -> Value {
+    // Keep every request independent. In particular, /obs may be the
+    // component that faulted; runlog and health still belong in the bundle.
+    // The second health read proves the collector itself did not advance a
+    // stable bridge revision without requiring a mutating protocol call.
+    let health_before = client.get("/health");
+    let run_log = client.get("/runlog");
+    let observation = client.get("/obs?since=0");
+    let health_after = client.get("/health");
+
+    let health = health_before
+        .as_ref()
+        .ok()
+        .or_else(|| health_after.as_ref().ok());
+    let health_section = health
+        .map(diagnostic_health)
+        .map(available_section)
+        .unwrap_or_else(|| {
+            let before = health_before
+                .as_ref()
+                .err()
+                .map(CliError::message)
+                .unwrap_or("unavailable");
+            let after = health_after
+                .as_ref()
+                .err()
+                .map(CliError::message)
+                .unwrap_or("unavailable");
+            unavailable_section(format!("before: {before}; after: {after}"))
+        });
+
+    let identity_section = match health {
+        Some(value) => available_section(json!({
+            "mod": value.get("mod").cloned().unwrap_or(Value::Null),
+            "version": value.get("version").cloned().unwrap_or(Value::Null),
+            "buildHash": value.get("buildHash").cloned().unwrap_or(Value::Null),
+            "protocolVersion": value
+                .get("protocolVersion")
+                .cloned()
+                .unwrap_or(Value::Null),
+        })),
+        None => unavailable_section("health is unavailable"),
+    };
+
+    let events = observation
+        .as_ref()
+        .ok()
+        .and_then(|value| value.get("events"))
+        .and_then(Value::as_array);
+    let recent_events_section = events
+        .cloned()
+        .map(|events| available_section(Value::Array(events)))
+        .unwrap_or_else(|| unavailable_section("observation events are unavailable"));
+    let recent_errors_section = events
+        .map(|events| {
+            let errors = events
+                .iter()
+                .filter(|event| {
+                    event
+                        .get("type")
+                        .and_then(Value::as_str)
+                        .is_some_and(|event_type| {
+                            event_type.starts_with(FAULT_EVENT_ENGINEERROR)
+                                || event_type.starts_with(FAULT_EVENT_ASYNCFAULT)
+                        })
+                })
+                .cloned()
+                .collect();
+            available_section(Value::Array(errors))
+        })
+        .unwrap_or_else(|| unavailable_section("observation errors are unavailable"));
+
+    let run_section = match run_log.as_ref() {
+        Ok(log) => {
+            let run_id = log
+                .get("runId")
+                .cloned()
+                .or_else(|| {
+                    observation
+                        .as_ref()
+                        .ok()
+                        .and_then(|value| value.get("runId"))
+                        .cloned()
+                })
+                .or_else(|| health.and_then(|value| value.get("runId")).cloned())
+                .unwrap_or(Value::Null);
+            let seed = log.get("seed").cloned().unwrap_or(Value::Null);
+            available_section(json!({ "runId": run_id, "seed": seed }))
+        }
+        Err(_) => unavailable_section("run log metadata is unavailable"),
+    };
+    let last_accepted_verb_section = match run_log.as_ref() {
+        Ok(log) => available_section(
+            log.get("verbs")
+                .and_then(Value::as_array)
+                .and_then(|verbs| verbs.last())
+                .cloned()
+                .unwrap_or(Value::Null),
+        ),
+        Err(_) => unavailable_section("run log is unavailable"),
+    };
+
+    let before_revision = health_before
+        .as_ref()
+        .ok()
+        .and_then(|value| value.get("rev"))
+        .and_then(Value::as_u64);
+    let after_revision = health_after
+        .as_ref()
+        .ok()
+        .and_then(|value| value.get("rev"))
+        .and_then(Value::as_u64);
+    let complete = health_before.is_ok()
+        && health_after.is_ok()
+        && run_log.is_ok()
+        && observation.is_ok()
+        && events.is_some();
+
+    json!({
+        "ok": true,
+        "kind": "spirescry_fault_bundle",
+        "schemaVersion": 1,
+        "readOnly": true,
+        "complete": complete,
+        "revision": {
+            "before": before_revision,
+            "after": after_revision,
+            "unchanged": before_revision.zip(after_revision).map(|(before, after)| before == after),
+        },
+        "sections": {
+            "health": health_section,
+            "runLog": captured_section(&run_log),
+            "observation": captured_section(&observation),
+            "recentEvents": recent_events_section,
+            "recentErrors": recent_errors_section,
+            "identity": identity_section,
+            "run": run_section,
+            "lastAcceptedVerb": last_accepted_verb_section,
+        }
+    })
 }
 
 fn replay(client: &impl ReplayTransport, file: &str) -> CliResult<Value> {
@@ -562,6 +772,7 @@ fn replay_value(client: &impl ReplayTransport, log: &Value) -> CliResult<Value> 
                 "ifRev": rev,
                 "ifRun": run_id,
                 "follow": 10_000,
+                "includeSemanticState": true,
             }),
         )?;
         let outcome = response
@@ -1143,6 +1354,12 @@ impl ReplayTransport for Client {
     }
 }
 
+impl FaultBundleTransport for Client {
+    fn get(&self, path: &str) -> CliResult<Value> {
+        Client::get(self, path, Duration::from_millis(DEFAULT_HTTP_TIMEOUT_MS))
+    }
+}
+
 fn validate_health(health: &Value, action: Option<&str>, cheat: Option<&str>) -> CliResult<()> {
     let expected_build = std::env::var("SPIRESCRY_EXPECT_BUILD").ok();
     validate_health_expecting(health, action, cheat, expected_build.as_deref())
@@ -1396,12 +1613,14 @@ mod tests {
                 compact,
                 decision,
                 known_cards,
+                semantic_state,
             } => {
                 assert_eq!(since, Some(42));
                 assert_eq!(wait, Some(250));
                 assert!(!compact);
                 assert!(!decision);
                 assert!(known_cards.is_empty());
+                assert!(!semantic_state);
             }
             _ => panic!("expected obs command"),
         }
@@ -1415,6 +1634,198 @@ mod tests {
             Cmd::Obs { compact, .. } => assert!(compact),
             _ => panic!("expected obs command"),
         }
+    }
+
+    #[test]
+    fn parses_expanded_semantic_state_as_an_explicit_diagnostic() {
+        let cli =
+            Cli::try_parse_from(["spirescry", "obs", "--decision", "--semantic-state"]).unwrap();
+
+        match cli.cmd {
+            Cmd::Obs { semantic_state, .. } => assert!(semantic_state),
+            _ => panic!("expected obs command"),
+        }
+    }
+
+    #[test]
+    fn parses_one_command_fault_bundle() {
+        let cli = Cli::try_parse_from(["spirescry", "fault-bundle"]).unwrap();
+
+        assert!(matches!(cli.cmd, Cmd::FaultBundle));
+    }
+
+    struct FaultBundleSpy {
+        gets: RefCell<Vec<String>>,
+    }
+
+    impl FaultBundleSpy {
+        fn new() -> Self {
+            Self {
+                gets: RefCell::new(Vec::new()),
+            }
+        }
+    }
+
+    impl FaultBundleTransport for FaultBundleSpy {
+        fn get(&self, path: &str) -> CliResult<Value> {
+            self.gets.borrow_mut().push(path.to_string());
+            match path {
+                "/health" => Ok(json!({
+                    "ok": true,
+                    "mod": "spirescry",
+                    "version": "0.1.0",
+                    "buildHash": "abc1234.0123456789ab",
+                    "protocolVersion": PROTOCOL_VERSION,
+                    "runId": "run-7",
+                    "rev": 41,
+                })),
+                "/runlog" => Ok(json!({
+                    "ok": true,
+                    "kind": "diagnostic_reconstruction_recipe",
+                    "runId": "run-7",
+                    "liveRunId": "run-7",
+                    "seed": "BUNDLESEED",
+                    "verbs": [
+                        {"id": 1, "action": "new-run"},
+                        {
+                            "id": 2,
+                            "action": "cheat",
+                            "args": {"name": "engine-error-delayed"},
+                            "acceptedRev": 40,
+                            "errors": ["engine_error:forced delayed failure"]
+                        }
+                    ]
+                })),
+                "/obs?since=0" => Ok(json!({
+                    "phase": "map",
+                    "runId": "run-7",
+                    "rev": 41,
+                    "events": [
+                        {"rev": 40, "type": "engine_error:forced delayed failure"},
+                        {"rev": 41, "type": "step:cheat"}
+                    ]
+                })),
+                _ => Err(CliError::fatal(format!("unexpected GET {path}"))),
+            }
+        }
+    }
+
+    #[test]
+    fn fault_bundle_captures_complete_read_only_forensics() {
+        let spy = FaultBundleSpy::new();
+
+        let bundle = capture_fault_bundle(&spy);
+
+        assert_eq!(
+            *spy.gets.borrow(),
+            ["/health", "/runlog", "/obs?since=0", "/health"]
+        );
+        assert_eq!(bundle["kind"], "spirescry_fault_bundle");
+        assert_eq!(bundle["schemaVersion"], 1);
+        assert_eq!(bundle["readOnly"], true);
+        assert_eq!(bundle["complete"], true);
+        assert_eq!(
+            bundle["revision"],
+            json!({
+                "before": 41,
+                "after": 41,
+                "unchanged": true,
+            })
+        );
+        assert_eq!(bundle["sections"]["runLog"]["available"], true);
+        assert_eq!(bundle["sections"]["observation"]["available"], true);
+        assert_eq!(bundle["sections"]["health"]["available"], true);
+        assert_eq!(
+            bundle["sections"]["recentEvents"]["value"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            bundle["sections"]["recentErrors"]["value"],
+            json!([
+                {"rev": 40, "type": "engine_error:forced delayed failure"}
+            ])
+        );
+        assert_eq!(
+            bundle["sections"]["identity"]["value"],
+            json!({
+                "mod": "spirescry",
+                "version": "0.1.0",
+                "buildHash": "abc1234.0123456789ab",
+                "protocolVersion": PROTOCOL_VERSION,
+            })
+        );
+        assert_eq!(
+            bundle["sections"]["run"]["value"],
+            json!({
+                "runId": "run-7",
+                "seed": "BUNDLESEED",
+            })
+        );
+        assert_eq!(
+            bundle["sections"]["lastAcceptedVerb"]["value"]["action"],
+            "cheat"
+        );
+    }
+
+    struct ObservationFaultSpy;
+
+    impl FaultBundleTransport for ObservationFaultSpy {
+        fn get(&self, path: &str) -> CliResult<Value> {
+            match path {
+                "/health" => Ok(json!({
+                    "ok": true,
+                    "mod": "spirescry",
+                    "version": "0.1.0",
+                    "buildHash": "abc1234.0123456789ab",
+                    "protocolVersion": PROTOCOL_VERSION,
+                    "capabilities": {"verbs": ["abandon"]},
+                    "phase": "unknown",
+                    "rev": 52,
+                    "runId": "run-8",
+                    "executor": null,
+                    "executorStuckMs": 0,
+                    "pendingAsync": 0,
+                    "pendingEventOptions": 0,
+                    "queues": [],
+                    "databasePassword": "do-not-copy"
+                })),
+                "/runlog" => Ok(json!({
+                    "runId": "run-8",
+                    "seed": "PARTIAL",
+                    "verbs": [{"action": "end-turn", "acceptedRev": 51}]
+                })),
+                "/obs?since=0" => Err(CliError::fatal("snapshot projection failed")),
+                _ => Err(CliError::fatal(format!("unexpected GET {path}"))),
+            }
+        }
+    }
+
+    #[test]
+    fn fault_bundle_keeps_partial_capture_when_observation_failed() {
+        let bundle = capture_fault_bundle(&ObservationFaultSpy);
+
+        assert_eq!(bundle["complete"], false);
+        assert_eq!(bundle["revision"]["unchanged"], true);
+        assert_eq!(bundle["sections"]["health"]["available"], true);
+        assert_eq!(bundle["sections"]["runLog"]["available"], true);
+        assert_eq!(bundle["sections"]["run"]["value"]["seed"], "PARTIAL");
+        assert_eq!(
+            bundle["sections"]["lastAcceptedVerb"]["value"]["action"],
+            "end-turn"
+        );
+        assert_eq!(bundle["sections"]["observation"]["available"], false);
+        assert_eq!(bundle["sections"]["recentEvents"]["available"], false);
+        assert_eq!(bundle["sections"]["recentErrors"]["available"], false);
+        assert_eq!(
+            bundle["sections"]["observation"]["error"]["message"],
+            "snapshot projection failed"
+        );
+        let serialized = serde_json::to_string(&bundle).unwrap();
+        assert!(!serialized.contains("databasePassword"), "{serialized}");
+        assert!(!serialized.contains("do-not-copy"), "{serialized}");
     }
 
     #[test]

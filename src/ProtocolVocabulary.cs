@@ -99,10 +99,11 @@ public static class ProtocolVocabulary
         Converters = { new JsonStringEnumConverter(JsonNamingPolicy.CamelCase) },
     };
 
-    // v3 adds the typed semanticState replay fingerprint projection. A v2
-    // CLI hashes the same settled observation differently, so this must be
-    // a protocol break rather than a late replay divergence.
-    public const int ProtocolVersion = 3;
+    // v4 keeps the typed semanticState projection internal by default and
+    // requires replay/diagnostic callers to request its expanded wire form.
+    // A v3 CLI would hash the bounded response without those tokens and
+    // report a false divergence, so compatibility must fail first.
+    public const int ProtocolVersion = 4;
 
     public static string CreateArtifactJson() =>
         JsonSerializer.Serialize(new ArtifactDocument(
@@ -253,6 +254,7 @@ public static class ProtocolVocabulary
                 Shape("async-fault"),
                 Shape("engine-error"),
                 Shape("engine-error-delayed"),
+                Shape("observation-fault"),
                 Shape("event-fault-delayed"),
                 Shape("event-fault-late"),
                 Shape("event-complete-late"),

@@ -10,6 +10,7 @@ using MegaCrit.Sts2.Core.Localization;
 using MegaCrit.Sts2.Core.Localization.DynamicVars;
 using MegaCrit.Sts2.Core.Models.Events;
 using MegaCrit.Sts2.Core.Models;
+using MegaCrit.Sts2.Core.Models.Monsters;
 using MegaCrit.Sts2.Core.Models.Powers;
 using MegaCrit.Sts2.Core.MonsterMoves.Intents;
 using MegaCrit.Sts2.Core.Nodes;
@@ -491,7 +492,7 @@ internal static class Snapshotter
         ];
     }
 
-    private static object[] PowerViews(Creature c)
+    private static object[] PowerViews(Creature c, bool compactElides = false)
     {
         try
         {
@@ -499,11 +500,35 @@ internal static class Snapshotter
             {
                 id = p.Id.Entry,
                 amount = p.Amount,
-                description = PowerDescription(p),
+                description = compactElides && _compact ? null : PowerDescription(p),
             }).ToArray();
         }
         catch { return []; }
     }
+
+    private static string OstyState(Creature? osty) => osty is null
+        ? SemanticToken("osty", false)
+        : SemanticToken(
+            "osty",
+            true,
+            osty.Monster?.Id.Entry,
+            osty.CurrentHp,
+            osty.MaxHp,
+            osty.Block,
+            osty.IsAlive,
+            PowerState(osty));
+
+    private static object? OstyView(Creature? osty) => osty is null
+        ? null
+        : new
+        {
+            model = osty.Monster?.Id.Entry,
+            title = _compact ? null : SafeText(osty.Monster?.Title),
+            hp = new[] { osty.CurrentHp, osty.MaxHp },
+            block = osty.Block,
+            alive = osty.IsAlive,
+            powers = PowerViews(osty, compactElides: true),
+        };
 
     // Power descriptions have the same split as cards: Description is the
     // static catalog text, while SmartDescription carries live values such
@@ -828,9 +853,6 @@ internal static class Snapshotter
         var key = CardSpecifier.TextKey(card);
         return !_knownCardTexts.Contains(key) && _emittedCardTexts.Add(key);
     }
-
-    private static bool CanPlayCard(CardModel card) =>
-        ConsumerSemanticRead.CardPlayable(() => card.CanPlay(out _, out _));
 
     // Shared per-card views — both boots build their snapshots through
     // these, so the shapes can't drift between modes (tests/parity.py
@@ -1258,6 +1280,8 @@ internal static class Snapshotter
         if (pcs is null || creature is null)
             return new SnapshotContract(phase) { Available = false };
         var facing = FacingOf(creature);
+        var osty = state.Allies.FirstOrDefault(c =>
+            c?.Monster is Osty && c.PetOwner == player);
 
         var you = new SnapshotCombatantContract
         {
@@ -1272,6 +1296,7 @@ internal static class Snapshotter
                 .. player!.Relics
                     .Select(relic => SemanticToken("combatRelic", RelicStateToken(relic)))
                     .OrderBy(token => token, StringComparer.Ordinal),
+                OstyState(osty),
                 SemanticToken("facing", facing),
             ],
         };
@@ -1282,8 +1307,14 @@ internal static class Snapshotter
             // Counters tick mid-combat (every-N relics); the full
             // relic story lives in the out-of-combat footer.
             relics = player!.Relics
-                .Select(r => (object)new { model = r.Id.Entry, counter = RelicCounter(r) })
+                .Select(r => (object)new
+                {
+                    model = r.Id.Entry,
+                    counter = RelicCounter(r),
+                    usedUp = r.IsUsedUp,
+                })
                 .ToArray(),
+            osty = OstyView(osty),
             facing,
         });
         var enemies = state.Enemies
@@ -1361,7 +1392,8 @@ internal static class Snapshotter
                 }, model: c.Id.Entry, selector: selector,
                     target: c.TargetType.ToString().ToLowerInvariant(),
                     semanticState: [CardStateToken(c, liveCost: true)]);
-                card.Playable = CanPlayCard(c);
+                CardCombatObservation.ApplyPlayability(
+                    card, CardPlayabilityGate.Evaluate(c));
                 return card;
             })
             .ToArray();

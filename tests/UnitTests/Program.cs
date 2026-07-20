@@ -137,12 +137,12 @@ internal static class Tests
             artifact["cheatArgumentShapes"]!.AsArray().Count);
     }
 
-    public static void ProtocolVersionCoversSemanticReplayFingerprints()
+    public static void ProtocolVersionCoversBoundedSemanticResponses()
     {
-        // v3 is the first version whose replay fingerprint includes the
-        // typed semanticState projection. A v2 CLI must reject a v3 host
-        // before it can silently hash the same observation differently.
-        Equal(3, ProtocolVocabulary.ProtocolVersion);
+        // v4 makes expanded semanticState opt-in on the wire while replay
+        // keeps hashing it. A v3 CLI would omit the opt-in and calculate a
+        // narrower fingerprint, so it must reject a v4 host first.
+        Equal(4, ProtocolVocabulary.ProtocolVersion);
     }
 
     public static void ProtocolArtifactPublishesConsumerProjectionSchema()
@@ -452,6 +452,71 @@ internal static class Tests
         Equal(0, ticks.TickWaits + ticks.ChangeWaits);
     }
 
+    public static void SettlementTurnsCaptureFailuresIntoTypedFaults()
+    {
+        var clock = new FakeSettlementClock();
+        var module = new SettlementModule(
+            new ThrowingSettlementTicks(
+                new InvalidOperationException("forced observation failure")),
+            clock);
+
+        var result = module.Follow(Request(
+            acceptedRevision: 17,
+            acceptedRunId: "accepted-run"))
+            .GetAwaiter().GetResult();
+
+        Equal(SettlementOutcome.Fault, result.Outcome);
+        False(result.Probe.ObservationAvailable);
+        Equal(17L, result.Probe.Revision);
+        Equal("accepted-run", result.Probe.RunId);
+        True(result.Probe.Errors.Single().StartsWith(
+            "async_fault:observation:InvalidOperationException:",
+            StringComparison.Ordinal));
+    }
+
+    public static void ObservationCaptureRetriesTheResultingPhaseAtCombatTeardown()
+    {
+        var phases = new Queue<Phase>([Phase.Combat, Phase.Rewards]);
+        var attempts = 0;
+
+        var captured = SettlementObservationCapture.Capture(
+            () => phases.Count > 1 ? phases.Dequeue() : phases.Peek(),
+            () =>
+            {
+                attempts++;
+                if (attempts == 1)
+                    throw new InvalidOperationException(
+                        "failed to read power semantic state after 1 attempt");
+                return new SnapshotContract(Phase.Rewards);
+            },
+            revision: () => 23,
+            runId: () => "run-after-combat");
+
+        Equal(2, attempts);
+        True(captured.ObservationAvailable);
+        Equal(Phase.Rewards, captured.Observation.Phase);
+        Equal(23L, captured.Observation.Revision);
+        Equal("run-after-combat", captured.Observation.RunId);
+        Equal(0, captured.Errors.Count);
+    }
+
+    public static void ObservationCaptureKeepsStableSemanticReadFailuresVisible()
+    {
+        var captured = SettlementObservationCapture.Capture(
+            () => Phase.Combat,
+            () => throw new InvalidOperationException(
+                "failed to read power semantic state after 1 attempt"),
+            revision: () => 29,
+            runId: () => "broken-run");
+
+        False(captured.ObservationAvailable);
+        Equal(Phase.Combat, captured.Observation.Phase);
+        Equal(29L, captured.Observation.Revision);
+        Equal("broken-run", captured.Observation.RunId);
+        True(captured.Errors.Single().Contains(
+            "failed to read power semantic state", StringComparison.Ordinal));
+    }
+
     public static void SettlementExecutorWatchdogUsesInjectedClockAndFiresOnce()
     {
         var clock = new FakeSettlementClock();
@@ -720,6 +785,55 @@ internal static class Tests
         var legal = DecisionProjection.LegalVerbs(snapshot, runActive: true);
 
         Equal("pick-card,skip,abandon", string.Join(',', legal));
+    }
+
+    public static void QueenBoundDrawsExposeHookBlockAndKeepLegalPlayInAgreement()
+    {
+        SnapshotItemContract Card(
+            string selector, CardPlayabilityState playability)
+        {
+            var card = new SnapshotItemContract
+            {
+                Model = selector.Split('!')[0],
+                Selector = selector,
+            };
+            CardCombatObservation.ApplyPlayability(card, playability);
+            return card;
+        }
+
+        var chains = CardPlayabilityState.Blocked(
+            "BlockedByHook", "CHAINS_OF_BINDING_POWER");
+        var bound = new[]
+        {
+            Card("STRIKE_R!BOUND", chains),
+            Card("DEFEND_R!BOUND", chains),
+            Card("BASH!BOUND", chains),
+        };
+        var unbound = Card("STRIKE_R", CardPlayabilityState.PlayableCard);
+        var snapshot = new SnapshotContract(Phase.Combat)
+        {
+            Side = "player",
+            ActionsDisabled = false,
+            Hand = [.. bound, unbound],
+        };
+
+        foreach (var card in snapshot.Hand.Take(3))
+        {
+            False(card.Playable ?? true);
+            var wire = card.ToJsonObject();
+            Equal("BlockedByHook",
+                wire["unplayableReason"]!.GetValue<string>());
+            Equal("CHAINS_OF_BINDING_POWER",
+                wire["unplayablePreventer"]!.GetValue<string>());
+        }
+        True(snapshot.Hand[3].Playable ?? false);
+        Equal(RejectionCodes.NotPlayable, chains.RejectionCode);
+        Equal("play,end-turn", string.Join(',',
+            DecisionProjection.LegalVerbs(snapshot, runActive: false)));
+
+        snapshot.Hand = bound;
+        Equal("end-turn", string.Join(',',
+            DecisionProjection.LegalVerbs(snapshot, runActive: false)));
     }
 
     public static void ErrorEventsCondenseLogLinesIntoBoundedTokens()
@@ -1112,6 +1226,44 @@ internal static class Tests
         Equal("STRIKE_R", wire["hand"]![0]!["model"]!.GetValue<string>());
         Equal(7, wire["phaseSpecific"]!["value"]!.GetValue<int>());
         True(wire["phaseSpecific"]!["missing"] is null);
+    }
+
+    public static void AgentWireOmitsExpandedSemanticStateUnlessDiagnosing()
+    {
+        SnapshotContract Build(int pileCopies)
+        {
+            var snapshot = new SnapshotContract(Phase.Combat)
+            {
+                SemanticState = Enumerable.Range(0, pileCopies)
+                    .Select(index => $"pile:draw:STRIKE_IRONCLAD:{index}")
+                    .ToArray(),
+                Hand =
+                [
+                    new SnapshotItemContract
+                    {
+                        Model = "STRIKE_IRONCLAD",
+                        SemanticState = ["card:STRIKE_IRONCLAD:1"],
+                    },
+                ],
+                Legal = ["play", "end-turn"],
+            };
+            return snapshot;
+        }
+
+        var small = Build(1);
+        var large = Build(40);
+        var smallWire = small.ToAgentJsonObject();
+        var largeWire = large.ToAgentJsonObject();
+        var diagnostic = large.ToAgentJsonObject(includeSemanticState: true);
+
+        False(smallWire.ContainsKey("semanticState"));
+        False(largeWire.ContainsKey("semanticState"));
+        False(largeWire["hand"]![0]!.AsObject().ContainsKey("semanticState"));
+        True(diagnostic["semanticState"]!.AsArray().Count == 40);
+        True(diagnostic["hand"]![0]!["semanticState"] is JsonArray);
+        True(largeWire.ToJsonString().Length
+            <= smallWire.ToJsonString().Length + 8);
+        False(small.ConsumerFingerprint() == large.ConsumerFingerprint());
     }
 
     public static void SnapshotContractOwnsFollowAndAttributionMetadata()
@@ -1539,12 +1691,14 @@ internal static class Tests
         long startedRevision = 3,
         long acceptedRevision = 4,
         long acceptedTick = 0,
-        int timeoutMs = 100) => new(
+        int timeoutMs = 100,
+        string acceptedRunId = "run") => new(
             phaseBefore,
             startedRevision,
             acceptedRevision,
             acceptedTick,
-            timeoutMs);
+            timeoutMs,
+            acceptedRunId);
 
     private static SettlementProbe Probe(
         long revision = 4,
@@ -1732,4 +1886,16 @@ internal sealed class FakeSettlementTicks : ISettlementTickSource
         _clock.Advance(Math.Min(_waitAdvanceMs, timeoutMs));
         return Task.CompletedTask;
     }
+}
+
+internal sealed class ThrowingSettlementTicks(Exception exception) : ISettlementTickSource
+{
+    public Task<SettlementProbe> Capture(long startedRevision) =>
+        Task.FromException<SettlementProbe>(exception);
+
+    public Task WaitForChange(long afterRevision, int timeoutMs) =>
+        Task.CompletedTask;
+
+    public Task WaitForTick(long afterTick, int timeoutMs) =>
+        Task.CompletedTask;
 }

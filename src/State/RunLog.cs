@@ -82,8 +82,9 @@ public static class RunLog
             // after the host log rotates away.
             if (errors is { Length: > 0 })
                 entry.Errors = errors.ToArray();
-            if (outcome.IsReplayable())
-                entry.Fingerprint = Fingerprint(observation);
+            entry.Fingerprint = outcome.IsReplayable()
+                ? Fingerprint(observation)
+                : null;
         }
     }
 

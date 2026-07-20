@@ -14,10 +14,12 @@
     <Compile Include="../../src/Reflect.cs" Link="Reflect.cs" />
     <Compile Include="../../src/RejectionCodes.cs" Link="RejectionCodes.cs" />
     <Compile Include="../../src/State/Settlement.cs" Link="Settlement.cs" />
+    <Compile Include="../../src/State/SettlementObservationCapture.cs" Link="SettlementObservationCapture.cs" />
     <Compile Include="../../src/State/RichText.cs" Link="RichText.cs" />
     <Compile Include="../../src/State/CardSpecifier.cs" Link="CardSpecifier.cs" />
     <Compile Include="../../src/State/CollectionSnapshot.cs" Link="CollectionSnapshot.cs" />
     <Compile Include="../../src/State/ConsumerSemanticRead.cs" Link="ConsumerSemanticRead.cs" />
+    <Compile Include="../../src/State/CardPlayability.cs" Link="CardPlayability.cs" />
     <Compile Include="../../src/State/SnapshotContract.cs" Link="SnapshotContract.cs" />
     <Compile Include="../../src/State/DecisionProjection.cs" Link="DecisionProjection.cs" />
     <Compile Include="../../src/State/ErrorEvents.cs" Link="ErrorEvents.cs" />

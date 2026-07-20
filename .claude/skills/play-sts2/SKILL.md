@@ -196,12 +196,18 @@ Fault-event prefixes: `engine_error:`, `async_fault:`, `engine_note:`.
    acceptance and settlement (the first two fault-event prefixes above). The
    engine logs-and-swallows faults inside its own task chains, so a verb
    whose effect **half-executed** still reads `settled` — non-empty
-   `errors` (the CLI also warns on stderr) is an impossible observation:
-   save `runlog` first, then follow that protocol before the next verb.
+   `errors` (the CLI also warns on stderr) is an impossible observation.
    An entry with the third fault-event prefix in `events` is a
    classified-benign engine line (e.g. the victory-cleanup stale pop) —
    informational, never pollution.
-5. Repeat 2–4 until `game_over`; report outcome, where it ended
+   Any non-empty follow `errors`, transport failure after acceptance, or
+   impossible observation activates the same protocol: the first forensic
+   step is `spirescry fault-bundle > run-<seed>-fault.json`. Do not rescry,
+   inspect health, retry, fire an escape verb, or abandon before that one
+   read-only command finishes; its JSON captures each source independently
+   and marks an unavailable observation instead of losing the run log.
+5. Repeat 2–4 until a stable current `game_over` observation meets the
+   terminal rules below; report outcome, where it ended
    (`actNumber` / `actFloor` / `encounter.title`), and the seed, then
    `abandon` to return to the menu.
 
@@ -230,25 +236,58 @@ never report it as the source run's outcome or history.
 
 ## The ledger
 
-Keep a six-line ledger in your head across the turn, updated after
+Keep this ledger in your head across the turn, updated after
 every followed action, instead of re-deriving from full JSON each read:
 
 ```
-you:    hp / block / energy / stars
-orbs:   slots / ordered queue / passive → evoke values  (Defect only)
-facing: left|right / who's behind          (surround fights only)
-threat: enemy hp / incoming damage × hits / stacks that gate damage
-turn:   cards played so far, once-per-turn triggers used, potions left
-run:    clean | polluted | reconstructed
+you:       hp / block / energy / stars
+companion: you.osty model/title / hp [current, max] / block / alive / powers
+           (Necrobinder only)
+orbs:      slots / ordered queue / passive → evoke values  (Defect only)
+facing:    left|right / who's behind          (surround fights only)
+threat:    enemy hp / incoming damage × hits / stacks that gate damage
+relics:    one-shot availability from you.relics[].usedUp (combat) or
+           player.relicStates[].usedUp
+turn:      cards played so far, once-per-turn triggers used, potions left
+run:       clean | polluted | reconstructed
 ```
 
 Arithmetic mistakes at the final turn kill runs; the ledger is where
 you catch them. In surround fights (back-attack powers on the
 enemies), track which way you face after every targeted play — hits
 from behind are half again as hard, and each targeted card can turn
-you around. The `run` line is your integrity flag: it starts `clean`
+you around. For a one-shot revival relic, `usedUp: false` means available
+and `usedUp: true` means consumed; its counter is not a consumption flag.
+For Necrobinder, a null `you.osty` means Osty is not summoned;
+otherwise read Osty's mutable values from that object. Never decode
+`semanticState` to recover either contract, and never infer Osty's HP from a
+card preview; previews are only a cross-check against the structured state.
+The `run` line is your integrity flag: it starts `clean`
 and only ever degrades (see the next two sections); carry it into
 your report.
+
+## Terminal and revival stability
+
+Declare victory or defeat only from the stable current `obs` after settlement
+of the followed verb. An intermediate phase event is evidence of progress,
+not a terminal result; the same is true of an actions-disabled frame seen
+while settlement is still running. If any revival relic still has
+`usedUp: false`, lethal damage may still resolve back into combat. Do not fire
+another verb; let follow reach its boundary and then use its current `obs` (or
+rescry once only after a completed boundary). A genuine defeat is a stable
+current `obs` with `phase: game_over` and `outcome: defeat`, after revival
+state has settled.
+
+### Worked revival sequence: Queen + Lizard Tail
+
+1. Before Queen's lethal end-of-turn damage, record positive player HP and
+   `LIZARD_TAIL` with `usedUp: false`; the revival is available.
+2. Follow `end-turn`. A lethal-looking intermediate frame or phase event is
+   not the result. Settlement's stable current observation returns to combat,
+   Lizard Tail revives to 24 HP, and `usedUp: true` now records consumption.
+3. Continue with the consumed state in the ledger. On a later lethal hit,
+   settlement ends at one stable `game_over` observation with
+   `outcome: defeat` and `usedUp: true`: this is the later genuine defeat.
 
 ## Wedge recovery
 
@@ -277,10 +316,9 @@ this as a `wedge:DeadBoard` event after ~8 s; older hosts stay silent
 (the stuck-executor watchdog can't time an executor that's already
 gone). Either way, more verbs only pollute the evidence. Instead:
 
-1. Save `spirescry runlog > run-<seed>-fault.json` — the fingerprinted
-   verb trail dies with the run, so capture it before anything else —
-   then capture `obs`, `health`, the last verb you fired, and the
-   exception from the host log.
+1. Run `spirescry fault-bundle > run-<seed>-fault.json` before anything
+   else. It captures runlog, observation, health, recent errors/events,
+   identity, run/seed, and the last accepted verb without advancing the run.
 2. Report a **technical abort**, distinct from a game loss — the
    outcome is "host fault", not "died to X".
 3. `abandon`; if even that rejects, restart the host.
@@ -293,13 +331,14 @@ you did not cause. A changed run is no longer yours.
 Resources moving at a frozen `rev`, a claim that never lands, an effect
 whose promise disagrees with a `settled` board, or a follow response with
 non-empty `errors` is a bridge fault, not a puzzle to poll at. The order
-is fixed, and forensics come first: one rescry → **save
-`spirescry runlog > run-<seed>-fault.json` before any further verb,
-abandon included** (the fingerprint trail is run-scoped; abandon or a
-host restart destroys it) → `spirescry health` → use a currently `legal`
-escape verb if one exists → **mark the run polluted**. Keep playing only
-if the bridge still returns settled decisions; disclose the fault and
-treat conclusions drawn from the polluted state as suspect.
+is fixed, and forensics come first: **save
+`spirescry fault-bundle > run-<seed>-fault.json` before any other command,
+abandon included** (the fingerprint trail is run-scoped; abandon or a host
+restart destroys it) → inspect the saved bundle → `spirescry health` if a
+fresh health check is still useful → use a currently `legal` escape verb if
+one exists → **mark the run polluted**. Keep playing only if the bridge still
+returns settled decisions; disclose the fault and treat conclusions drawn
+from the polluted state as suspect.
 
 A host restart ends the run, full stop. Rebuilding the same seed and
 deck via cheats yields a **reconstructed** run — a new run whose RNG

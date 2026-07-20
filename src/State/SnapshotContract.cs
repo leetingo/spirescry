@@ -558,6 +558,32 @@ internal sealed class SnapshotContract
 
     internal JsonObject ToJsonObject() => (JsonObject)_wire.DeepClone();
 
+    // The expanded semantic projection is an internal settlement/replay
+    // input, not part of the normal decision payload. Keep it available for
+    // explicit diagnostics while bounding default responses independently of
+    // deck and pile size.
+    internal JsonObject ToAgentJsonObject(bool includeSemanticState = false)
+    {
+        var result = ToJsonObject();
+        if (!includeSemanticState)
+            StripSemanticState(result);
+        return result;
+    }
+
+    private static void StripSemanticState(JsonNode node)
+    {
+        if (node is JsonObject obj)
+        {
+            obj.Remove(SnapshotConsumerSchema.Top.SemanticStateWire);
+            foreach (var value in obj.Select(pair => pair.Value).OfType<JsonNode>())
+                StripSemanticState(value);
+            return;
+        }
+        if (node is JsonArray array)
+            foreach (var value in array.OfType<JsonNode>())
+                StripSemanticState(value);
+    }
+
     // The two consumers that need a stable representation (GUI settlement
     // and replay attribution) deliberately share this named projection.
     // Extension data is presentation-only: adding or renaming it cannot
