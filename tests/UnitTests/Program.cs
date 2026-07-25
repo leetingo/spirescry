@@ -452,6 +452,36 @@ internal static class Tests
         Equal(0, ticks.TickWaits + ticks.ChangeWaits);
     }
 
+    public static void GameOverOutcomeTrustsTheVictoryRoomOverTheRunClock()
+    {
+        // The V1 regression: WinTime is the run duration in whole seconds, so a
+        // cheat-driven clear finishing inside one second leaves it 0. Deriving
+        // the outcome from WinTime alone reported that real victory as a defeat.
+        Equal("victory", RunOutcomeRules.GameOverOutcome(
+            isAbandoned: false, endedInVictoryRoom: true, winTime: 0));
+        Equal("defeat", RunOutcomeRules.GameOverOutcome(
+            isAbandoned: false, endedInVictoryRoom: false, winTime: 0));
+    }
+
+    public static void GameOverOutcomeStillAcceptsTheRunClockAsCorroboration()
+    {
+        // WinTime was the previous sole test; keeping it can only add victories,
+        // never remove one, so a won run that took measurable time still reads
+        // as a victory even if the room signal is unavailable.
+        Equal("victory", RunOutcomeRules.GameOverOutcome(
+            isAbandoned: false, endedInVictoryRoom: false, winTime: 12));
+    }
+
+    public static void GameOverOutcomeReportsAbandonBeforeAnythingElse()
+    {
+        // Walking away is not a loss on the board, and it outranks both other
+        // signals — an abandon from the final act must not read as a win.
+        Equal("abandoned", RunOutcomeRules.GameOverOutcome(
+            isAbandoned: true, endedInVictoryRoom: true, winTime: 30));
+        Equal("abandoned", RunOutcomeRules.GameOverOutcome(
+            isAbandoned: true, endedInVictoryRoom: false, winTime: 0));
+    }
+
     public static void EventOptionTrackerOutlivesAbandonThenNewRunRotations()
     {
         // The P16 shape, and the regression this replaced rotation counting

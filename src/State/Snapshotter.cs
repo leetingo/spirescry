@@ -315,18 +315,13 @@ internal static class Snapshotter
         var snapshot = new SnapshotContract(phase)
         {
             Act = rs.CurrentActIndex,
-            // The engine's own game-over screen decides this from the room the
-            // run ended in (NGameOverScreen: `win = CurrentRoom?.IsVictoryRoom`,
-            // the final act's Architect event), so read the same signal.
-            // WinTime cannot carry it alone: it is the run's duration in whole
-            // seconds, so a cheat-driven clear that finishes inside one second
-            // leaves it 0 and reported a real victory as a defeat. It stays as
-            // a corroborating signal because it was the previous sole test.
-            Outcome = rm.IsAbandoned
-                ? "abandoned"
-                : rs.CurrentRoom?.IsVictoryRoom is true || rm.WinTime > 0
-                    ? "victory"
-                    : "defeat",
+            // Read the same victory signal the engine's own game-over screen
+            // uses; RunOutcomeRules owns the rule and says why WinTime cannot
+            // carry it alone.
+            Outcome = RunOutcomeRules.GameOverOutcome(
+                rm.IsAbandoned,
+                rs.CurrentRoom?.IsVictoryRoom is true,
+                rm.WinTime),
             Hp = creature is null ? null : [creature.CurrentHp, creature.MaxHp],
             Gold = player?.Gold,
             SemanticState =

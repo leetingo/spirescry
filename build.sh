@@ -15,6 +15,8 @@
 #                (--foreground: exec in this process; for sandboxed
 #                executors that reap background children)
 #   verify       conformance: tests/parity.py on both boots + key-set diff
+#   gate         the pre-merge gate: the CI set plus the e2e suite CI cannot
+#                run (needs headless-setup; e2e port via SPIRESCRY_GATE_PORT)
 #   stamp        print the buildHash this checkout would stamp (git ref +
 #                content hash of the source trees and every lib/*.dll)
 #   stop         stop a running game or host
@@ -567,6 +569,55 @@ verify() {
     ok "both boots pass, snapshots agree"
 }
 
+# Everything that must pass before a merge: the GitHub-hosted CI set plus the
+# end-to-end suite. CI cannot run e2e — the host is built from the game's
+# non-distributable dlls — so this is the only place those cases are exercised.
+# Needs ./build.sh headless-setup to have been run once.
+gate() {
+    [ -d headless/build/lib ] \
+        || die "headless/build/lib missing — run: ./build.sh headless-setup"
+
+    # e2e boots its own host. Pin the port so an ambient STS2_AGENT_PORT (7777,
+    # say) cannot aim the suite at a live host and drive someone's run; e2e's
+    # boot wait treats any answering bridge as its own.
+    gate_port="${SPIRESCRY_GATE_PORT:-7779}"
+    if curl -sf "http://127.0.0.1:$gate_port/health" >/dev/null 2>&1; then
+        die "a bridge already answers on port $gate_port — the e2e gate needs it free (override with SPIRESCRY_GATE_PORT)"
+    fi
+
+    step "gate: build mod, cli, host"
+    build_mod
+    build_cli
+    # /health.buildHash comes from this stamp; an unstamped host fails e2e B1.
+    dotnet build -c Release -p:SourceRevisionId="spirescry.$(current_stamp)" \
+        headless/Host/Host.csproj --nologo --verbosity minimal
+
+    step "gate: C# unit tests"
+    dotnet run --project tests/UnitTests/UnitTests.csproj
+
+    step "gate: protocol artifact"
+    bash tests/protocol_artifact_test.sh
+
+    step "gate: python unit tests"
+    for t in protocol_contract_test projection_schema_drift_test \
+             world_walker_test parity_settlement_test e2e_settlement_test \
+             build_identity_test play_skill_fault_protocol_test; do
+        python3 "tests/$t.py"
+    done
+
+    step "gate: CLI unit tests"
+    cargo test --manifest-path cli/Cargo.toml
+
+    step "gate: build stop + play skill pre-flight"
+    tests/build_stop_test.sh
+    tests/play_skill_preflight_test.sh
+
+    step "gate: end-to-end (quick, self-booted on port $gate_port)"
+    STS2_AGENT_PORT="$gate_port" python3 tests/e2e.py --boot --quick
+
+    ok "gate passed — CI set plus the local-only e2e suite"
+}
+
 usage() { sed -n '2,/^$/p' "$0" | sed -E 's/^# ?//'; exit 1; }
 
 [ "$#" -eq 0 ] && usage
@@ -589,6 +640,7 @@ while [ "$#" -gt 0 ]; do
                 launch_host
             fi ;;
         verify)     verify ;;
+        gate)       gate ;;
         stamp)      current_stamp ;;
         stop)       stop_game ;;
         -h|--help|help) usage ;;
