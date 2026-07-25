@@ -18,6 +18,7 @@ no Steam). Case groups:
   W  skip: card reward + treasure walk away without granting
   X  special screens: crystal-sphere minigame, Neow bundle select
   K  cheat surface: gold / relic / card-upgraded / card graft real state
+  L  localized item titles: cards, relics, and potions follow host language
   V  victory: cheat-driven full clear to a victory game_over
   E  events: all 57 forced; every unlocked option clicked and drained
      to completion (--quick: first option only)
@@ -1282,7 +1283,13 @@ def w5():
     assert status == 400 and result.get("err") == REJECTION.BAD_INDEX, \
         f"consumed reward slot was claimable twice: {status} {result}"
     belt_after_second = obs()["player"]["potions"]
-    assert belt_after_second == belt_after_first, \
+    # The followed decision elides presentation fields that the subsequent
+    # full observation restores; idempotency is the stable belt identity.
+    def potion_identity(potion):
+        return potion["model"], potion["slot"], potion["target"]
+    assert [potion_identity(potion) for potion in belt_after_second] == [
+        potion_identity(potion) for potion in belt_after_first
+    ], \
         f"repeat reward claim changed the belt: {belt_after_first} -> {belt_after_second}"
     assert sum(p["model"] == potion_model for p in belt_after_second) == model_count_before + 1, \
         f"repeat reward claim duplicated {potion_model}: {belt_after_second}"
@@ -1764,6 +1771,94 @@ def k5():
     assert stable.get("changed") is False and stable.get("events") == [], stable
     to_menu()
 
+
+# ---------- L: localized item titles ----------
+
+@case("L1 item titles follow the configured host language", boot_only=True)
+def l1():
+    expected = {
+        "eng": {
+            "BASH": "Bash",
+            "DEFEND_IRONCLAD": "Defend",
+            "STRIKE_IRONCLAD": "Strike",
+            "BURNING_BLOOD": "Burning Blood",
+            "FLEX_POTION": "Flex Potion",
+        },
+        "zhs": {
+            "BASH": "痛击",
+            "DEFEND_IRONCLAD": "防御",
+            "STRIKE_IRONCLAD": "打击",
+            "BURNING_BLOOD": "燃烧之血",
+            "FLEX_POTION": "肌肉药水",
+        },
+    }
+    language = os.environ.get("STS2_AGENT_LANG", "eng")
+    assert language in expected, \
+        f"L1 must boot with eng or zhs, got STS2_AGENT_LANG={language}"
+    titles = expected[language]
+
+    d = to_map(seed="CILOCALIZEDTITLES")
+    deck = d["player"]["deck"]
+    assert deck and all(card.get("title") for card in deck), deck
+    for model in ("BASH", "DEFEND_IRONCLAD", "STRIKE_IRONCLAD"):
+        assert next(card["title"] for card in deck if card["model"] == model) \
+            == titles[model], deck
+    burning_blood = next(
+        relic for relic in d["player"]["relicStates"]
+        if relic["model"] == "BURNING_BLOOD")
+    assert burning_blood["title"] == titles["BURNING_BLOOD"], burning_blood
+
+    compact = run("obs", "--compact")
+    assert isinstance(compact["player"]["deck"], dict), compact["player"]["deck"]
+    assert compact["player"]["deck"].get("STRIKE_IRONCLAD", 0) > 0, \
+        compact["player"]["deck"]
+    assert all(relic.get("model") and relic.get("title") is None
+               for relic in compact["player"]["relicStates"]), \
+        compact["player"]["relicStates"]
+
+    bridge.follow("cheat", PHASE.COMBAT, "CULTISTS_NORMAL")
+    bridge.follow("cheat", "potion", "FLEX_POTION")
+    d = obs()
+    assert d["phase"] == PHASE.COMBAT, d["phase"]
+    assert d["hand"] and all(card.get("title") for card in d["hand"]), d["hand"]
+    for model in ("BASH", "DEFEND_IRONCLAD", "STRIKE_IRONCLAD"):
+        matching = [card for card in d["hand"] if card["model"] == model]
+        if matching:
+            assert all(card["title"] == titles[model] for card in matching), matching
+
+    # titles is index-aligned with cards, not a selector lookup: one selector
+    # can cover copies whose titles differ by upgrade level.
+    for pile in d["piles"].values():
+        selectors = pile["cards"]
+        assert isinstance(selectors, list), pile
+        assert len(pile["titles"]) == len(selectors), pile
+        assert all(pile["titles"]), pile
+    draw = d["piles"]["draw"]
+    assert ("DEFEND_IRONCLAD", titles["DEFEND_IRONCLAD"]) in \
+        list(zip(draw["cards"], draw["titles"])), draw
+
+    burning_blood = next(
+        relic for relic in d["you"]["relics"]
+        if relic["model"] == "BURNING_BLOOD")
+    assert burning_blood["title"] == titles["BURNING_BLOOD"], burning_blood
+    flex = next(
+        potion for potion in d["potions"]
+        if potion["model"] == "FLEX_POTION")
+    assert flex["title"] == titles["FLEX_POTION"], flex
+
+    compact = run("obs", "--compact")
+    assert all(card.get("model") and card.get("selector")
+               and card.get("title") is None for card in compact["hand"]), \
+        compact["hand"]
+    assert all(pile["cards"] is not None and pile.get("titles") is None
+               for pile in compact["piles"].values()), compact["piles"]
+    assert all(relic.get("model") and relic.get("title") is None
+               for relic in compact["you"]["relics"]), compact["you"]["relics"]
+    assert all(potion.get("model") and potion.get("title") is None
+               for potion in compact["potions"]), compact["potions"]
+    to_menu()
+
+
 @case("C4 DECIMILLIPEDE last segment dies to end-turn Lightning")
 def c4():
     # Exact #67/#68 regression: ReattachPower owns the segmented death
@@ -1851,6 +1946,7 @@ def c6():
     run("end-turn")
     first = bridge.wait_phase(PHASE.HAND_SELECT, timeout=25)
     assert first.get("cards"), first
+    assert all(card.get("title") for card in first["cards"]), first["cards"]
 
     bridge.follow("cheat", "card", "ARMAMENTS")
     bridge.follow("cheat", "energy", "99")
