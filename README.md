@@ -47,8 +47,10 @@ carries a `player` footer (hp, gold, potions, relics, relicStates, deck);
 `null` in compact mode). Non-compact hand, potion,
 deck, and combat-relic entries likewise pair their stable English model or
 selector with a display title localized by the host. Combat pile `cards`
-retain their selector-string shape and add a `titles` lookup keyed by those
-selectors. Combat's `you.relics` carries `{model, title, counter, usedUp}` so
+retain their selector-string shape and add a same-length `titles` array
+aligned by index — a selector drops the upgrade level a title can keep, so a
+per-selector lookup would collapse two copies onto one
+title. Combat's `you.relics` carries `{model, title, counter, usedUp}` so
 every-N counters are visible where they tick and one-shot relics cannot look
 available after consumption. Necrobinder combat also exposes `you.osty` as
 either `null` or structured model/title, hp, block, alive, and powers state.

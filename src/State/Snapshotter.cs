@@ -411,7 +411,7 @@ internal static class Snapshotter
                 .Select(c => new
                 {
                     model = c.Id.Entry,
-                    title = c.Title,
+                    title = CardSpecifier.Title(c),
                     upgraded = c.IsUpgraded,
                     enchant = c.Enchantment?.Id.Entry,
                     affliction = c.Affliction?.Id.Entry,
@@ -589,7 +589,7 @@ internal static class Snapshotter
         var entries = CollectionSnapshot.Once(
             (pile?.Cards ?? Enumerable.Empty<CardModel>())
             .Where(c => c != null)
-            .Select(c => (selector: CardSpecifier.From(c), title: c.Title)));
+            .Select(c => (selector: CardSpecifier.From(c), title: CardSpecifier.Title(c))));
         // Compact: counts-by-model — pile order is either hidden (draw is
         // shown sorted anyway) or rarely decision-relevant.
         if (_compact)
@@ -604,18 +604,20 @@ internal static class Snapshotter
                 titles = (object?)null,
             };
         }
-        var cards = sorted
+        // A selector deliberately drops the upgrade level that a title keeps —
+        // Wither's per-copy fake upgrades and any MaxUpgradeLevel > 1 card give
+        // two copies one selector and two titles. So titles ride alongside
+        // cards by index; a selector-keyed lookup would silently collapse them
+        // onto whichever copy came first, which for the sorted draw pile would
+        // also leak the draw order that sorting exists to hide.
+        var ordered = sorted
             ? entries.OrderBy(entry => entry.selector, StringComparer.Ordinal).ToArray()
             : entries;
-        var titles = entries
-            .GroupBy(entry => entry.selector)
-            .OrderBy(group => group.Key, StringComparer.Ordinal)
-            .ToDictionary(group => group.Key, group => group.First().title);
         return new
         {
-            count = cards.Length,
-            cards = (object)cards.Select(entry => entry.selector).ToArray(),
-            titles,
+            count = ordered.Length,
+            cards = (object)ordered.Select(entry => entry.selector).ToArray(),
+            titles = ordered.Select(entry => entry.title).ToArray(),
         };
     }
 
@@ -651,7 +653,7 @@ internal static class Snapshotter
             var showText = card is not null && ShouldShowCardText(card);
             var entry = Item(new
             {
-                title = card?.Title,
+                title = card is null ? null : CardSpecifier.Title(card),
                 textKey = card is null ? null : CardSpecifier.TextKey(card),
                 description = showText ? CardSpecifier.Description(card!) : null,
                 cost = e.Cost,
@@ -888,7 +890,7 @@ internal static class Snapshotter
         var showText = ShouldShowCardText(c);
         return new
         {
-            title = c.Title,
+            title = CardSpecifier.Title(c),
             cost = c.EnergyCost.Canonical,
             starCost = CardSpecifier.StarCost(c),
             rarity = c.Rarity.ToString().ToLowerInvariant(),
@@ -903,7 +905,7 @@ internal static class Snapshotter
         var preview = CardSpecifier.UpgradePreview(c);
         return new
         {
-            title = c.Title,
+            title = CardSpecifier.Title(c),
             cost = c.EnergyCost.Canonical,
             starCost = CardSpecifier.StarCost(c),
             upgraded = c.IsUpgraded,
@@ -925,7 +927,8 @@ internal static class Snapshotter
             && ShouldShowCardText(card, compactElides: true);
         return new
         {
-            title = RepeatedItemTitle(card?.Title),
+            title = RepeatedItemTitle(
+                card is null ? null : CardSpecifier.Title(card)),
             cost = card?.EnergyCost.GetAmountToSpend(),
             starCost = card is null ? null : CardSpecifier.StarCost(card),
             upgraded = card?.IsUpgraded ?? false,
@@ -1241,7 +1244,7 @@ internal static class Snapshotter
             {
                 kind = "card",
                 model = card.Card.Id.Entry,
-                title = RichText.NormalizeIcons(card.Card.Title ?? ""),
+                title = RichText.NormalizeIcons(CardSpecifier.Title(card.Card)),
                 description = CardSpecifier.Description(card.Card),
                 upgraded = card.Card.IsUpgraded,
             };
@@ -1408,7 +1411,7 @@ internal static class Snapshotter
                 var selector = CardSpecifier.From(c);
                 var card = Item(new
                 {
-                    title = RepeatedItemTitle(c.Title),
+                    title = RepeatedItemTitle(CardSpecifier.Title(c)),
                     cost = c.EnergyCost.GetAmountToSpend(),
                     starCost = CardSpecifier.StarCost(c),
                     upgraded = c.IsUpgraded,

@@ -43,6 +43,16 @@ internal static class CardSpecifier
 
     internal static string TextKey(CardModel card) => Identity(card).TextKey;
 
+    // CardModel.Title reads its loc entry straight through GetRawText, which
+    // throws when the key is missing from the table and its fallback. Titles
+    // are read for every deck and pile card now, so one absent entry must cost
+    // that title alone and not the whole observation.
+    internal static string Title(CardModel card)
+    {
+        try { return card.Title; }
+        catch { return ""; }
+    }
+
     // Offer/pile prose uses the engine's composed description, which includes
     // upgrades, enchantments, and afflictions. Icon paths are normalized at
     // the module edge so every card view gets the same readable tokens.

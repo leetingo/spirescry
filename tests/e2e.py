@@ -1826,12 +1826,16 @@ def l1():
         if matching:
             assert all(card["title"] == titles[model] for card in matching), matching
 
+    # titles is index-aligned with cards, not a selector lookup: one selector
+    # can cover copies whose titles differ by upgrade level.
     for pile in d["piles"].values():
         selectors = pile["cards"]
         assert isinstance(selectors, list), pile
-        assert all(selector in pile["titles"] for selector in selectors), pile
-    assert d["piles"]["draw"]["titles"]["DEFEND_IRONCLAD"] \
-        == titles["DEFEND_IRONCLAD"], d["piles"]["draw"]
+        assert len(pile["titles"]) == len(selectors), pile
+        assert all(pile["titles"]), pile
+    draw = d["piles"]["draw"]
+    assert ("DEFEND_IRONCLAD", titles["DEFEND_IRONCLAD"]) in \
+        list(zip(draw["cards"], draw["titles"])), draw
 
     burning_blood = next(
         relic for relic in d["you"]["relics"]
