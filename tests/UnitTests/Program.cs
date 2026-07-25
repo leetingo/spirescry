@@ -452,6 +452,128 @@ internal static class Tests
         Equal(0, ticks.TickWaits + ticks.ChangeWaits);
     }
 
+    public static void EventOptionTrackerOutlivesAbandonThenNewRunRotations()
+    {
+        // The P16 shape, and the regression this replaced rotation counting
+        // for: a task parked before abandon only faults after the next run has
+        // started. Abandon and new-run are two owner rotations back to back
+        // with no elapsed time, so any rotation-counted lifetime expired
+        // before the task could fault — and its stale TaskHelper line then
+        // leaked into the new run.
+        var clock = new FakeSettlementClock();
+        var parked = new TaskCompletionSource();
+        var tracker = RetiredTracker(clock, parked.Task);
+
+        tracker.ChangeOwner(null, null);                       // abandon
+        tracker.ChangeOwner(                                   // new-run
+            new object(), new MegaCrit.Sts2.Core.Multiplayer.Game.EventSynchronizer());
+
+        False(parked.Task.IsCompleted);
+        True(tracker.HasRetired);
+    }
+
+    public static void EventOptionTrackerExpiresZombieOnElapsedTime()
+    {
+        // #125: a never-completing zombie must leave the ledger on bounded
+        // time, so HasRetired returns to false without a host restart even if
+        // no further run ever rotates the owner.
+        var clock = new FakeSettlementClock();
+        var parked = new TaskCompletionSource();
+        var tracker = RetiredTracker(clock, parked.Task);
+
+        True(tracker.HasRetired);
+        clock.Advance(29_000);
+        True(tracker.HasRetired);       // still inside the correlation window
+        clock.Advance(2_000);
+        False(tracker.HasRetired);      // expired on elapsed time alone
+        False(parked.Task.IsCompleted);
+    }
+
+    public static void EventOptionTrackerDropsRetiredQuietCompletions()
+    {
+        // A stale success logged nothing, so it has nothing to suppress and
+        // must not hold the correlation window open.
+        var clock = new FakeSettlementClock();
+        var finished = new TaskCompletionSource();
+        var tracker = RetiredTracker(clock, finished.Task);
+
+        True(tracker.HasRetired);
+        finished.SetResult();
+        False(tracker.HasRetired);
+    }
+
+    public static void SettlementWaitsOutATrackedOptionEffectBeforeReportingItsFault()
+    {
+        // A fault names the outcome, not the boundary. An option effect that
+        // is still mid-continuation owns real state: the Amalgamator removes
+        // the chosen cards behind one delay and grants their replacement
+        // behind the next, so returning on the fault alone publishes a
+        // half-applied deck. ErrorsSince is a window query, so the fault is
+        // still there for the probe that finally parks.
+        var clock = new FakeSettlementClock();
+        var executing = new SettlementActivity(
+            FireAndForgetCount: 0, EventOptionExecuting: true,
+            ExecutorRunning: false, QueuedActionCount: 0);
+        var fault = new[] { "async_fault:event-option:TestException:kaboom" };
+        var ticks = new FakeSettlementTicks(clock,
+            Probe(revision: 5, phase: Phase.Event, activity: executing,
+                errors: fault),
+            Probe(revision: 6, tick: 3, busy: false, errors: fault));
+        var module = new SettlementModule(ticks, clock);
+
+        var result = module.Follow(Request(timeoutMs: 100))
+            .GetAwaiter().GetResult();
+
+        Equal(SettlementOutcome.Fault, result.Outcome);
+        // The settled board, not the torn one the fault interrupted.
+        Equal(6L, result.Probe.Revision);
+        Equal(2, ticks.Captures);
+        Equal(1, ticks.ChangeWaits);
+    }
+
+    public static void SettlementFaultStillOutrunsOpaqueFireAndForgetWork()
+    {
+        // The counterpart: fire-and-forget work is exactly the opaque channel
+        // the bridge cannot follow, so it must never hold a fault open.
+        var clock = new FakeSettlementClock();
+        var opaque = new SettlementActivity(
+            FireAndForgetCount: 1, EventOptionExecuting: false,
+            ExecutorRunning: false, QueuedActionCount: 0);
+        var ticks = new FakeSettlementTicks(clock,
+            Probe(revision: 5, activity: opaque,
+                errors: ["async_fault:test:TestException:kaboom"]));
+        var module = new SettlementModule(ticks, clock);
+
+        var result = module.Follow(Request(timeoutMs: 100))
+            .GetAwaiter().GetResult();
+
+        Equal(SettlementOutcome.Fault, result.Outcome);
+        Equal(1, ticks.Captures);
+        Equal(0, ticks.TickWaits + ticks.ChangeWaits);
+    }
+
+    public static void SettlementReportsAFaultWhenTrackedOptionWorkNeverParks()
+    {
+        // Waiting for the effect must not downgrade an observed fault to a
+        // timeout: ReachedBoundary drives the response's `settled` flag, and
+        // a fault we actually saw is conclusive about the action.
+        var clock = new FakeSettlementClock();
+        var executing = new SettlementActivity(
+            FireAndForgetCount: 0, EventOptionExecuting: true,
+            ExecutorRunning: false, QueuedActionCount: 0);
+        var ticks = new FakeSettlementTicks(clock, 5,
+            Probe(revision: 5, phase: Phase.Event, activity: executing,
+                errors: ["async_fault:event-option:TestException:kaboom"]));
+        var module = new SettlementModule(ticks, clock);
+
+        var result = module.Follow(Request(timeoutMs: 5))
+            .GetAwaiter().GetResult();
+
+        Equal(SettlementOutcome.Fault, result.Outcome);
+        True(result.Outcome.ReachedBoundary());
+        False(result.Outcome.IsReplayable());
+    }
+
     public static void SettlementTurnsCaptureFailuresIntoTypedFaults()
     {
         var clock = new FakeSettlementClock();
@@ -1030,20 +1152,22 @@ internal static class Tests
         False(tracker.TryTrack(task, out _));
     }
 
-    public static void EventOptionTrackerExpiresZombieAfterTwoOwnerRotations()
+    public static void EventOptionTrackerExpiresZombieOnceItsWindowElapses()
     {
-        var tracker = new EventOptionTracker();
+        // Owner rotations do not age the window out — abandon-then-new-run is
+        // two of them with no elapsed time, and the parked task can still
+        // fault after both. Elapsed time is what closes it.
+        var clock = new FakeSettlementClock();
         var task = new TaskCompletionSource().Task;
-
-        tracker.ChangeOwner(
-            new object(), new MegaCrit.Sts2.Core.Multiplayer.Game.EventSynchronizer());
-        True(tracker.TryTrack(task, out _));
-        tracker.Drop();
+        var tracker = RetiredTracker(clock, task);
 
         tracker.ChangeOwner(null, null);
         True(tracker.HasRetired);
         tracker.ChangeOwner(
             new object(), new MegaCrit.Sts2.Core.Multiplayer.Game.EventSynchronizer());
+        True(tracker.HasRetired);
+
+        clock.Advance(31_000);
         False(tracker.HasRetired);
     }
 
@@ -1055,7 +1179,8 @@ internal static class Tests
         // rest of the process — while the re-tracking block survives for as
         // long as that synchronizer keeps owning the run, because the
         // engine's own list can still offer the parked task back.
-        var tracker = new EventOptionTracker();
+        var clock = new FakeSettlementClock();
+        var tracker = new EventOptionTracker(clock);
         var shared = new MegaCrit.Sts2.Core.Multiplayer.Game.EventSynchronizer();
         var zombie = new TaskCompletionSource().Task;
 
@@ -1064,6 +1189,7 @@ internal static class Tests
         tracker.Drop();
         tracker.ChangeOwner(null, null);
         tracker.ChangeOwner(new object(), shared);
+        clock.Advance(31_000);
 
         False(tracker.HasRetired);
         False(tracker.TryTrack(zombie, out _));
@@ -1684,6 +1810,20 @@ internal static class Tests
 
         Equal(Build("ornate").ConsumerFingerprint(),
             Build("plain").ConsumerFingerprint());
+    }
+
+    // One option task tracked under an owner, then retired by Drop — the
+    // state every retired-correlation test starts from.
+    private static EventOptionTracker RetiredTracker(
+        FakeSettlementClock clock, Task parked)
+    {
+        var tracker = new EventOptionTracker(clock);
+        tracker.ChangeOwner(
+            new object(),
+            new MegaCrit.Sts2.Core.Multiplayer.Game.EventSynchronizer());
+        True(tracker.TryTrack(parked, out _));
+        tracker.Drop();
+        return tracker;
     }
 
     private static SettlementRequest Request(

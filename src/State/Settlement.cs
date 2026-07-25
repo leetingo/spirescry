@@ -182,8 +182,16 @@ internal sealed class SettlementModule
 
             var remaining = (int)Math.Max(
                 0, (deadline - _clock.UtcNow).TotalMilliseconds);
+            // Waiting for a tracked effect must not downgrade an observed
+            // fault to a timeout: ReachedBoundary drives the response's
+            // `settled` flag, and a fault we already saw is conclusive about
+            // the action even if its effect never parked.
             if (remaining == 0)
-                return new SettlementResult(SettlementOutcome.Timeout, probe);
+                return new SettlementResult(
+                    probe.Errors.Count > 0
+                        ? SettlementOutcome.Fault
+                        : SettlementOutcome.Timeout,
+                    probe);
 
             try
             {
@@ -231,7 +239,15 @@ internal sealed class SettlementModule
     internal static SettlementOutcome? CandidateOutcome(
         SettlementProbe probe, Phase phaseBefore, long acceptedRevision)
     {
-        if (probe.Errors.Count > 0) return SettlementOutcome.Fault;
+        // A fault names the outcome, not the boundary. Opaque fire-and-forget
+        // work can keep unwinding unwatched, but a tracked option effect is
+        // mid-continuation and owns real state — the Amalgamator removes the
+        // chosen cards behind one delay and grants their replacement behind
+        // the next — so returning on the fault alone publishes a half-applied
+        // board. Wait it out; ErrorsSince is a window query, so the fault is
+        // still there for the probe that finally parks.
+        if (probe.Errors.Count > 0)
+            return probe.OptionExecuting ? null : SettlementOutcome.Fault;
         if (!probe.Activity.IsBusy) return SettlementOutcome.Settled;
         // A mid-flight option effect can flip the phase back to event
         // before its continuation finishes (and before a late fault
