@@ -43,9 +43,13 @@ in the event stream, or rejected with a reason.
 damage × hits), potions, and pile contents; every out-of-combat phase
 carries a `player` footer (hp, gold, potions, relics, relicStates, deck);
 `player.relics` remains the stable ID-string list while `relicStates` adds
-`{model, counter, usedUp, description}` (`description` is `null` in compact
-mode). Combat's `you.relics` carries `{model, counter, usedUp}` so every-N counters
-are visible where they tick and one-shot relics cannot look
+`{model, title, counter, usedUp, description}` (`title` and `description` are
+`null` in compact mode). Non-compact hand, potion,
+deck, and combat-relic entries likewise pair their stable English model or
+selector with a display title localized by the host. Combat pile `cards`
+retain their selector-string shape and add a `titles` lookup keyed by those
+selectors. Combat's `you.relics` carries `{model, title, counter, usedUp}` so
+every-N counters are visible where they tick and one-shot relics cannot look
 available after consumption. Necrobinder combat also exposes `you.osty` as
 either `null` or structured model/title, hp, block, alive, and powers state.
 The map gets
@@ -58,7 +62,10 @@ index) and `floor` (run-cumulative) stay for compatibility.
 `?compact=1` (CLI: `obs --compact`) elides the big repeats — no act
 graph, deck and combat piles as counts-by-model (`"STRIKE_IRONCLAD+": 2`
 = two upgraded copies), hand cards keep their numbers (`vars`) but drop
-the description prose — for agents that poll often. `obs --decision`
+the description prose. Per-card deck title metadata is elided; repeated
+hand/inventory title fields plus pile `titles` are `null`, while stable
+model/selector values remain present. Titles on current
+decision options such as rewards and shops remain renderable. `obs --decision`
 adds legal verbs derived from the targets in that exact snapshot and
 deduplicates card prose across every visible card surface. Each card has
 a stable `textKey` that includes upgrade, enchantment, and affliction;

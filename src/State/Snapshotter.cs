@@ -411,6 +411,7 @@ internal static class Snapshotter
                 .Select(c => new
                 {
                     model = c.Id.Entry,
+                    title = c.Title,
                     upgraded = c.IsUpgraded,
                     enchant = c.Enchantment?.Id.Entry,
                     affliction = c.Affliction?.Id.Entry,
@@ -421,6 +422,14 @@ internal static class Snapshotter
             .OrderBy(g => g.Key)
             .ToDictionary(g => g.Key, g => g.Count());
     }
+
+    // Repeated state follows compact prose elision; stable model and selector
+    // fields live alongside this presentation value and are never removed.
+    private static string? RepeatedItemTitle(string? title) =>
+        _compact ? null : title;
+
+    private static string? RepeatedItemTitle(LocString? title) =>
+        _compact ? null : SafeText(title);
 
     // The GUI inventory badge's number: DisplayAmount, shown only for
     // relics that opt in. null = this relic keeps no visible count.
@@ -433,6 +442,7 @@ internal static class Snapshotter
     private static object RelicStateView(RelicModel r) => new
     {
         model = r.Id.Entry,
+        title = RepeatedItemTitle(r.Title),
         counter = RelicCounter(r),
         usedUp = r.IsUsedUp,
         description = _compact ? null : SafeText(r.DynamicDescription),
@@ -449,6 +459,7 @@ internal static class Snapshotter
             if (slots[i] is not { } p || p.IsQueued || p.HasBeenRemovedFromState) continue;
             result.Add(Item(new
             {
+                title = RepeatedItemTitle(p.Title),
                 description = SafeText(p.DynamicDescription),
             }, model: p.Id.Entry, slot: i,
                 target: p.TargetType.ToString().ToLowerInvariant()));
@@ -575,22 +586,37 @@ internal static class Snapshotter
     // Draw contents are sorted so the snapshot can't leak draw order.
     private static object PileView(CardPile? pile, bool sorted = false)
     {
-        var models = (pile?.Cards ?? Enumerable.Empty<CardModel>())
+        var entries = CollectionSnapshot.Once(
+            (pile?.Cards ?? Enumerable.Empty<CardModel>())
             .Where(c => c != null)
-            .Select(CardSpecifier.From);
+            .Select(c => (selector: CardSpecifier.From(c), title: c.Title)));
         // Compact: counts-by-model — pile order is either hidden (draw is
         // shown sorted anyway) or rarely decision-relevant.
         if (_compact)
         {
-            var counts = models.GroupBy(m => m)
+            var counts = entries.GroupBy(entry => entry.selector)
                 .OrderBy(g => g.Key, StringComparer.Ordinal)
                 .ToDictionary(g => g.Key, g => g.Count());
-            return new { count = counts.Values.Sum(), cards = (object)counts };
+            return new
+            {
+                count = counts.Values.Sum(),
+                cards = (object)counts,
+                titles = (object?)null,
+            };
         }
         var cards = sorted
-            ? models.OrderBy(m => m, StringComparer.Ordinal).ToArray()
-            : models.ToArray();
-        return new { count = cards.Length, cards = (object)cards };
+            ? entries.OrderBy(entry => entry.selector, StringComparer.Ordinal).ToArray()
+            : entries;
+        var titles = entries
+            .GroupBy(entry => entry.selector)
+            .OrderBy(group => group.Key, StringComparer.Ordinal)
+            .ToDictionary(group => group.Key, group => group.First().title);
+        return new
+        {
+            count = cards.Length,
+            cards = (object)cards.Select(entry => entry.selector).ToArray(),
+            titles,
+        };
     }
 
     private static string[] PileState(string name, CardPile? pile, bool sorted = false)
@@ -899,6 +925,7 @@ internal static class Snapshotter
             && ShouldShowCardText(card, compactElides: true);
         return new
         {
+            title = RepeatedItemTitle(card?.Title),
             cost = card?.EnergyCost.GetAmountToSpend(),
             starCost = card is null ? null : CardSpecifier.StarCost(card),
             upgraded = card?.IsUpgraded ?? false,
@@ -1310,6 +1337,7 @@ internal static class Snapshotter
                 .Select(r => (object)new
                 {
                     model = r.Id.Entry,
+                    title = RepeatedItemTitle(r.Title),
                     counter = RelicCounter(r),
                     usedUp = r.IsUsedUp,
                 })
@@ -1380,6 +1408,7 @@ internal static class Snapshotter
                 var selector = CardSpecifier.From(c);
                 var card = Item(new
                 {
+                    title = RepeatedItemTitle(c.Title),
                     cost = c.EnergyCost.GetAmountToSpend(),
                     starCost = CardSpecifier.StarCost(c),
                     upgraded = c.IsUpgraded,
