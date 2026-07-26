@@ -99,14 +99,6 @@ public static class RunLog
             var verbs = Verbs
                 .Select(verb => verb.ToJson())
                 .ToArray();
-            var coherent = _runId != "none"
-                && verbs.Length > 0
-                && Verbs[0].Action == "new-run"
-                && Verbs.All(verb => verb.RunId == _runId);
-            var verified = Verbs.All(verb =>
-                verb.Outcome is { } outcome
-                && outcome.IsReplayable()
-                && !string.IsNullOrWhiteSpace(verb.Fingerprint));
             return new
             {
                 ok = true,
@@ -116,11 +108,7 @@ public static class RunLog
                 seed = _seed,
                 character = _character,
                 ascension = _ascension,
-                // A recipe is replayable only when every accepted verb was
-                // followed to a verified boundary. Merely sharing one RunId
-                // is not enough: otherwise replay could report success after
-                // checking zero (or only a prefix of) fingerprints.
-                complete = coherent && verified,
+                complete = RunLogRules.IsComplete(_runId, Facts()),
                 verbs,
             };
         }
@@ -136,12 +124,13 @@ public static class RunLog
         _ascension = state?.AscensionLevel;
     }
 
+    // Both decisions are value rules; they are stated in RunLogRules so CI can
+    // verify them without the game's dlls.
+    private static RunLogVerbFacts[] Facts() =>
+        Verbs.Select(verb => verb.Facts).ToArray();
+
     private static bool CanAdopt(string runId) =>
-        runId != "none"
-        && _runId == "none"
-        && Verbs.Count > 0
-        && Verbs[0].Action == "new-run"
-        && Verbs.All(verb => verb.RunId == "none");
+        RunLogRules.CanAdopt(_runId, runId, Facts());
 
     private static void AdoptRun(string runId, bool captureMetadata)
     {
@@ -170,6 +159,9 @@ public static class RunLog
         public string? PhaseAfter { get; set; }
         public string[]? Errors { get; set; }
         public string? Fingerprint { get; set; }
+
+        public RunLogVerbFacts Facts =>
+            new(RunId, Action, Outcome, Fingerprint);
 
         public JsonObject ToJson()
         {
