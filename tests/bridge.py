@@ -183,13 +183,18 @@ def _first_unselected(snapshot):
     """The first card of a selection that is not already picked.
 
     A hand-selection surface keeps every candidate listed and marks the
-    picked ones, so the free rows are the ones without `selected`. Falling
-    back to the first card keeps callers moving on surfaces that report no
-    per-card state at all (the GUI hand drops picked cards off its row).
+    picked ones, so the free rows are the ones without `selected`.
+    Re-picking a marked row only toggles it back off, so a surface with no
+    free row and no confirm is stuck: say so instead of burning the step
+    budget on the same row and reporting a timeout.
     """
-    cards = snapshot["cards"]
-    return next(
-        (card for card in cards if not card.get("selected")), cards[0])
+    card = next(
+        (card for card in snapshot.get("cards", [])
+         if not card.get("selected")), None)
+    if card is None:
+        raise AssertionError(
+            f"{snapshot.get('phase')} has neither selectable cards nor confirm")
+    return card
 
 
 def kill_current_combat(*, on_obs=None, timeout=60, initial=None):
@@ -204,16 +209,13 @@ def kill_current_combat(*, on_obs=None, timeout=60, initial=None):
             if d.get("confirmable"):
                 d = _act_and_settle(
                     d, "confirm", deadline=deadline, on_obs=on_obs)
-            elif d.get("cards"):
+            else:
                 # Advance the selection: re-picking a card already marked
                 # selected only toggles it back off, and a decision needing
                 # two picks would never finish.
                 d = _act_and_settle(
                     d, "pick-card", str(_first_unselected(d)["idx"]),
                     deadline=deadline, on_obs=on_obs)
-            else:
-                raise AssertionError(
-                    f"{d['phase']} has neither selectable cards nor confirm")
             continue
         if d["phase"] != PHASE.COMBAT:
             return d
@@ -286,12 +288,9 @@ def resolve_transient_phase(d, *, claim_reward_tiles=False,
     if phase in (PHASE.CARD_SELECT, PHASE.HAND_SELECT):
         if d.get("confirmable"):
             return _follow_before(deadline, "confirm")
-        elif d.get("cards"):
+        else:
             return _follow_before(
                 deadline, "pick-card", str(_first_unselected(d)["idx"]))
-        else:
-            raise AssertionError(
-                f"{phase} has neither selectable cards nor confirm")
     elif phase == PHASE.BUNDLE_SELECT:
         if d.get("confirmable"):
             return _follow_before(deadline, "confirm")
