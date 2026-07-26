@@ -99,11 +99,17 @@ public static class ProtocolVocabulary
         Converters = { new JsonStringEnumConverter(JsonNamingPolicy.CamelCase) },
     };
 
-    // v4 keeps the typed semanticState projection internal by default and
-    // requires replay/diagnostic callers to request its expanded wire form.
+    // v5 makes the `ok` envelope flag mandatory on every body, snapshots
+    // included; a v5 CLI rejects a body without it as malformed. A v4 host
+    // answered /obs with no flag at all, so pairing one with a v5 CLI must
+    // fail as an incompatible host rather than as a malformed response on
+    // whichever route the caller happened to reach first.
+    //
+    // v4 kept the typed semanticState projection internal by default and
+    // required replay/diagnostic callers to request its expanded wire form.
     // A v3 CLI would hash the bounded response without those tokens and
     // report a false divergence, so compatibility must fail first.
-    public const int ProtocolVersion = 4;
+    public const int ProtocolVersion = 5;
 
     public static string CreateArtifactJson() =>
         JsonSerializer.Serialize(new ArtifactDocument(

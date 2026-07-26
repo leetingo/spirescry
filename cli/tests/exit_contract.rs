@@ -256,6 +256,44 @@ fn transport_failures_exit_one() {
 }
 
 #[test]
+fn fault_bundle_reports_an_unreachable_bridge_instead_of_failing() {
+    // The documented exception to the failure codes: fault-bundle captures
+    // rather than requests, so a bridge that answers nothing is what it is
+    // reporting on, not a failure of the report. It still owes a bundle on
+    // stdout, and `complete` is what tells a caller the host was down.
+    let output = spirescry(&["--port", "1", "fault-bundle"]);
+
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    let bundle: Value = serde_json::from_slice(&output.stdout).expect("a bundle on stdout");
+    assert_eq!(bundle["ok"], true);
+    assert_eq!(bundle["complete"], false, "{bundle}");
+    assert_eq!(bundle["sections"]["health"]["available"], false, "{bundle}");
+    assert_eq!(
+        bundle["sections"]["observation"]["available"], false,
+        "{bundle}"
+    );
+}
+
+#[test]
+fn fault_bundle_records_a_malformed_route_as_an_unavailable_section() {
+    // A host answering bodies the envelope rule rejects is precisely what
+    // this command exists to capture: the rejection belongs in the bundle,
+    // it does not abort the capture.
+    let (port, server) = canned_bridge(4, false, 200, "OK".to_string(), "{}".to_string());
+    let output = spirescry(&["--port", &port.to_string(), "fault-bundle"]);
+    server.join().unwrap();
+
+    assert_eq!(code(&output), 0, "{}", stderr(&output));
+    let bundle: Value = serde_json::from_slice(&output.stdout).expect("a bundle on stdout");
+    assert_eq!(bundle["complete"], false, "{bundle}");
+    let message = bundle["sections"]["runLog"]["error"]["message"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(message.contains("malformed bridge response"), "{bundle}");
+}
+
+#[test]
 fn clap_validation_failures_exit_one_not_clap_two() {
     for args in [
         vec!["option", "--", "-1"],

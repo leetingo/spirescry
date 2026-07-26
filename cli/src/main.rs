@@ -322,6 +322,11 @@ fn main() -> ExitCode {
         Cmd::Runlog => {
             client.compatible_get("/runlog", Duration::from_millis(DEFAULT_HTTP_TIMEOUT_MS))
         }
+        // The one command that captures instead of requesting, and so the
+        // one deliberate exception to the exit contract: a bridge that
+        // answers nothing is this command's subject, not its failure. It
+        // always yields a bundle and leaves with 0, marking what it could
+        // not reach in `complete` (pinned in tests/exit_contract.rs).
         Cmd::FaultBundle => Ok(capture_fault_bundle(&client)),
         Cmd::Replay { file } => replay(&client, file),
     };

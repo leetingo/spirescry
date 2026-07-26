@@ -3,6 +3,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
 using Spirescry;
+using Spirescry.Bridge;
 using Spirescry.Host;
 using Spirescry.State;
 
@@ -137,12 +138,46 @@ internal static class Tests
             artifact["cheatArgumentShapes"]!.AsArray().Count);
     }
 
-    public static void ProtocolVersionCoversBoundedSemanticResponses()
+    public static void ProtocolVersionCoversTheMandatoryOkEnvelope()
     {
-        // v4 makes expanded semanticState opt-in on the wire while replay
-        // keeps hashing it. A v3 CLI would omit the opt-in and calculate a
-        // narrower fingerprint, so it must reject a v4 host first.
-        Equal(4, ProtocolVocabulary.ProtocolVersion);
+        // v5 makes `ok` mandatory on every body, snapshots included. A v4
+        // host answered /obs without it, and a v5 CLI calls a body with no
+        // boolean `ok` malformed, so the pairing has to be rejected as an
+        // incompatible host before any route is read.
+        Equal(5, ProtocolVocabulary.ProtocolVersion);
+    }
+
+    public static void ResponseEnvelopeStampsOkFromTheHttpStatus()
+    {
+        // The rule every route now answers through: 2xx is a result, any
+        // other status is a rejection, and the flag says which.
+        Equal(true, ResponseEnvelope.OkFor(200));
+        Equal(false, ResponseEnvelope.OkFor(400));
+        Equal(false, ResponseEnvelope.OkFor(404));
+        Equal(false, ResponseEnvelope.OkFor(500));
+
+        var accepted = ResponseEnvelope.Stamp(
+            new JsonObject { ["enqueued"] = "play" }, 200);
+        var rejected = ResponseEnvelope.Stamp(
+            new JsonObject { ["err"] = "bad_state" }, 400);
+
+        Equal(true, accepted[ResponseEnvelope.OkField]!.GetValue<bool>());
+        Equal("play", accepted["enqueued"]!.GetValue<string>());
+        Equal(false, rejected[ResponseEnvelope.OkField]!.GetValue<bool>());
+    }
+
+    public static void ResponseEnvelopeOverwritesAnOkTheBodyCarriedItself()
+    {
+        // A body that disagrees with its own status is exactly what the CLI
+        // rejects as malformed, so the status wins here rather than being
+        // passed on to be discovered downstream.
+        var claimsSuccess = ResponseEnvelope.Stamp(
+            new JsonObject { ["ok"] = true, ["err"] = "internal" }, 500);
+        var claimsFailure = ResponseEnvelope.Stamp(
+            new JsonObject { ["ok"] = false, ["phase"] = "combat" }, 200);
+
+        Equal(false, claimsSuccess[ResponseEnvelope.OkField]!.GetValue<bool>());
+        Equal(true, claimsFailure[ResponseEnvelope.OkField]!.GetValue<bool>());
     }
 
     public static void ProtocolArtifactPublishesConsumerProjectionSchema()

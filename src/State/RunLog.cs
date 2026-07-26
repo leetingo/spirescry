@@ -109,7 +109,6 @@ public static class RunLog
                 && !string.IsNullOrWhiteSpace(verb.Fingerprint));
             return new
             {
-                ok = true,
                 kind = "diagnostic_reconstruction_recipe",
                 runId = _runId,
                 liveRunId,

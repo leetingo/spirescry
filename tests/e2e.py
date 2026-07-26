@@ -373,22 +373,38 @@ def p4b():
     # `ok`, or one whose `ok` disagrees with the status, is malformed and
     # exits 1. Snapshot bodies are assembled as raw JSON nodes, so they are
     # the ones that can silently drop the stamp.
-    to_menu()
-    for method, path, want_ok in (
-            ("GET", "/health", True),
-            ("GET", "/obs", True),
-            ("GET", "/obs?since=0", True),
-            ("GET", "/runlog", True),
-            ("GET", "/models?kind=relic", True),
-            ("GET", "/models?kind=bogus", False),
-            ("GET", "/nope", False),
-    ):
-        status, d = http(method, path)
-        assert isinstance(d, dict), f"{path} is not an object envelope: {d}"
-        assert d.get("ok") is want_ok, f"{path} -> {status} ok={d.get('ok')!r}"
+    def envelope(method, path, body, want_ok):
+        status, d = http(method, path, body)
+        where = f"{method} {path}"
+        assert isinstance(d, dict), f"{where} is not an object envelope: {d}"
+        assert d.get("ok") is want_ok, f"{where} -> {status} ok={d.get('ok')!r}"
         assert (status < 400) is want_ok, \
-            f"{path} status {status} contradicts ok={d.get('ok')!r}"
-        assert ("err" in d) is not want_ok, f"{path} -> {status} {sorted(d)[:8]}"
+            f"{where} status {status} contradicts ok={d.get('ok')!r}"
+        assert ("err" in d) is not want_ok, f"{where} -> {status} {sorted(d)[:8]}"
+
+    to_menu()
+    for path, want_ok in (
+            ("/health", True),
+            ("/obs", True),
+            ("/obs?since=0", True),
+            ("/runlog", True),
+            ("/models?kind=relic", True),
+            ("/models?kind=bogus", False),
+            ("/nope", False),
+    ):
+        envelope("GET", path, None, want_ok)
+
+    # /step answers in four shapes — plain accept, accept with a note,
+    # follow success, follow fault — all stamped by the one rule; these are
+    # the two an e2e can steer to directly, plus a rejection.
+    envelope("POST", "/step", {"action": "warp", "args": {}}, False)
+    envelope("POST", "/step",
+             {"action": "new-run",
+              "args": {"character": "IRONCLAD", "seed": "CIP4B"}}, True)
+    bridge.wait_phase(PHASE.EVENT, timeout=30)
+    envelope("POST", "/step", {"action": "abandon", "args": {}, "follow": 8000},
+             True)
+    to_menu()
 
 
 @case("P5 bad character is rejected with the roster")

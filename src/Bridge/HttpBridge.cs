@@ -9,29 +9,36 @@ namespace Spirescry.Bridge;
 
 public sealed class Response
 {
-    // The envelope flag every bridge body carries: true on a result, false
-    // on a rejection. Consumers validate it strictly (the CLI refuses a body
-    // without a boolean `ok`), so no route may answer without it.
-    public const string OkField = "ok";
-
     public int Status { get; init; } = 200;
     public string Body { get; init; } = "";
 
-    public static Response Json(object payload, int status = 200) =>
-        new() { Status = status, Body = JsonSerializer.Serialize(payload) };
+    // Every route answers through here, so no route can hand back a body
+    // without the envelope flag: routes describe their result, this stamps
+    // whether it was one. A payload that is not a JSON object has no
+    // envelope to stamp and is a programming error, not a response.
+    public static Response Json(object payload, int status = 200)
+    {
+        var body = JsonSerializer.SerializeToNode(payload) as JsonObject
+            ?? throw new ArgumentException(
+                $"a bridge body must be a JSON object: {payload.GetType().Name}",
+                nameof(payload));
+        return Json(body, status);
+    }
 
     // Snapshot-shaped bodies are assembled as raw JSON nodes rather than
-    // serialized from an anonymous payload; stamp the envelope here so they
-    // cannot drift out of the contract Json() gives everyone else.
-    public static Response JsonEnvelope(JsonObject body)
-    {
-        body[OkField] = true;
-        return new Response { Body = body.ToJsonString() };
-    }
+    // serialized from an anonymous payload; taking the node directly keeps
+    // a large observation from being cloned through the serializer only to
+    // reach the same rule.
+    public static Response Json(JsonObject body, int status = 200) =>
+        new()
+        {
+            Status = status,
+            Body = ResponseEnvelope.Stamp(body, status).ToJsonString(),
+        };
 
     public static Response Error(
         string code, string msg, int status = 400, string? runId = null) =>
-        Json(new { ok = false, err = code, msg, runId = runId ?? Signals.RunId }, status);
+        Json(new { err = code, msg, runId = runId ?? Signals.RunId }, status);
 }
 
 // Loopback-only HTTP server. No auth: the bridge binds 127.0.0.1

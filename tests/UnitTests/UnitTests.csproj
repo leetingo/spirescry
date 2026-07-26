@@ -13,6 +13,7 @@
     <Compile Include="../../src/ProtocolCapabilities.cs" Link="ProtocolCapabilities.cs" />
     <Compile Include="../../src/Reflect.cs" Link="Reflect.cs" />
     <Compile Include="../../src/RejectionCodes.cs" Link="RejectionCodes.cs" />
+    <Compile Include="../../src/Bridge/ResponseEnvelope.cs" Link="ResponseEnvelope.cs" />
     <Compile Include="../../src/State/Settlement.cs" Link="Settlement.cs" />
     <Compile Include="../../src/State/SettlementObservationCapture.cs" Link="SettlementObservationCapture.cs" />
     <Compile Include="../../src/State/RichText.cs" Link="RichText.cs" />
