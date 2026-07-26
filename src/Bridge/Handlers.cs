@@ -67,16 +67,10 @@ public static class Handlers
     // see ObservationQuery for the encodings and why a malformed value is
     // a bad_request instead of a silent default.
     public static async Task<Response> Obs(
-        string? sinceStr,
-        string? waitStr,
-        string? compactStr = null,
-        string? decisionStr = null,
-        string[]? knownCards = null,
-        string? semanticStateStr = null)
+        string? rawQuery,
+        string[]? knownCards = null)
     {
-        if (!ObservationQuery.TryParse(
-                sinceStr, waitStr, compactStr, decisionStr, semanticStateStr,
-                out var query, out var queryError))
+        if (!ObservationQuery.TryParse(rawQuery, out var query, out var queryError))
             return await MainThreadPump.Instance!.Run(() =>
             {
                 var runId = Signals.RefreshRunIdentity();

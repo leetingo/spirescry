@@ -372,9 +372,16 @@ def p4b():
     to_menu()
 
     # Present but malformed: rejected, never silently defaulted or clamped.
+    # The valueless spellings (`?compact`, `?since`) matter most — .NET
+    # files them under its query collection's null key, so a server that
+    # reads QueryString["compact"] sees them as omitted.
     for query in ("?since=abc", "?since=-1", "?since=", "?since=1.0",
-                  "?wait=soon", "?wait=-1", "?wait=60001",
-                  "?compact=yes", "?decision=maybe", "?semanticState=2"):
+                  "?since", "?SINCE=abc",
+                  "?wait=soon", "?wait=-1", "?wait=60001", "?wait",
+                  "?compact=yes", "?compact=", "?compact",
+                  "?decision=maybe", "?decision", "?since=0&decision&wait=10",
+                  "?semanticState=2", "?semanticState",
+                  "?compact=1&compact=0", "?since=1&since=2"):
         status, d = http("GET", "/obs" + query)
         assert status == 400 and d.get("err") == REJECTION.BAD_REQUEST, \
             f"/obs{query} -> {status} {d}"
@@ -405,6 +412,21 @@ def p4b():
             break
     assert parked.get("changed") is False, parked.get("events")
     assert took >= 1.0, f"valid long poll returned early ({took:.2f}s)"
+
+    # An accepted flag has to reach the snapshot, not just the status line:
+    # at the menu a compact and a full snapshot are byte-identical, so the
+    # accepted encodings are checked inside a run, where they differ.
+    launch(seed="CIP4B")
+    status, full = http("GET", "/obs?compact=0")
+    assert status == 200, full
+    status, small = http("GET", "/obs?compact=true")
+    assert status == 200, small
+    assert full["player"]["relicStates"][0]["title"], full["player"]
+    assert small["player"]["relicStates"][0]["title"] is None, small["player"]
+    assert "semanticState" not in full, full
+    status, diagnostic = http("GET", "/obs?semanticState=1")
+    assert status == 200 and diagnostic.get("semanticState"), diagnostic
+    to_menu()
 
 
 @case("P5 bad character is rejected with the roster")

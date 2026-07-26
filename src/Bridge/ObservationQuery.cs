@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Net;
 
 namespace Spirescry.Bridge;
 
@@ -9,9 +10,9 @@ namespace Spirescry.Bridge;
 // "not compact" is indistinguishable from a compact snapshot of a small
 // phase. Omitted parameters keep their existing defaults.
 //
-// The rule is stated over plain strings and lives outside Handlers so it
-// compiles — and gets tested — without the game's dlls, where the CI-run
-// unit tests reach it.
+// The rule is stated over the raw query string and lives outside Handlers
+// so it compiles — and gets tested — without the game's dlls, where the
+// CI-run unit tests reach it.
 internal readonly record struct ObservationQuery(
     long Since,
     int Wait,
@@ -32,11 +33,63 @@ internal readonly record struct ObservationQuery(
     // fields on the response.
     internal const long NoSince = -1;
 
+    // The parameters this rule owns, spelled the way the error messages
+    // name them. `known` is deliberately absent: it is legitimately
+    // repeatable and each value is an opaque card key, so it stays on the
+    // server's own multi-value collection.
+    private static readonly string[] Names =
+        ["since", "wait", "compact", "decision", "semanticState"];
+
     internal bool WantsChangeFeed => Since >= 0;
 
     internal bool ShouldPark => Since >= 0 && Wait > 0;
 
+    // `rawQuery` is the wire query string, leading '?' optional. It is
+    // split here rather than read out of the server's parsed collection
+    // because that collection cannot tell `?compact` — supplied, with no
+    // value — from an omitted `compact`: .NET files a valueless segment
+    // under the null key, so the indexer answers null for both and the
+    // silent default walks back in through the side door.
     internal static bool TryParse(
+        string? rawQuery, out ObservationQuery query, out string? error)
+    {
+        query = default;
+        var supplied = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var segment in (rawQuery ?? "").TrimStart('?').Split('&'))
+        {
+            if (segment.Length == 0) continue;
+            var equals = segment.IndexOf('=');
+            var name = Decode(equals < 0 ? segment : segment[..equals]);
+            var canonical = Array.Find(
+                Names,
+                known => string.Equals(
+                    known, name, StringComparison.OrdinalIgnoreCase));
+            if (canonical is null) continue;
+            // No '=' at all is a parameter supplied with an empty value,
+            // not an omitted one — and empty is malformed for all five.
+            var value = equals < 0 ? "" : Decode(segment[(equals + 1)..]);
+            // Two spellings of one parameter have no defensible winner.
+            if (!supplied.TryAdd(canonical, value))
+            {
+                error = $"'{canonical}' was supplied more than once";
+                return false;
+            }
+        }
+
+        string? Supplied(string name) =>
+            supplied.TryGetValue(name, out var value) ? value : null;
+
+        return TryParse(
+            Supplied("since"), Supplied("wait"), Supplied("compact"),
+            Supplied("decision"), Supplied("semanticState"),
+            out query, out error);
+    }
+
+    // The decoding the server applies to a query it parses itself:
+    // percent escapes resolved, '+' read as a space.
+    private static string Decode(string raw) => WebUtility.UrlDecode(raw);
+
+    private static bool TryParse(
         string? since,
         string? wait,
         string? compact,
