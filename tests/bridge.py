@@ -179,6 +179,19 @@ def _act_and_settle(snapshot, *args, deadline, on_obs=None):
     return settled
 
 
+def _first_unselected(snapshot):
+    """The first card of a selection that is not already picked.
+
+    A hand-selection surface keeps every candidate listed and marks the
+    picked ones, so the free rows are the ones without `selected`. Falling
+    back to the first card keeps callers moving on surfaces that report no
+    per-card state at all (the GUI hand drops picked cards off its row).
+    """
+    cards = snapshot["cards"]
+    return next(
+        (card for card in cards if not card.get("selected")), cards[0])
+
+
 def kill_current_combat(*, on_obs=None, timeout=60, initial=None):
     """Cheat-kill the current combat, resolving any picker it opens."""
     deadline = time.monotonic() + timeout
@@ -192,8 +205,11 @@ def kill_current_combat(*, on_obs=None, timeout=60, initial=None):
                 d = _act_and_settle(
                     d, "confirm", deadline=deadline, on_obs=on_obs)
             elif d.get("cards"):
+                # Advance the selection: re-picking a card already marked
+                # selected only toggles it back off, and a decision needing
+                # two picks would never finish.
                 d = _act_and_settle(
-                    d, "pick-card", str(d["cards"][0]["idx"]),
+                    d, "pick-card", str(_first_unselected(d)["idx"]),
                     deadline=deadline, on_obs=on_obs)
             else:
                 raise AssertionError(
@@ -270,14 +286,12 @@ def resolve_transient_phase(d, *, claim_reward_tiles=False,
     if phase in (PHASE.CARD_SELECT, PHASE.HAND_SELECT):
         if d.get("confirmable"):
             return _follow_before(deadline, "confirm")
+        elif d.get("cards"):
+            return _follow_before(
+                deadline, "pick-card", str(_first_unselected(d)["idx"]))
         else:
-            card = next(
-                (card for card in d.get("cards", [])
-                 if not card.get("selected")), None)
-            if card is None:
-                raise AssertionError(
-                    f"{phase} has neither selectable cards nor confirm")
-            return _follow_before(deadline, "pick-card", str(card["idx"]))
+            raise AssertionError(
+                f"{phase} has neither selectable cards nor confirm")
     elif phase == PHASE.BUNDLE_SELECT:
         if d.get("confirmable"):
             return _follow_before(deadline, "confirm")
