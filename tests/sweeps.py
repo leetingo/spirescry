@@ -276,11 +276,13 @@ def cards(log=print, only=None):
 
 # ---------- sweep: every potion ----------
 
-def potions(log=print):
+def potions(log=print, only=None):
     """Procure and drink every potion; combat-gated ones fire against
     the sandbag, the rest on the map."""
     failures = {}
     ids = [e["model"] for e in model_entries("potion")]
+    if only is not None:
+        ids = [p for p in ids if p in only]
     log(f"{len(ids)} potions to sweep")
     fresh_run()
     enter_sandbag()

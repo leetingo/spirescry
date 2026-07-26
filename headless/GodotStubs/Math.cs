@@ -74,14 +74,42 @@ public struct Color
     public static Color Black { get; } = new(0, 0, 0, 1);
     public static Color Transparent { get; } = new(0, 0, 0, 0);
 
+    // The real Godot.Color constructor set, in full. A shape that is missing
+    // here throws MissingMethodException the moment a game method referencing
+    // it is jitted — whether or not the call is actually reached — so the
+    // overloads matter even where headless never uses the value.
     public Color(float r, float g, float b, float a = 1f) { R = r; G = g; B = b; A = a; }
+    // Copy an existing colour and replace its alpha. Potion splash vfx reach
+    // this through the default argument: `new Color(Colors.Blue)`.
+    public Color(Color c, float a = 1f) { R = c.R; G = c.G; B = c.B; A = a; }
+    public Color(uint rgba)
+    {
+        A = (rgba & 0xFF) / 255f;
+        B = ((rgba >> 8) & 0xFF) / 255f;
+        G = ((rgba >> 16) & 0xFF) / 255f;
+        R = ((rgba >> 24) & 0xFF) / 255f;
+    }
+    public Color(ulong rgba)
+    {
+        A = (rgba & 0xFFFF) / 65535f;
+        B = ((rgba >> 16) & 0xFFFF) / 65535f;
+        G = ((rgba >> 32) & 0xFFFF) / 65535f;
+        R = ((rgba >> 48) & 0xFFFF) / 65535f;
+    }
     public Color(string htmlColor) { R = 1; G = 1; B = 1; A = 1; }
+    public Color(string htmlColor, float alpha) : this(htmlColor) { A = alpha; }
+
+    // Headless draws nothing, so html and named colours all land on white —
+    // but the entry point still has to exist, sts2.dll calls it directly.
+    public static Color FromHtml(ReadOnlySpan<char> rgba) => White;
 
     public Color Lerp(Color to, float weight) => new(
         R + (to.R - R) * weight, G + (to.G - G) * weight,
         B + (to.B - B) * weight, A + (to.A - A) * weight);
 
     public static Color operator *(Color c, float f) => new(c.R * f, c.G * f, c.B * f, c.A * f);
+    public static Color operator *(float f, Color c) => c * f;
+    public static Color operator *(Color a, Color b) => new(a.R * b.R, a.G * b.G, a.B * b.B, a.A * b.A);
     public static bool operator ==(Color a, Color b) => a.R == b.R && a.G == b.G && a.B == b.B && a.A == b.A;
     public static bool operator !=(Color a, Color b) => !(a == b);
     public override bool Equals(object? obj) => obj is Color c && this == c;
