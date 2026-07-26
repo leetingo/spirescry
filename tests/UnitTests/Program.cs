@@ -531,6 +531,86 @@ internal static class Tests
         Equal(1, ticks.ChangeWaits);
     }
 
+    public static void SettlementKeepsAFaultObservedWhileTheEffectWasExecuting()
+    {
+        // Waiting out a tracked effect must not lose the fault that started the
+        // wait. Signals.ErrorsSince reads a BOUNDED journal (RevisionJournal
+        // evicts past its cap), and SettlementObservationCapture's own errors
+        // are per-capture, so a later probe can legitimately come back clean.
+        // Reporting Settled there would call a faulted action successful and
+        // mark it replayable.
+        var clock = new FakeSettlementClock();
+        var executing = new SettlementActivity(
+            FireAndForgetCount: 0, EventOptionExecuting: true,
+            ExecutorRunning: false, QueuedActionCount: 0);
+        var ticks = new FakeSettlementTicks(clock,
+            Probe(revision: 5, phase: Phase.Event, activity: executing,
+                errors: ["async_fault:event-option:TestException:kaboom"]),
+            Probe(revision: 6, tick: 3, busy: false));   // journal dropped it
+        var module = new SettlementModule(ticks, clock);
+
+        var result = module.Follow(Request(timeoutMs: 100))
+            .GetAwaiter().GetResult();
+
+        Equal(SettlementOutcome.Fault, result.Outcome);
+        False(result.Outcome.IsReplayable());
+        // The response attributes the errors it reports, so the token has to
+        // ride along even though the final probe no longer carried it.
+        Equal("async_fault:event-option:TestException:kaboom",
+            result.Probe.Errors.Single());
+    }
+
+    public static void SettlementKeepsAnEarlierFaultWhenTheWaitTimesOut()
+    {
+        // Same loss on the deadline path: the last probe is the one inspected,
+        // so an evicted error would downgrade a seen fault to a timeout and
+        // flip the response's `settled` flag via ReachedBoundary.
+        var clock = new FakeSettlementClock();
+        var executing = new SettlementActivity(
+            FireAndForgetCount: 0, EventOptionExecuting: true,
+            ExecutorRunning: false, QueuedActionCount: 0);
+        var ticks = new FakeSettlementTicks(clock, 5,
+            Probe(revision: 5, phase: Phase.Event, activity: executing,
+                errors: ["async_fault:event-option:TestException:kaboom"]),
+            Probe(revision: 6, phase: Phase.Event, activity: executing));
+        var module = new SettlementModule(ticks, clock);
+
+        var result = module.Follow(Request(timeoutMs: 5))
+            .GetAwaiter().GetResult();
+
+        Equal(SettlementOutcome.Fault, result.Outcome);
+        True(result.Outcome.ReachedBoundary());
+        Equal("async_fault:event-option:TestException:kaboom",
+            result.Probe.Errors.Single());
+    }
+
+    public static void SettlementReportsEachObservedErrorTokenOnce()
+    {
+        // A token repeated across captures is one failure, not several: the
+        // window query re-reports what it still holds.
+        var clock = new FakeSettlementClock();
+        var executing = new SettlementActivity(
+            FireAndForgetCount: 0, EventOptionExecuting: true,
+            ExecutorRunning: false, QueuedActionCount: 0);
+        var first = "async_fault:event-option:TestException:kaboom";
+        var second = "engine_error:System.InvalidOperationException: later";
+        var ticks = new FakeSettlementTicks(clock,
+            Probe(revision: 5, phase: Phase.Event, activity: executing,
+                errors: [first]),
+            Probe(revision: 6, phase: Phase.Event, activity: executing,
+                errors: [first, second]),
+            Probe(revision: 7, tick: 4, busy: false, errors: [second]));
+        var module = new SettlementModule(ticks, clock);
+
+        var result = module.Follow(Request(timeoutMs: 100))
+            .GetAwaiter().GetResult();
+
+        Equal(SettlementOutcome.Fault, result.Outcome);
+        Equal(2, result.Probe.Errors.Count);
+        Equal(first, result.Probe.Errors[0]);
+        Equal(second, result.Probe.Errors[1]);
+    }
+
     public static void SettlementFaultStillOutrunsOpaqueFireAndForgetWork()
     {
         // The counterpart: fire-and-forget work is exactly the opaque channel

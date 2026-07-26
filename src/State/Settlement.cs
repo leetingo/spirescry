@@ -135,6 +135,15 @@ internal sealed class SettlementModule
         string? candidateState = null;
         var candidateTick = request.AcceptedTick;
         var stableFrames = 0;
+        // Errors are the one probe field that must not be re-read fresh each
+        // capture. Signals.ErrorsSince queries a BOUNDED journal (see
+        // RevisionJournal, which evicts past its cap) and the capture's own
+        // errors are per-capture, so a fault seen while a tracked effect was
+        // still executing can be absent from the probe that finally parks.
+        // Dropping it there would report a faulted action as Settled — and
+        // Settled is replayable.
+        var observed = new List<string>();
+        var observedKeys = new HashSet<string>(StringComparer.Ordinal);
 
         while (true)
         {
@@ -145,8 +154,9 @@ internal sealed class SettlementModule
             }
             catch (Exception exception)
             {
-                return FaultResult(request, "observation", exception);
+                return FaultResult(request, "observation", exception, observed);
             }
+            probe = RetainObservedErrors(probe, observed, observedKeys);
             var outcome = CandidateOutcome(
                 probe, request.PhaseBefore, request.AcceptedRevision);
             if (outcome is { } candidate)
@@ -202,13 +212,26 @@ internal sealed class SettlementModule
             }
             catch (Exception exception)
             {
-                return FaultResult(request, "settlement", exception);
+                return FaultResult(request, "settlement", exception, observed);
             }
         }
     }
 
+    // Fold this capture's errors into the running set and hand the probe back
+    // carrying every token seen in this window, so the outcome decision, the
+    // deadline check, and the response all attribute the same list.
+    private static SettlementProbe RetainObservedErrors(
+        SettlementProbe probe, List<string> observed, HashSet<string> keys)
+    {
+        foreach (var error in probe.Errors)
+            if (keys.Add(error)) observed.Add(error);
+        // Nothing seen yet means the probe already carries the empty set.
+        return observed.Count == 0 ? probe : probe with { Errors = observed.ToArray() };
+    }
+
     private static SettlementResult FaultResult(
-        SettlementRequest request, string label, Exception exception)
+        SettlementRequest request, string label, Exception exception,
+        IReadOnlyList<string> observed)
     {
         var observation = new SnapshotContract(request.PhaseBefore)
         {
@@ -222,8 +245,11 @@ internal sealed class SettlementModule
             RequiresFrameStability: false,
             new SettlementActivity(0, false, false, 0),
             observation,
-            [ErrorEvents.FromAsyncFault(
-                label, exception.GetType().Name, exception.Message)],
+            [
+                .. observed,
+                ErrorEvents.FromAsyncFault(
+                    label, exception.GetType().Name, exception.Message),
+            ],
             ObservationAvailable: false);
         return new SettlementResult(SettlementOutcome.Fault, probe);
     }
@@ -244,8 +270,10 @@ internal sealed class SettlementModule
         // mid-continuation and owns real state — the Amalgamator removes the
         // chosen cards behind one delay and grants their replacement behind
         // the next — so returning on the fault alone publishes a half-applied
-        // board. Wait it out; ErrorsSince is a window query, so the fault is
-        // still there for the probe that finally parks.
+        // board. Wait it out. The caller retains every error token it has seen
+        // this window (Follow's `observed`) and folds them back into the probe,
+        // because the journal behind them is bounded and cannot be relied on to
+        // still hold the fault by the time the effect parks.
         if (probe.Errors.Count > 0)
             return probe.OptionExecuting ? null : SettlementOutcome.Fault;
         if (!probe.Activity.IsBusy) return SettlementOutcome.Settled;
