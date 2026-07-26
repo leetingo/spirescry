@@ -177,13 +177,6 @@ internal readonly record struct DecisionSurfaceResult(
 
 internal static class DecisionSurfaceActions
 {
-    // Both boots reject a premature proceed with the same explanation, so a
-    // caller cannot tell the gate apart by its message either.
-    public const string EventNotReadyMessage =
-        "event still owes a decision — choose an option first";
-    public const string RestSiteNotReadyMessage =
-        "rest site still owes a decision — choose an option first";
-
     public static void Track(Task task, string context)
     {
         Signals.TrackAsync(task, context);
@@ -622,7 +615,7 @@ internal sealed class GuiDecisionSurface : IDecisionSurface
         if (NEventRoom.Instance is null)
             return NotReady("event room not mounted");
         if (!Screens.EventProceedReady(Screens.CurrentEvent()))
-            return BadState(DecisionSurfaceActions.EventNotReadyMessage);
+            return BadState(ProceedReadiness.EventNotReadyMessage);
         DecisionSurfaceActions.Track(NEventRoom.Proceed(), "proceed");
         return DecisionSurfaceResult.Success();
     }
@@ -647,7 +640,7 @@ internal sealed class GuiDecisionSurface : IDecisionSurface
         // never land on a disabled button — ForceClick would emit Released
         // anyway and open a map screen the engine never enabled travel on.
         if (!Screens.RestSiteProceedReady())
-            return BadState(DecisionSurfaceActions.RestSiteNotReadyMessage);
+            return BadState(ProceedReadiness.RestSiteNotReadyMessage);
         if (room.ProceedButton is not { } button)
             return NotReady("proceed button not wired yet — retry");
         button.ForceClick();
@@ -1200,7 +1193,7 @@ internal sealed class HeadlessDecisionSurface : IDecisionSurface
         if (LocalRunContext.Current is not { } run)
             return BadState("run state not available");
         if (!Screens.EventProceedReady(Screens.CurrentEvent()))
-            return BadState(DecisionSurfaceActions.EventNotReadyMessage);
+            return BadState(ProceedReadiness.EventNotReadyMessage);
         // Events can finish on a dialogue page without flipping IsFinished;
         // headless exits the room model. The finale room advances the run.
         return run.State.CurrentRoom is { IsVictoryRoom: true }
@@ -1230,7 +1223,7 @@ internal sealed class HeadlessDecisionSurface : IDecisionSurface
         if (LocalRunContext.Current is not { } run)
             return BadState("run state not available");
         if (!Screens.RestSiteProceedReady())
-            return BadState(DecisionSurfaceActions.RestSiteNotReadyMessage);
+            return BadState(ProceedReadiness.RestSiteNotReadyMessage);
         return ExitRoomToMap(run.Manager, run.State, "rest-site proceed");
     }
 

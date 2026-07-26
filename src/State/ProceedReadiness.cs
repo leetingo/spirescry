@@ -7,6 +7,14 @@ namespace Spirescry.State;
 // unit tests reach it.
 internal static class ProceedReadiness
 {
+    // Both boots reject a premature proceed with the same explanation, so a
+    // caller cannot tell the gate apart by its message either. They live
+    // beside the rules they report on, where the unit tests reach them.
+    internal const string EventNotReadyMessage =
+        "event still owes a decision — choose an option first";
+    internal const string RestSiteNotReadyMessage =
+        "rest site still owes a decision — choose an option first";
+
     // One event option reduced to the flags that decide whether it still
     // owes the player a decision.
     internal readonly record struct EventOptionGate(
