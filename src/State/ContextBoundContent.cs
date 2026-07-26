@@ -35,9 +35,12 @@ internal readonly record struct ConstructionContext(
 // context-bound content — and hold the bridge to actually exercising the
 // latter rather than skipping it.
 //
-// Only the construction context goes here. Which rider MAD_SCIENCE carries,
-// or whose pool SEA_GLASS reads, is a combinatorial interaction and stays out
-// of scope, same as everywhere else in the atomic sweeps.
+// Only the construction context goes here — every property the factory
+// assigns before the model reaches a pile or a belt, and nothing else. Which
+// of the three riders TINKER_TIME happens to roll, or which character OROBAS
+// happens to be visited by, is a combinatorial interaction and stays out of
+// scope, same as everywhere else in the atomic sweeps: the table picks one
+// reachable value per property, not every value.
 internal static class ContextBoundContent
 {
     private static readonly IReadOnlyDictionary<string, ConstructionContext[]>
@@ -52,14 +55,24 @@ internal static class ContextBoundContent
                     "CharacterId", ConstructionValue.OwnerCharacterId),
             ],
 
-            // TINKER_TIME sets the chosen card type before the card exists in
-            // any pile. The default is CardType.None, which OnPlay rejects
-            // with ArgumentOutOfRangeException; Attack is the type the card's
-            // own constructor advertises, so it is the honest default fixture.
+            // TINKER_TIME mints the one real Mad Science in RiderChosen, and
+            // assigns *both* saved properties in the same statement block
+            // before the card is added to the deck. Neither type default is a
+            // state the event can produce: CardType.None makes OnPlay throw
+            // ArgumentOutOfRangeException, and RiderEffect.None skips the
+            // rider half of the card entirely and renders its description as
+            // "???" (the game calls None "not a valid rider" outright). So
+            // both are stamped. Attack is the type the card's own constructor
+            // advertises, and Sapping is one of the three riders the event
+            // offers for Attack — the pair is reachable, and its Weak plus
+            // Vulnerable land on the attack's own target, so a sweep can see
+            // that the rider actually ran.
             ["MAD_SCIENCE"] =
             [
                 new ConstructionContext(
                     "TinkerTimeType", ConstructionValue.EnumMember, "Attack"),
+                new ConstructionContext(
+                    "TinkerTimeRider", ConstructionValue.EnumMember, "Sapping"),
             ],
         };
 

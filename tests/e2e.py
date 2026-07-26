@@ -2212,6 +2212,37 @@ def c13():
     to_menu()
 
 
+@case("C14 a multi-select picker marks each card's own selection")
+def c14():
+    # CHARGE opens a min=max=2 pick over the draw pile, and a draw pile
+    # holds duplicates: the top-level `selected` selector list says
+    # "DEFEND_IRONCLAD" without saying *which* one. Without a per-card
+    # flag an agent picking "the first card not yet selected" re-picks
+    # idx 0, toggling it off and on forever — the M2 sweep died that way
+    # on CHARGE and HIDDEN_DAGGERS. Every card carries its own state.
+    into_combat(seed="CIMULTIPICK", character="IRONCLAD")
+    bridge.follow("cheat", "energy", "99")
+    bridge.follow("cheat", "card", "CHARGE")
+    d = bridge.follow("play", "CHARGE")
+    assert d["phase"] == PHASE.HAND_SELECT, d
+    assert (d.get("min"), d.get("max")) == (2, 2), d
+    assert d.get("confirmable") is False, d
+    assert all(card["selected"] is False for card in d["cards"]), d["cards"]
+    duplicated = [card["model"] for card in d["cards"]]
+    assert len(duplicated) > len(set(duplicated)), duplicated
+
+    picked = bridge.follow("pick-card", str(d["cards"][0]["idx"]))
+    assert picked["phase"] == PHASE.HAND_SELECT, picked
+    assert [card["selected"] for card in picked["cards"]] == \
+        [True] + [False] * (len(d["cards"]) - 1), picked["cards"]
+
+    # The walker's rule — first card not yet selected — now advances.
+    nxt = next(card for card in picked["cards"] if not card["selected"])
+    settled = bridge.follow("pick-card", str(nxt["idx"]))
+    assert settled["phase"] == PHASE.COMBAT, settled
+    to_menu()
+
+
 # ---------- V: victory ----------
 
 @case("V1 cheat-driven full clear reaches a victory game_over")
@@ -2374,10 +2405,11 @@ def m6():
     #
     # SEA_GLASS and MAD_SCIENCE are never constructed bare by the game.
     # OROBAS stamps the character whose pool Sea Glass reads; TINKER_TIME
-    # stamps the card type Mad Science resolves as. Injected raw, the first
-    # logs "obtained without a character ID assigned" and the second throws
-    # ArgumentOutOfRangeException out of OnPlay — fixture faults the sweeps
-    # would otherwise report as product faults.
+    # stamps both the card type Mad Science resolves as and the rider it
+    # carries. Injected raw, the first logs "obtained without a character ID
+    # assigned" and the second throws ArgumentOutOfRangeException out of
+    # OnPlay — fixture faults the sweeps would otherwise report as product
+    # faults.
     entries = {
         kind: {e["model"]: e.get("context")
                for e in http("GET", f"/models?kind={kind}")[1]["entries"]}
@@ -2385,22 +2417,29 @@ def m6():
     }
     assert entries["relic"]["SEA_GLASS"] == ["CharacterId"], \
         entries["relic"]["SEA_GLASS"]
-    assert entries["card"]["MAD_SCIENCE"] == ["TinkerTimeType"], \
-        entries["card"]["MAD_SCIENCE"]
+    assert entries["card"]["MAD_SCIENCE"] == \
+        ["TinkerTimeType", "TinkerTimeRider"], entries["card"]["MAD_SCIENCE"]
     assert entries["card"]["STRIKE_IRONCLAD"] is None, \
         "directly executable content must not advertise a construction context"
 
     # Mad Science: the stamped type decides how the card resolves, so an
-    # attack must arrive targetable and land on an enemy.
+    # attack must arrive targetable and land on an enemy — and the stamped
+    # rider has to run too. A rider-less card still deals its damage, so
+    # damage alone would pass on a half-configured fixture: the description
+    # renders the rider clause as "???" (the game's own invalid-state
+    # placeholder) and Sapping's Weak and Vulnerable never land.
     d = into_combat(seed="CIM6", character="IRONCLAD")
     bridge.follow("cheat", "energy", "99")
     d = bridge.follow("cheat", "card", "MAD_SCIENCE")
     grafted = next(c for c in d["hand"] if c["model"] == "MAD_SCIENCE")
     assert grafted.get("target") == "anyenemy", grafted
+    assert "?" not in (grafted.get("description") or "?"), grafted
     victim = alive_enemy(d)
     d = bridge.follow("play", "MAD_SCIENCE", "--target", str(victim["id"]))
     hit = next(e for e in d["enemies"] if e["id"] == victim["id"])
     assert hit["hp"][0] < victim["hp"][0] or not hit["alive"], (victim, hit)
+    assert {"WEAK_POWER", "VULNERABLE_POWER"} <= {p["id"] for p in hit["powers"]}, \
+        hit
     to_menu()
 
     # Sea Glass: SILENT, not the Ironclad the unstamped relic falls back

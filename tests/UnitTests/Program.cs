@@ -496,17 +496,34 @@ internal static class Tests
         True(ContextBoundContent.IsContextBound("SEA_GLASS"));
     }
 
-    public static void MadScienceIsBoundToTheCardTypeItsEventChooses()
+    public static void MadScienceIsBoundToBothPropertiesItsEventAssigns()
     {
-        // TINKER_TIME sets the chosen card type before the card exists in any
-        // pile. The unset default is CardType.None, which OnPlay rejects with
-        // ArgumentOutOfRangeException, so the fixture has to name a member.
+        // TINKER_TIME.RiderChosen assigns the card type and the rider in one
+        // statement block before the card is added to the deck, so both are
+        // construction context. Neither type default is reachable: CardType
+        // .None makes OnPlay throw ArgumentOutOfRangeException, and
+        // RiderEffect.None skips the rider half and renders the card's
+        // description as "???".
         var context = ContextBoundContent.For("MAD_SCIENCE");
 
-        Equal(1, context.Count);
+        Equal(2, context.Count);
         Equal("TinkerTimeType", context[0].Property);
         Equal(ConstructionValue.EnumMember, context[0].Value);
         Equal("Attack", context[0].Member);
+        Equal("TinkerTimeRider", context[1].Property);
+        Equal(ConstructionValue.EnumMember, context[1].Value);
+        Equal("Sapping", context[1].Member);
+    }
+
+    public static void EveryStampedContextValueNamesAMember()
+    {
+        // EnumMember is the only kind that carries one, and the cheat parses
+        // it against the property's own enum — a null there would reject the
+        // injection at runtime, where only the deep sweeps would notice.
+        foreach (var entry in new[] { "SEA_GLASS", "MAD_SCIENCE" })
+            foreach (var context in ContextBoundContent.For(entry))
+                Equal(context.Value == ConstructionValue.EnumMember,
+                    !string.IsNullOrEmpty(context.Member));
     }
 
     public static void DirectlyExecutableContentDeclaresNoConstructionContext()
@@ -526,7 +543,7 @@ internal static class Tests
         // registry alone.
         Equal("CharacterId",
             string.Join(",", ContextBoundContent.PublishedContext("SEA_GLASS")!));
-        Equal("TinkerTimeType",
+        Equal("TinkerTimeType,TinkerTimeRider",
             string.Join(",", ContextBoundContent.PublishedContext("MAD_SCIENCE")!));
     }
 
