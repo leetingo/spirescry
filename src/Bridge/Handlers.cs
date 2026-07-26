@@ -355,6 +355,11 @@ public static class Handlers
 
     // The registry the cheats validate against, enumerable — sweeps drive
     // every card/potion/encounter from here instead of hardcoded lists.
+    //
+    // `context` names the saved properties the cheats stamp before the model
+    // enters play (see ContextBoundContent), and is null for the directly
+    // executable majority — so a sweep can tell the two apart and insist that
+    // context-bound content is exercised through its fixture, not skipped.
     public static async Task<Response> Models(string? kind)
     {
         var entries = await MainThreadPump.Instance!.Run<object?>(() => kind switch
@@ -367,10 +372,15 @@ public static class Handlers
                     type = c.Type.ToString().ToLowerInvariant(),
                     rarity = c.Rarity.ToString().ToLowerInvariant(),
                     pool = c.Pool.Title,
+                    context = ContextBoundContent.PublishedContext(c.Id.Entry),
                 }).ToArray(),
             "relic" => MegaCrit.Sts2.Core.Models.ModelDb.AllRelics
                 .OrderBy(r => r.Id.Entry)
-                .Select(r => (object)new { model = r.Id.Entry }).ToArray(),
+                .Select(r => (object)new
+                {
+                    model = r.Id.Entry,
+                    context = ContextBoundContent.PublishedContext(r.Id.Entry),
+                }).ToArray(),
             "potion" => MegaCrit.Sts2.Core.Models.ModelDb.AllPotions
                 .OrderBy(p => p.Id.Entry)
                 .Select(p => (object)new { model = p.Id.Entry }).ToArray(),

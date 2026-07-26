@@ -482,6 +482,63 @@ internal static class Tests
             isAbandoned: true, endedInVictoryRoom: false, winTime: 0));
     }
 
+    public static void SeaGlassIsBoundToItsOwningCharacter()
+    {
+        // OROBAS stamps the character whose card pool Sea Glass reads before
+        // the pick. Granted bare, AfterObtained logs "obtained without a
+        // character ID assigned" — an engine error the sweeps read as a
+        // product fault, and a silent fall back to Ironclad besides.
+        var context = ContextBoundContent.For("SEA_GLASS");
+
+        Equal(1, context.Count);
+        Equal("CharacterId", context[0].Property);
+        Equal(ConstructionValue.OwnerCharacterId, context[0].Value);
+        True(ContextBoundContent.IsContextBound("SEA_GLASS"));
+    }
+
+    public static void MadScienceIsBoundToTheCardTypeItsEventChooses()
+    {
+        // TINKER_TIME sets the chosen card type before the card exists in any
+        // pile. The unset default is CardType.None, which OnPlay rejects with
+        // ArgumentOutOfRangeException, so the fixture has to name a member.
+        var context = ContextBoundContent.For("MAD_SCIENCE");
+
+        Equal(1, context.Count);
+        Equal("TinkerTimeType", context[0].Property);
+        Equal(ConstructionValue.EnumMember, context[0].Value);
+        Equal("Attack", context[0].Member);
+    }
+
+    public static void DirectlyExecutableContentDeclaresNoConstructionContext()
+    {
+        // The distinction the sweeps ride on: ordinary content is injected as
+        // is, and /models must not advertise a context that would make a sweep
+        // demand one.
+        Equal(0, ContextBoundContent.For("STRIKE_IRONCLAD").Count);
+        False(ContextBoundContent.IsContextBound("STRIKE_IRONCLAD"));
+        Equal(null, ContextBoundContent.PublishedContext("STRIKE_IRONCLAD"));
+    }
+
+    public static void PublishedContextNamesEveryStampedProperty()
+    {
+        // The wire form /models hands the sweeps: property names only, in
+        // table order, so a fixture that stops applying is visible from the
+        // registry alone.
+        Equal("CharacterId",
+            string.Join(",", ContextBoundContent.PublishedContext("SEA_GLASS")!));
+        Equal("TinkerTimeType",
+            string.Join(",", ContextBoundContent.PublishedContext("MAD_SCIENCE")!));
+    }
+
+    public static void ConstructionContextIsKeyedByTheNormalizedModelEntry()
+    {
+        // The cheats upper-case args.id before every registry lookup, so the
+        // table is keyed that way too. A lower-case probe must miss rather
+        // than half-match and stamp nothing.
+        False(ContextBoundContent.IsContextBound("sea_glass"));
+        True(ContextBoundContent.IsContextBound("SEA_GLASS"));
+    }
+
     public static void EventOptionTrackerOutlivesAbandonThenNewRunRotations()
     {
         // The P16 shape, and the regression this replaced rotation counting

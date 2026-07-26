@@ -333,6 +333,8 @@ public static class Dispatcher
             ? CombatManager.Instance!.DebugOnlyGetState()!
             : run.State;
         var card = scope.CreateCard(proto, player);
+        if (StampConstructionContext(card, entry, player) is { } cardCtxErr)
+            return cardCtxErr;
         var makeUpgraded = args.TryGetProperty("upgraded", out var upgraded)
             && upgraded.ValueKind == JsonValueKind.True;
         if (TryGetString(args, "name", out var cheatName) && cheatName == "card-upgraded")
@@ -372,12 +374,62 @@ public static class Dispatcher
             BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance,
             binder: null, types: [typeof(Player)], modifiers: null)
             ?.Invoke(relic, [player]);
+        if (StampConstructionContext(relic, entry, player) is { } relicCtxErr)
+            return relicCtxErr;
 
         // Pickup relics such as ASTROLABE open a deck picker from their
         // AfterObtained hook. The selected decision surface owns whether
         // that task settles inline or parks on its choice completion.
         return FromDecisionSurface(
             DecisionSurface.Current.ObtainRelic(relic, player));
+    }
+
+    // Context-bound content (SEA_GLASS, MAD_SCIENCE, …) is never constructed
+    // bare by the game: its event or reward factory stamps a saved property
+    // first and the model's own code assumes it. Direct injection has to do
+    // the same or the sweeps read the model's justified complaint as a
+    // product fault. ContextBoundContent owns which models and which values;
+    // resolving them against engine types is this side of the seam.
+    //
+    // A missing property means the game renamed it — reject loudly rather
+    // than inject an unconfigured model and blame the engine for the fallout.
+    private static DispatchResult? StampConstructionContext(
+        object model, string entry, Player player)
+    {
+        foreach (var context in ContextBoundContent.For(entry))
+        {
+            if (Reflect.PropertyType(model, context.Property) is not { } declared)
+                return DispatchResult.Reject(RejectionCodes.Internal,
+                    $"'{entry}' needs construction context '{context.Property}', "
+                    + $"which {model.GetType().Name} no longer exposes");
+
+            object? value;
+            switch (context.Value)
+            {
+                case ConstructionValue.OwnerCharacterId:
+                    value = player.Character?.Id;
+                    if (value is null)
+                        return DispatchResult.Reject(RejectionCodes.BadState,
+                            $"'{entry}' needs an owning character, and the local player has none");
+                    break;
+                case ConstructionValue.EnumMember:
+                    var target = Nullable.GetUnderlyingType(declared) ?? declared;
+                    if (!target.IsEnum
+                        || !Enum.TryParse(target, context.Member, out value))
+                        return DispatchResult.Reject(RejectionCodes.Internal,
+                            $"'{entry}' needs {context.Property} = {context.Member}, "
+                            + $"which is not a member of {target.Name}");
+                    break;
+                default:
+                    return DispatchResult.Reject(RejectionCodes.Internal,
+                        $"'{entry}' declares an unknown construction value {context.Value}");
+            }
+
+            if (!Reflect.SetProperty(model, context.Property, value))
+                return DispatchResult.Reject(RejectionCodes.Internal,
+                    $"'{entry}' construction context '{context.Property}' has no setter");
+        }
+        return null;
     }
 
     // Leaves every enemy at 1 HP with no block, so one normal play ends the
