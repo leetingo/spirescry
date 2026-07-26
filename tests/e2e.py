@@ -1062,13 +1062,20 @@ def s1():
 
     d = obs()
     assert d["cardRemoval"] and not d["cardRemoval"]["used"], d.get("cardRemoval")
-    # One stall, one index: the removal publishes the only idx buy accepts.
+    # One stall, one index: the removal publishes the only idx buy accepts,
+    # and a rejected index leaves the deck alone. (`cardRemoval.used` is not
+    # the witness here — the engine only flips it from a GUI node, so it
+    # reads False even after a removal lands.)
     assert d["cardRemoval"]["idx"] == 0, d["cardRemoval"]
+    deck_before_rejects = len(d["player"]["deck"])
     for bad in ("1", "2", "7"):
         err = reject(["buy", "card_removal", "--idx", bad], REJECTION.BAD_INDEX)
         assert "one entry" in err, err
-    assert obs()["cardRemoval"]["used"] is False, \
-        "a rejected card_removal idx still consumed the removal"
+    d = obs()
+    assert d["phase"] == PHASE.SHOP, \
+        f"a rejected card_removal idx still opened its picker: {d['phase']}"
+    assert len(d["player"]["deck"]) == deck_before_rejects, \
+        "a rejected card_removal idx removed a card anyway"
     run("buy", "card_removal", "--idx", "0")
     d = bridge.wait_phase(PHASE.CARD_SELECT)
     before_rev = d["rev"]

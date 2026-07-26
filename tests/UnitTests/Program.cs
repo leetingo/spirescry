@@ -1531,34 +1531,65 @@ internal static class Tests
             DecisionProjection.LegalVerbs(Stall(), runActive: true)));
     }
 
-    public static void MerchantCardRemovalAcceptsExactlyThePublishedIndex()
+    public static void MerchantBuyRejectsEveryIndexButThePublishedRemoval()
     {
+        // A stall sells one card removal, so `buy card_removal` has exactly
+        // one target — the idx obs.cardRemoval publishes. Indexed kinds are
+        // bounded by the inventory instead, which only the dispatcher can
+        // read, so the rule leaves their in-range indices alone.
         Equal(0, MerchantRules.CardRemovalIndex);
-        True(MerchantRules.IsCardRemovalIndex(MerchantRules.CardRemovalIndex));
-        foreach (var idx in new[] { -1, 1, 2, 7 })
-            False(MerchantRules.IsCardRemovalIndex(idx));
+        Equal(null, MerchantRules.BuyIndexRejection(
+            "card_removal", MerchantRules.CardRemovalIndex));
+
+        foreach (var idx in new[] { 1, 2, 7 })
+        {
+            var removal = MerchantRules.BuyIndexRejection("card_removal", idx);
+            Equal(RejectionCodes.BadIndex, removal?.Code);
+            Equal($"card_removal has one entry, at idx 0; got {idx}",
+                removal?.Message);
+        }
+
+        foreach (var kind in new[] { "card", "colorless", "relic", "potion" })
+        {
+            Equal(null, MerchantRules.BuyIndexRejection(kind, 0));
+            Equal(null, MerchantRules.BuyIndexRejection(kind, 7));
+            var negative = MerchantRules.BuyIndexRejection(kind, -1);
+            Equal(RejectionCodes.BadIndex, negative?.Code);
+            Equal($"{kind} idx -1 must be non-negative", negative?.Message);
+        }
+        Equal(RejectionCodes.BadIndex,
+            MerchantRules.BuyIndexRejection("card_removal", -1)?.Code);
     }
 
     public static void MerchantFoulPotionRedemptionNeedsEveryGate()
     {
         True(MerchantRules.RedeemableAtMerchant(
             isFoulPotion: true, usableAnyTime: true, ownerAlive: true,
-            canUseOrRemovePotions: true, interactionAvailable: true));
+            canUseOrRemovePotions: true, interactionAvailable: () => true));
         False(MerchantRules.RedeemableAtMerchant(
             isFoulPotion: false, usableAnyTime: true, ownerAlive: true,
-            canUseOrRemovePotions: true, interactionAvailable: true));
+            canUseOrRemovePotions: true, interactionAvailable: () => true));
         False(MerchantRules.RedeemableAtMerchant(
             isFoulPotion: true, usableAnyTime: false, ownerAlive: true,
-            canUseOrRemovePotions: true, interactionAvailable: true));
+            canUseOrRemovePotions: true, interactionAvailable: () => true));
         False(MerchantRules.RedeemableAtMerchant(
             isFoulPotion: true, usableAnyTime: true, ownerAlive: false,
-            canUseOrRemovePotions: true, interactionAvailable: true));
+            canUseOrRemovePotions: true, interactionAvailable: () => true));
         False(MerchantRules.RedeemableAtMerchant(
             isFoulPotion: true, usableAnyTime: true, ownerAlive: true,
-            canUseOrRemovePotions: false, interactionAvailable: true));
+            canUseOrRemovePotions: false, interactionAvailable: () => true));
         False(MerchantRules.RedeemableAtMerchant(
             isFoulPotion: true, usableAnyTime: true, ownerAlive: true,
-            canUseOrRemovePotions: true, interactionAvailable: false));
+            canUseOrRemovePotions: true, interactionAvailable: () => false));
+
+        // The last gate walks the run's current room in the live game, so a
+        // belt full of ordinary potions must never reach it.
+        var asked = 0;
+        False(MerchantRules.RedeemableAtMerchant(
+            isFoulPotion: false, usableAnyTime: true, ownerAlive: true,
+            canUseOrRemovePotions: true,
+            interactionAvailable: () => { asked++; return true; }));
+        Equal(0, asked);
     }
 
     public static void SnapshotContractPreservesUnconsumedProducerFields()

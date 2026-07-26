@@ -658,16 +658,11 @@ public static class Dispatcher
         if (!TryGetInt(args, "idx", out var idx))
             return DispatchResult.Reject(RejectionCodes.BadRequest,
                 "missing or invalid args.idx (32-bit integer required)");
-        if (idx < 0)
-            return DispatchResult.Reject(RejectionCodes.BadIndex,
-                $"{kind} idx {idx} must be non-negative");
-        // One stall, one index — the one obs.cardRemoval.idx publishes.
-        // Ignoring idx here let any number remove a card, so the reject the
-        // observation implies never happened.
-        if (kind == "card_removal" && !MerchantRules.IsCardRemovalIndex(idx))
-            return DispatchResult.Reject(RejectionCodes.BadIndex,
-                $"card_removal has one entry, at idx "
-                    + $"{MerchantRules.CardRemovalIndex}; got {idx}");
+        // Whatever the request alone settles — a negative idx, or any idx but
+        // the one obs.cardRemoval publishes. MerchantRules states it so the
+        // observation and this reject cannot disagree.
+        if (MerchantRules.BuyIndexRejection(kind, idx) is { } indexErr)
+            return DispatchResult.Reject(indexErr.Code, indexErr.Message);
 
         if (RequireRunContext(out var run, "shop inventory not available") is { } runErr)
             return runErr;
@@ -961,10 +956,10 @@ public static class Dispatcher
         // Mirror the potion popup's model-layer gates. The headless fallback
         // covers only the custom UI-node check: Phase.Shop has already
         // established the semantic MerchantRoom and host mode intentionally
-        // has no NMerchantButton to satisfy that check. Snapshotter runs the
-        // same gate to mark the belt entry `playable`, so obs.legal's
+        // has no NMerchantButton to satisfy that check. The snapshot marks
+        // the belt entry `playable` through this same gate, so obs.legal's
         // potion-use and this reject cannot disagree.
-        if (!Snapshotter.MerchantPotionRedeemable(potion, player))
+        if (!MerchantPotionGate.Redeemable(potion, player))
             return DispatchResult.Reject(RejectionCodes.NotPlayable,
                 $"{potion.Id.Entry} has no available merchant interaction in this shop");
         return FromDecisionSurface(
