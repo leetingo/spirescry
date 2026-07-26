@@ -79,6 +79,13 @@ the piles. Settlement and replay still consume the full typed projection
 inside the host; `obs --semantic-state` (HTTP `?semanticState=1`) exposes it
 explicitly for diagnostics.
 
+Every `/obs` query parameter is optional, but a supplied one must be well
+formed or the request is a `bad_request`: `since` is a non-negative integer,
+`wait` an integer in `[0,60000]`, and the boolean flags (`compact`,
+`decision`, `semanticState`) take `1`/`true` or `0`/`false`, case-insensitive.
+A malformed value is never silently replaced by its default — `?wait=1s`
+quietly becoming a no-wait poll reads exactly like a long-poll that timed out.
+
 Combat card `playable` values use the same final hook-aware gate as dispatch.
 When a hook blocks a card, `unplayableReason` and, when available,
 `unplayablePreventer` name the machine-readable reason and model. `legal`

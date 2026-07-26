@@ -3,6 +3,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
 using Spirescry;
+using Spirescry.Bridge;
 using Spirescry.Host;
 using Spirescry.State;
 
@@ -1920,6 +1921,106 @@ internal static class Tests
 
         Equal(Build("ornate").ConsumerFingerprint(),
             Build("plain").ConsumerFingerprint());
+    }
+
+    public static void OmittedObservationParametersKeepTheirDefaults()
+    {
+        var query = ParsedQuery();
+
+        Equal(ObservationQuery.NoSince, query.Since);
+        Equal(0, query.Wait);
+        False(query.Compact);
+        False(query.Decision);
+        False(query.SemanticState);
+        False(query.WantsChangeFeed);
+        False(query.ShouldPark);
+    }
+
+    public static void ValidObservationLongPollParametersSurviveParsing()
+    {
+        var query = ParsedQuery(since: "0", wait: "1500");
+
+        Equal(0L, query.Since);
+        Equal(1500, query.Wait);
+        True(query.WantsChangeFeed);
+        True(query.ShouldPark);
+
+        // since without wait still reports the change feed, it just does
+        // not park; wait=0 is the same request spelled out.
+        True(ParsedQuery(since: "42").WantsChangeFeed);
+        False(ParsedQuery(since: "42").ShouldPark);
+        False(ParsedQuery(since: "42", wait: "0").ShouldPark);
+        Equal(ObservationQuery.MaxWaitMs,
+            ParsedQuery(since: "1", wait: "60000").Wait);
+    }
+
+    public static void MalformedObservationSinceIsRejected()
+    {
+        foreach (var since in new[] { "", "abc", "-1", " 1", "1.0", "1e3", "0x1" })
+            Equal("'since' must be a non-negative integer", RejectedQuery(since: since));
+    }
+
+    public static void MalformedObservationWaitIsRejected()
+    {
+        // Out of range counts as malformed: silently clamping a 10-minute
+        // wait to a minute is the same lie as silently defaulting it.
+        foreach (var wait in new[] { "", "soon", "-1", "1500ms", "60001" })
+            Equal("'wait' must be an integer in [0,60000]",
+                RejectedQuery(since: "0", wait: wait));
+    }
+
+    public static void ObservationFlagsAcceptOnlyTheDocumentedEncodings()
+    {
+        foreach (var yes in new[] { "1", "true", "TRUE" })
+        {
+            True(ParsedQuery(compact: yes).Compact);
+            True(ParsedQuery(decision: yes).Decision);
+            True(ParsedQuery(semanticState: yes).SemanticState);
+        }
+        foreach (var no in new[] { "0", "false", "False" })
+        {
+            False(ParsedQuery(compact: no).Compact);
+            False(ParsedQuery(decision: no).Decision);
+            False(ParsedQuery(semanticState: no).SemanticState);
+        }
+        foreach (var bad in new[] { "", "yes", "2", "on", "compact" })
+        {
+            Equal("'compact' must be one of 1|true|0|false",
+                RejectedQuery(compact: bad));
+            Equal("'decision' must be one of 1|true|0|false",
+                RejectedQuery(decision: bad));
+            Equal("'semanticState' must be one of 1|true|0|false",
+                RejectedQuery(semanticState: bad));
+        }
+    }
+
+    private static ObservationQuery ParsedQuery(
+        string? since = null,
+        string? wait = null,
+        string? compact = null,
+        string? decision = null,
+        string? semanticState = null)
+    {
+        True(ObservationQuery.TryParse(
+            since, wait, compact, decision, semanticState,
+            out var query, out var error));
+        Equal(null, error);
+        return query;
+    }
+
+    private static string RejectedQuery(
+        string? since = null,
+        string? wait = null,
+        string? compact = null,
+        string? decision = null,
+        string? semanticState = null)
+    {
+        False(ObservationQuery.TryParse(
+            since, wait, compact, decision, semanticState,
+            out var query, out var error));
+        Equal(default(ObservationQuery), query);
+        return error ?? throw new InvalidOperationException(
+            "a rejected query carried no message");
     }
 
     // One option task tracked under an owner, then retired by Drop — the

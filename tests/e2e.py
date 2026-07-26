@@ -367,6 +367,46 @@ def p4():
             f"{method} {path} -> {status} {d}"
 
 
+@case("P4b malformed obs query parameters are rejected")
+def p4b():
+    to_menu()
+
+    # Present but malformed: rejected, never silently defaulted or clamped.
+    for query in ("?since=abc", "?since=-1", "?since=", "?since=1.0",
+                  "?wait=soon", "?wait=-1", "?wait=60001",
+                  "?compact=yes", "?decision=maybe", "?semanticState=2"):
+        status, d = http("GET", "/obs" + query)
+        assert status == 400 and d.get("err") == REJECTION.BAD_REQUEST, \
+            f"/obs{query} -> {status} {d}"
+        assert d.get("runId") == "none", d
+
+    # Omitted: the existing defaults — no change feed, no legal projection.
+    status, omitted = http("GET", "/obs")
+    assert status == 200 and omitted["phase"] == PHASE.MAIN_MENU, omitted
+    assert "changed" not in omitted and "legal" not in omitted, omitted
+
+    # Both documented encodings of each boolean are accepted, and the false
+    # ones land on the same snapshot shape as omitting the parameter.
+    for form in ("1", "true"):
+        status, on = http("GET", f"/obs?decision={form}&compact={form}")
+        assert status == 200 and on.get("legal") == ["new-run"], (form, on)
+    for form in ("0", "false"):
+        status, off = http("GET", f"/obs?decision={form}&compact={form}")
+        assert status == 200 and "legal" not in off, (form, off)
+
+    # A valid since/wait pair still parks for the full window.
+    for _ in range(2):  # one retry in case a background bump beat the timer
+        cur = obs()["rev"]
+        t0 = time.monotonic()
+        status, parked = http("GET", f"/obs?since={cur}&wait=1200")
+        took = time.monotonic() - t0
+        assert status == 200, parked
+        if not parked.get("changed"):
+            break
+    assert parked.get("changed") is False, parked.get("events")
+    assert took >= 1.0, f"valid long poll returned early ({took:.2f}s)"
+
+
 @case("P5 bad character is rejected with the roster")
 def p5():
     print(f"    roster: {character_roster()}")
