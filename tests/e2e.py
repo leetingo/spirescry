@@ -2212,37 +2212,6 @@ def c13():
     to_menu()
 
 
-@case("C14 a multi-select picker marks each card's own selection")
-def c14():
-    # CHARGE opens a min=max=2 pick over the draw pile, and a draw pile
-    # holds duplicates: the top-level `selected` selector list says
-    # "DEFEND_IRONCLAD" without saying *which* one. Without a per-card
-    # flag an agent picking "the first card not yet selected" re-picks
-    # idx 0, toggling it off and on forever — the M2 sweep died that way
-    # on CHARGE and HIDDEN_DAGGERS. Every card carries its own state.
-    into_combat(seed="CIMULTIPICK", character="IRONCLAD")
-    bridge.follow("cheat", "energy", "99")
-    bridge.follow("cheat", "card", "CHARGE")
-    d = bridge.follow("play", "CHARGE")
-    assert d["phase"] == PHASE.HAND_SELECT, d
-    assert (d.get("min"), d.get("max")) == (2, 2), d
-    assert d.get("confirmable") is False, d
-    assert all(card["selected"] is False for card in d["cards"]), d["cards"]
-    duplicated = [card["model"] for card in d["cards"]]
-    assert len(duplicated) > len(set(duplicated)), duplicated
-
-    picked = bridge.follow("pick-card", str(d["cards"][0]["idx"]))
-    assert picked["phase"] == PHASE.HAND_SELECT, picked
-    assert [card["selected"] for card in picked["cards"]] == \
-        [True] + [False] * (len(d["cards"]) - 1), picked["cards"]
-
-    # The walker's rule — first card not yet selected — now advances.
-    nxt = next(card for card in picked["cards"] if not card["selected"])
-    settled = bridge.follow("pick-card", str(nxt["idx"]))
-    assert settled["phase"] == PHASE.COMBAT, settled
-    to_menu()
-
-
 # ---------- V: victory ----------
 
 @case("V1 cheat-driven full clear reaches a victory game_over")

@@ -1548,13 +1548,8 @@ internal static class Snapshotter
     }
 
     // Hand select runs inside the combat room — the hand flips into a
-    // selection mode instead of pushing an overlay. In the GUI, picked cards
-    // leave ActiveHolders (into the selected row), so idx tracks what's on
-    // screen; the pure host's picker keeps every candidate listed instead.
-    // Either way each card carries its own `selected`, same as card_select:
-    // the top-level selector list cannot disambiguate two copies of the same
-    // model, so without the per-card flag an agent picking "the first card
-    // not yet selected" toggles idx 0 forever and never reaches a min of 2.
+    // selection mode instead of pushing an overlay. Picked cards leave
+    // ActiveHolders (into the selected row), so idx tracks what's on screen.
     private static SnapshotContract HandSelectSnapshot(Phase phase)
     {
         var decision = DecisionSurface.Current.HandSelect;
@@ -1567,8 +1562,7 @@ internal static class Snapshotter
                 model: card?.Id.Entry,
                 selector: card is null ? null : CardSpecifier.From(card),
                 semanticState: card is null ? [SemanticToken("card", (object?)null)]
-                    : [CardStateToken(card, liveCost: true)],
-                selected: card is null ? null : decision.Selected.Contains(card))).ToArray(),
+                    : [CardStateToken(card, liveCost: true)])).ToArray(),
             Selected = decision.Selected.Select(CardSpecifier.From).ToArray(),
             SemanticState =
             [
