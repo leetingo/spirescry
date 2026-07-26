@@ -1937,6 +1937,9 @@ internal static class Tests
             .GetConstructors()
             .Select(c => string.Join(",", c.GetParameters().Select(p => p.ParameterType.Name)))
             .ToHashSet();
+        // CI has no game dlls, so this list is a hand-kept copy of the real
+        // engine's set. Refresh it whenever the game's Godot version moves:
+        //   ilspycmd -t Godot.Color lib/GodotSharp.dll
         string[] required =
         [
             "Single,Single,Single,Single",
@@ -1951,6 +1954,30 @@ internal static class Tests
         Equal("none", missing.Length == 0 ? "none" : string.Join(" ", missing));
     }
 
+    // Named colours are the same ABI surface as the constructors — an absent
+    // one faults the same way, and Colors.DarkRed is read by a method on
+    // RelicModel, a Model class headless does construct. This list is every
+    // accessor sts2.dll binds against; refresh it by scanning the game
+    // assembly's MemberRef table for the Godot.Colors parent type.
+    public static void ColorsStubCarriesEveryNamedColorTheGameBinds()
+    {
+        var present = typeof(Godot.Colors)
+            .GetProperties(BindingFlags.Public | BindingFlags.Static)
+            .Select(p => p.Name)
+            .ToHashSet();
+        string[] required =
+        [
+            "Black", "Blue", "Cyan", "DarkGray", "DarkRed", "DimGray", "Gold",
+            "Gray", "Green", "Magenta", "Purple", "Red", "Transparent", "White",
+        ];
+
+        var missing = required.Where(name => !present.Contains(name)).ToArray();
+        Equal("none", missing.Length == 0 ? "none" : string.Join(" ", missing));
+    }
+
+    // Deleting the copy ctor from the stub breaks this method's *compilation*
+    // rather than tripping the shape assertion above — if CS1503/CS7036 lands
+    // here, the stub lost `Color(Color, float)`.
     public static void ColorCopyConstructorKeepsRgbAndReplacesAlpha()
     {
         var source = new Color(0.25f, 0.5f, 0.75f, 0.125f);

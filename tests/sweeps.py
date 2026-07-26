@@ -408,16 +408,24 @@ def relics(log=print):
 
 
 if __name__ == "__main__":
-    sweep = sys.argv[1] if len(sys.argv) == 2 else ""
+    sweep = sys.argv[1] if len(sys.argv) in (2, 3) else ""
     choices = {
         "encounters": encounters,
         "cards": cards,
         "potions": potions,
         "relics": relics,
     }
+    # The per-entry sweeps take an id list, which re-verifies a single fix in
+    # seconds instead of paying for the whole sweep. Filtered runs skip the
+    # coverage floor and the batch-pollution retry, so they are a debugging
+    # aid, not a substitute for the full sweep.
+    filterable = {"cards", "potions"}
     if sweep not in choices:
-        sys.exit("usage: sweeps.py encounters|cards|potions|relics")
-    failed = choices[sweep]()
+        sys.exit("usage: sweeps.py encounters|cards|potions|relics [ID,ID,...]")
+    if len(sys.argv) == 3 and sweep not in filterable:
+        sys.exit(f"sweeps.py {sweep} cannot be filtered by id")
+    failed = (choices[sweep](only=set(sys.argv[2].split(",")))
+              if len(sys.argv) == 3 else choices[sweep]())
     # Name the failures — a bare exit code forces a full re-run under a
     # debugger just to learn WHICH entry broke.
     for name, why in failed.items():
