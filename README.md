@@ -334,6 +334,8 @@ picks), and text comes from tables extracted out of your local install's
 ## Testing
 
 ```sh
+./build.sh gate          # the pre-merge gate: everything CI runs, plus the
+                         # end-to-end suite it cannot (~1.5 min)
 ./build.sh verify        # drives one act-1 loop against BOTH boots, then
                          # diffs the recorded snapshot key sets — same
                          # phase must expose the same keys in each
@@ -349,7 +351,14 @@ python3 tests/host_exit.py  # force clean/signal/unhandled host exits and
 
 CI runs only the pure unit tests (`unit-tests.yml`, GitHub-hosted): the
 host is built from the game's non-distributable dlls, so the end-to-end
-suite stays local — **run `python3 tests/e2e.py --boot` before merging**.
+suite stays local — **run `./build.sh gate` before merging**. A green CI
+tick says nothing about the e2e cases; three regressions once sat on `main`
+unnoticed for exactly that reason.
+
+Rules that can be stated over plain values belong in engine-free modules
+(`RunOutcomeRules`, `SettlementOutcomeRules`, `CardSpecifier.Encode`) rather
+than inline in `Snapshotter`, so the unit tests — the part CI *can* run —
+reach them without the game's dlls.
 
 ## Build
 
