@@ -2,17 +2,32 @@ using System.Diagnostics;
 using System.Net;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using Spirescry.State;
 
 namespace Spirescry.Bridge;
 
 public sealed class Response
 {
+    // The envelope flag every bridge body carries: true on a result, false
+    // on a rejection. Consumers validate it strictly (the CLI refuses a body
+    // without a boolean `ok`), so no route may answer without it.
+    public const string OkField = "ok";
+
     public int Status { get; init; } = 200;
     public string Body { get; init; } = "";
 
     public static Response Json(object payload, int status = 200) =>
         new() { Status = status, Body = JsonSerializer.Serialize(payload) };
+
+    // Snapshot-shaped bodies are assembled as raw JSON nodes rather than
+    // serialized from an anonymous payload; stamp the envelope here so they
+    // cannot drift out of the contract Json() gives everyone else.
+    public static Response JsonEnvelope(JsonObject body)
+    {
+        body[OkField] = true;
+        return new Response { Body = body.ToJsonString() };
+    }
 
     public static Response Error(
         string code, string msg, int status = 400, string? runId = null) =>

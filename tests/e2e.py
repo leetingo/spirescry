@@ -367,6 +367,30 @@ def p4():
             f"{method} {path} -> {status} {d}"
 
 
+@case("P4b every route answers a boolean-ok envelope")
+def p4b():
+    # The CLI validates the envelope strictly — a body without a boolean
+    # `ok`, or one whose `ok` disagrees with the status, is malformed and
+    # exits 1. Snapshot bodies are assembled as raw JSON nodes, so they are
+    # the ones that can silently drop the stamp.
+    to_menu()
+    for method, path, want_ok in (
+            ("GET", "/health", True),
+            ("GET", "/obs", True),
+            ("GET", "/obs?since=0", True),
+            ("GET", "/runlog", True),
+            ("GET", "/models?kind=relic", True),
+            ("GET", "/models?kind=bogus", False),
+            ("GET", "/nope", False),
+    ):
+        status, d = http(method, path)
+        assert isinstance(d, dict), f"{path} is not an object envelope: {d}"
+        assert d.get("ok") is want_ok, f"{path} -> {status} ok={d.get('ok')!r}"
+        assert (status < 400) is want_ok, \
+            f"{path} status {status} contradicts ok={d.get('ok')!r}"
+        assert ("err" in d) is not want_ok, f"{path} -> {status} {sorted(d)[:8]}"
+
+
 @case("P5 bad character is rejected with the roster")
 def p5():
     print(f"    roster: {character_roster()}")

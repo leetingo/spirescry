@@ -235,7 +235,10 @@ enum Cmd {
 }
 
 fn main() -> ExitCode {
-    let cli = Cli::parse();
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(error) => return argument_exit(error),
+    };
     let client = Client {
         base: format!("http://{}:{}", cli.host, cli.port),
         verbose: cli.verbose,
@@ -360,6 +363,25 @@ fn main() -> ExitCode {
             ExitCode::from(e.exit_status())
         }
     }
+}
+
+// clap's own convention is exit 2 for a usage error, but the published
+// contract has exactly three codes: 0 success, 75 the retryable not_ready,
+// 1 everything else. A rejected argument is a local validation error, so it
+// leaves with 1 like every other one; --help and --version are successful
+// output, not failures.
+fn argument_exit_status(kind: clap::error::ErrorKind) -> u8 {
+    match kind {
+        clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion => 0,
+        _ => 1,
+    }
+}
+
+fn argument_exit(error: clap::Error) -> ExitCode {
+    // clap routes rendered help/version to stdout and usage errors to
+    // stderr, which is the stream split this CLI wants anyway.
+    let _ = error.print();
+    ExitCode::from(argument_exit_status(error.kind()))
 }
 
 fn obs_request(
@@ -1489,25 +1511,106 @@ fn handle(result: Result<ureq::Response, Box<ureq::Error>>) -> CliResult<Value> 
             }
         },
     };
+    // The status is the only thing left saying "this was a failure" once the
+    // body is decoded, so carry it into classification instead of trusting a
+    // body that may not describe its own failure at all.
+    let status = resp.status();
     let value: Value = resp
         .into_json()
-        .map_err(|e| CliError::fatal(format!("non-json response: {}", e)))?;
-    parse_bridge_value(value)
+        .map_err(|e| CliError::fatal(format!("{}: non-json response: {}", malformed(status), e)))?;
+    classify_response(status, value)
 }
 
-fn parse_bridge_value(value: Value) -> CliResult<Value> {
-    if value.get("ok").and_then(Value::as_bool) == Some(false) {
-        let err = value
+fn http_succeeded(status: u16) -> bool {
+    (200..300).contains(&status)
+}
+
+fn malformed(status: u16) -> String {
+    format!("malformed bridge response (HTTP {status})")
+}
+
+fn json_kind(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "a boolean",
+        Value::Number(_) => "a number",
+        Value::String(_) => "a string",
+        Value::Array(_) => "an array",
+        Value::Object(_) => "an object",
+    }
+}
+
+// The whole success/failure envelope contract, stated over plain values so
+// the CI-runnable CLI tests cover it. Every bridge body is a JSON object
+// carrying a boolean `ok` that agrees with the HTTP status, and a failure
+// names its rejection code. Anything else is malformed: fail rather than
+// hand a caller a body the protocol does not describe, because a body that
+// omits the failure marker looks exactly like a success to every consumer
+// downstream.
+fn classify_response(status: u16, value: Value) -> CliResult<Value> {
+    let Some(envelope) = value.as_object() else {
+        return Err(CliError::fatal(format!(
+            "{}: top level is {}, not an object envelope",
+            malformed(status),
+            json_kind(&value),
+        )));
+    };
+    let ok = match envelope.get("ok") {
+        Some(Value::Bool(ok)) => *ok,
+        Some(other) => {
+            return Err(CliError::fatal(format!(
+                "{}: ok is {}, not a boolean",
+                malformed(status),
+                json_kind(other),
+            )))
+        }
+        None => {
+            return Err(CliError::fatal(format!(
+                "{}: no ok field",
+                malformed(status)
+            )))
+        }
+    };
+
+    if !ok {
+        let Some(err) = envelope
             .get("err")
             .and_then(Value::as_str)
-            .unwrap_or("unknown");
-        let msg = value.get("msg").and_then(Value::as_str).unwrap_or("");
+            .filter(|err| !err.is_empty())
+        else {
+            return Err(CliError::fatal(format!(
+                "{}: ok is false without a rejection code in err",
+                malformed(status),
+            )));
+        };
+        if http_succeeded(status) {
+            return Err(CliError::fatal(format!(
+                "{}: ok is false on a success status (err {})",
+                malformed(status),
+                err,
+            )));
+        }
+        let msg = envelope.get("msg").and_then(Value::as_str).unwrap_or("");
         let rendered = format!("{}: {}", err, msg);
         return if err == REJECTION_NOT_READY {
             Err(CliError::transient(rendered))
         } else {
             Err(CliError::fatal(rendered))
         };
+    }
+
+    if !http_succeeded(status) {
+        return Err(CliError::fatal(format!(
+            "{}: ok is true on an error status",
+            malformed(status),
+        )));
+    }
+    if let Some(err) = envelope.get("err").and_then(Value::as_str) {
+        return Err(CliError::fatal(format!(
+            "{}: ok is true alongside rejection code '{}'",
+            malformed(status),
+            err,
+        )));
     }
     Ok(value)
 }
@@ -2636,11 +2739,14 @@ mod tests {
 
     #[test]
     fn bridge_not_ready_is_a_typed_transient_error() {
-        let error = parse_bridge_value(json!({
-            "ok": false,
-            "err": "not_ready",
-            "msg": "map intro animation"
-        }))
+        let error = classify_response(
+            400,
+            json!({
+                "ok": false,
+                "err": "not_ready",
+                "msg": "map intro animation"
+            }),
+        )
         .unwrap_err();
 
         assert!(matches!(error, CliError::Transient(_)), "{error}");
@@ -2649,14 +2755,137 @@ mod tests {
 
     #[test]
     fn bad_state_bridge_rejections_are_typed_fatal_errors() {
-        let error = parse_bridge_value(json!({
-            "ok": false,
-            "err": "bad_state",
-            "msg": "pick more cards before confirming"
-        }))
+        let error = classify_response(
+            400,
+            json!({
+                "ok": false,
+                "err": "bad_state",
+                "msg": "pick more cards before confirming"
+            }),
+        )
         .unwrap_err();
 
         assert!(matches!(error, CliError::Fatal(_)), "{error}");
         assert_eq!(error.exit_status(), 1);
+    }
+
+    #[test]
+    fn success_envelope_passes_the_body_through_untouched() {
+        let body = json!({ "ok": true, "phase": "combat", "rev": 7 });
+
+        assert_eq!(classify_response(200, body.clone()), Ok(body));
+    }
+
+    #[test]
+    fn malformed_success_bodies_never_read_as_success() {
+        // Each of these is a 200 the bridge could never legally send. None
+        // may reach stdout as if it were a snapshot.
+        for body in [
+            json!([{ "ok": true }]),
+            json!("ok"),
+            json!(null),
+            json!({}),
+            json!({ "ok": "true" }),
+            json!({ "ok": 1 }),
+            json!({ "ok": null }),
+            json!({ "phase": "combat", "rev": 7 }),
+        ] {
+            let error = classify_response(200, body.clone()).unwrap_err();
+
+            assert!(matches!(error, CliError::Fatal(_)), "{body}: {error}");
+            assert_eq!(error.exit_status(), 1, "{body}");
+            assert!(error.contains("malformed bridge response"), "{error}");
+        }
+    }
+
+    #[test]
+    fn malformed_error_bodies_never_read_as_success() {
+        for (status, body) in [
+            (400, json!({})),
+            (400, json!({ "err": "bad_state", "msg": "no ok field" })),
+            (400, json!({ "ok": false })),
+            (400, json!({ "ok": false, "err": "" })),
+            (500, json!({ "ok": false, "err": 17 })),
+            (500, json!("internal error")),
+        ] {
+            let error = classify_response(status, body.clone()).unwrap_err();
+
+            assert!(matches!(error, CliError::Fatal(_)), "{body}: {error}");
+            assert_eq!(error.exit_status(), 1, "{body}");
+            assert!(error.contains(&format!("HTTP {status}")), "{error}");
+        }
+    }
+
+    #[test]
+    fn http_error_status_outranks_a_body_that_claims_success() {
+        for body in [
+            json!({ "ok": true }),
+            json!({ "ok": true, "kind": "diagnostic_reconstruction_recipe" }),
+        ] {
+            let error = classify_response(500, body.clone()).unwrap_err();
+
+            assert!(error.contains("HTTP 500"), "{error}");
+            assert_eq!(error.exit_status(), 1);
+        }
+    }
+
+    #[test]
+    fn contradictory_envelopes_fail_in_both_directions() {
+        let ok_with_rejection =
+            classify_response(200, json!({ "ok": true, "err": "bad_state" })).unwrap_err();
+        let failure_on_success_status =
+            classify_response(200, json!({ "ok": false, "err": "not_ready", "msg": "" }))
+                .unwrap_err();
+
+        assert!(
+            ok_with_rejection.contains("bad_state"),
+            "{ok_with_rejection}"
+        );
+        assert_eq!(ok_with_rejection.exit_status(), 1);
+        assert!(
+            failure_on_success_status.contains("success status"),
+            "{failure_on_success_status}"
+        );
+        assert_eq!(failure_on_success_status.exit_status(), 1);
+    }
+
+    #[test]
+    fn argument_errors_leave_with_the_public_exit_codes() {
+        use clap::error::ErrorKind;
+
+        // Rendered help and version are output, not failures.
+        assert_eq!(argument_exit_status(ErrorKind::DisplayHelp), 0);
+        assert_eq!(argument_exit_status(ErrorKind::DisplayVersion), 0);
+        // Everything clap rejects is a local validation error: 1, never
+        // clap's own 2.
+        for kind in [
+            ErrorKind::InvalidValue,
+            ErrorKind::UnknownArgument,
+            ErrorKind::InvalidSubcommand,
+            ErrorKind::MissingRequiredArgument,
+            ErrorKind::MissingSubcommand,
+            ErrorKind::ValueValidation,
+            ErrorKind::TooManyValues,
+            ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand,
+        ] {
+            assert_eq!(argument_exit_status(kind), 1, "{kind:?}");
+        }
+
+        // The kinds the contract is stated over are the kinds clap really
+        // produces for these invocations.
+        let kind_of = |args: &[&str]| match Cli::try_parse_from(args) {
+            Ok(_) => panic!("expected clap to reject {args:?}"),
+            Err(error) => error.kind(),
+        };
+        assert_eq!(
+            argument_exit_status(kind_of(&["spirescry", "option", "--", "-1"])),
+            1
+        );
+        assert_eq!(argument_exit_status(kind_of(&["spirescry"])), 1);
+        assert_eq!(argument_exit_status(kind_of(&["spirescry", "--help"])), 0);
+        assert_eq!(
+            argument_exit_status(kind_of(&["spirescry", "--version"])),
+            0
+        );
     }
 }

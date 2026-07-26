@@ -94,7 +94,7 @@ public static class Handlers
                 node["changed"] = revision > since;
                 node["events"] = JsonSerializer.SerializeToNode(Signals.EventsSince(since));
             }
-            return new Response { Body = node.ToJsonString() };
+            return Response.JsonEnvelope(node);
         });
     }
 
@@ -295,7 +295,6 @@ public static class Handlers
                 RunLog.RecordOutcome(id, outcome, probe.Observation, errors);
             var node = new JsonObject
             {
-                ["ok"] = true,
                 ["action"] = action,
                 ["enqueued"] = action,
                 ["startedRev"] = startedRev,
@@ -310,7 +309,7 @@ public static class Handlers
                 ["events"] = JsonSerializer.SerializeToNode(events),
                 ["obs"] = observation,
             };
-            return new Response { Body = node.ToJsonString() };
+            return Response.JsonEnvelope(node);
         }
         catch (Exception exception)
         {
