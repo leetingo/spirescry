@@ -179,6 +179,10 @@
       "arguments": []
     },
     {
+      "name": "async-orphan-log",
+      "arguments": []
+    },
+    {
       "name": "engine-error",
       "arguments": []
     },

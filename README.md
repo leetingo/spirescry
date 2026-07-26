@@ -314,6 +314,7 @@ picks), and text comes from tables extracted out of your local install's
   | `async-fault` | — |
   | `async-orphan` | — |
   | `async-orphan-fault` | — |
+  | `async-orphan-log` | — |
   | `engine-error` | — |
   | `engine-error-delayed` | — |
   | `observation-fault` | — |

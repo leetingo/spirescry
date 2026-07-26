@@ -1333,13 +1333,16 @@ internal static class Tests
         var tracker = new FireAndForgetTracker();
         var run = new object();
         var task = new TaskCompletionSource().Task;
+        var owner = new AsyncWorkOwner();
 
         tracker.ChangeRun(run);
-        tracker.Track(task);
+        tracker.Track(task, owner);
         Equal(1, tracker.PendingCount);
 
         True(tracker.Complete(task));
         Equal(0, tracker.PendingCount);
+        // Its engine log lines are the live run's errors too.
+        False(tracker.WrittenByRetiredWork(owner));
     }
 
     public static void FireAndForgetTrackerRetiresWorkWhenItsRunGoesAway()
@@ -1352,36 +1355,91 @@ internal static class Tests
         var tracker = new FireAndForgetTracker();
         var abandoned = new object();
         var parked = new TaskCompletionSource().Task;
+        var owner = new AsyncWorkOwner();
 
         tracker.ChangeRun(abandoned);
-        tracker.Track(parked);
+        tracker.Track(parked, owner);
         tracker.ChangeRun(null);                 // back to the main menu
 
         Equal(0, tracker.PendingCount);
         False(tracker.Complete(parked));
+        True(tracker.WrittenByRetiredWork(owner));
 
         // The same task released later, once a new run is live, stays retired.
         tracker.ChangeRun(abandoned);
-        tracker.Track(parked);
+        tracker.Track(parked, owner);
         tracker.ChangeRun(new object());
         Equal(0, tracker.PendingCount);
         False(tracker.Complete(parked));
+        True(tracker.WrittenByRetiredWork(owner));
     }
 
-    public static void FireAndForgetTrackerKeepsMenuWorkThatStartsTheNextRun()
+    public static void FireAndForgetTrackerSuppressesEngineLogsFromRetiredWork()
+    {
+        // #145: the engine catches exceptions from fire-and-forget chains and
+        // only logs them, so an abandoned run's work can reach the live run's
+        // error journal without ever faulting a task — and it usually
+        // completes successfully afterwards, leaving nothing to correlate an
+        // identity against. The owner stamped on its async flow is the answer.
+        var tracker = new FireAndForgetTracker();
+        var abandoned = new object();
+        var retired = new AsyncWorkOwner();
+        var live = new AsyncWorkOwner();
+
+        tracker.ChangeRun(abandoned);
+        tracker.Track(new TaskCompletionSource().Task, retired);
+        tracker.ChangeRun(new object());
+        tracker.Track(new TaskCompletionSource().Task, live);
+
+        True(tracker.WrittenByRetiredWork(retired));
+        False(tracker.WrittenByRetiredWork(live));
+        // The engine's own threads and the boot path carry no stamp, and a
+        // job that tracked nothing never bound one: unknown context must
+        // degrade toward reporting an error, never toward hiding one.
+        False(tracker.WrittenByRetiredWork(null));
+        False(tracker.WrittenByRetiredWork(new AsyncWorkOwner()));
+    }
+
+    public static void FireAndForgetTrackerAdoptsMenuWorkIntoTheRunItStarts()
     {
         // `new-run` tracks the very task that mints the next RunState, so a
         // rotation is the expected outcome of that work, not evidence it was
-        // orphaned. Retiring it would hide the failure of the verb that
-        // started the run — and leave the agent with no error at all.
+        // orphaned: retiring it there would hide the failure of the verb that
+        // started the run. It answers to that run from then on, so the next
+        // rotation retires it like anything else — otherwise a menu task that
+        // never completes would pin the ledger, and with it every later run's
+        // follow probe, for the rest of the process.
         var tracker = new FireAndForgetTracker();
         var starting = new TaskCompletionSource().Task;
+        var owner = new AsyncWorkOwner();
+        var run = new object();
 
-        tracker.Track(starting);                 // tracked with no run active
-        tracker.ChangeRun(new object());
+        tracker.Track(starting, owner);          // tracked with no run active
+        tracker.ChangeRun(run);
+
+        Equal(1, tracker.PendingCount);
+        False(tracker.WrittenByRetiredWork(owner));
+
+        tracker.ChangeRun(null);
+        Equal(0, tracker.PendingCount);
+        False(tracker.Complete(starting));
+        True(tracker.WrittenByRetiredWork(owner));
+    }
+
+    public static void FireAndForgetTrackerReportsMenuWorkThatNeverStartsARun()
+    {
+        // The other half of the same trade: a `new-run` that fails before any
+        // RunState exists completes with the board still at the menu, and it
+        // is the only report the agent will ever get.
+        var tracker = new FireAndForgetTracker();
+        var starting = new TaskCompletionSource().Task;
+        var owner = new AsyncWorkOwner();
+
+        tracker.Track(starting, owner);          // tracked with no run active
 
         Equal(1, tracker.PendingCount);
         True(tracker.Complete(starting));
+        False(tracker.WrittenByRetiredWork(owner));
     }
 
     public static void FireAndForgetTrackerKeepsWorkAcrossARedundantRefresh()
@@ -1392,14 +1450,47 @@ internal static class Tests
         var tracker = new FireAndForgetTracker();
         var run = new object();
         var task = new TaskCompletionSource().Task;
+        var owner = new AsyncWorkOwner();
 
         tracker.ChangeRun(run);
-        tracker.Track(task);
+        tracker.Track(task, owner);
         tracker.ChangeRun(run);
         tracker.ChangeRun(run);
 
         Equal(1, tracker.PendingCount);
         True(tracker.Complete(task));
+        False(tracker.WrittenByRetiredWork(owner));
+    }
+
+    public static void AsyncWorkOwnerStampReachesWorkTheJobStarted()
+    {
+        // The stamp is only useful if it survives the awaits between the pump
+        // job and the log line: an engine Error written by a continuation
+        // scheduled minutes later must still resolve to the job's owner. Also
+        // pins the restore — the pump thread's next job must not inherit it.
+        var gate = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        AsyncWorkOwner? stamped = null;
+        AsyncWorkOwner? seenInsideJob = null;
+
+        var work = AsyncWorkOwner.Stamp(() =>
+        {
+            seenInsideJob = AsyncWorkOwner.Current;
+            return Observe();
+        });
+
+        stamped = seenInsideJob;
+        True(stamped is not null);
+        True(AsyncWorkOwner.Current is null);    // restored for the next job
+
+        gate.SetResult();
+        Equal(stamped, work.GetAwaiter().GetResult());
+
+        async Task<AsyncWorkOwner?> Observe()
+        {
+            await gate.Task.ConfigureAwait(false);
+            return AsyncWorkOwner.Current;
+        }
     }
 
     public static void RevisionJournalsStayBoundedAndQueryByRevision()

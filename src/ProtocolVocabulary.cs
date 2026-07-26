@@ -254,6 +254,7 @@ public static class ProtocolVocabulary
                 Shape("async-fault"),
                 Shape("async-orphan"),
                 Shape("async-orphan-fault"),
+                Shape("async-orphan-log"),
                 Shape("engine-error"),
                 Shape("engine-error-delayed"),
                 Shape("observation-fault"),

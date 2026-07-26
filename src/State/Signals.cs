@@ -141,6 +141,9 @@ public static class Signals
     {
         var isEventOption = kind == TrackedKind.EventOption;
         var eventGeneration = 0L;
+        // Read on the tracking thread: this is still the pump job that
+        // started the work, so its stamp is the ambient one.
+        var stamp = AsyncWorkOwner.Current;
         lock (Gate)
         {
             if (isEventOption)
@@ -148,7 +151,7 @@ public static class Signals
                 if (!EventOptions.TryTrack(task, out eventGeneration)) return;
             }
             else
-                FireAndForget.Track(task);
+                FireAndForget.Track(task, stamp);
         }
         _ = task.ContinueWith(completed =>
         {
@@ -161,6 +164,11 @@ public static class Signals
                 currentOwner = isEventOption
                     ? EventOptions.Complete(task, eventGeneration)
                     : FireAndForget.Complete(task);
+                // Fire-and-forget work started inside a pump job carries an
+                // owner stamp, and OnEngineLog drops a retired owner's line
+                // before it ever reaches a correlation window. This stays
+                // the answer for work with no stamp — the event-option
+                // channel, and anything the engine starts off-pump.
                 var resolvedLog = EngineLogs.ResolveForTask(
                     completed,
                     ManagedThreadId.Current,
@@ -238,14 +246,33 @@ public static class Signals
         // either suppress that exact retired task or publish a genuine
         // current-run engine error.
         PendingEngineLog? pending = null;
+        bool retiredWork;
         lock (Gate)
         {
-            if (EventOptions.HasRetired)
+            // An abandoned run's fire-and-forget work carries that run's
+            // stamp on its async flow, so a line it writes is its own run's
+            // error, not the live run's. This is the only channel some of
+            // those failures ever take — the engine logs and swallows, and
+            // the work then completes successfully, leaving the identity
+            // correlation below nothing to correlate on.
+            retiredWork =
+                FireAndForget.WrittenByRetiredWork(AsyncWorkOwner.Current);
+            if (!retiredWork && EventOptions.HasRetired)
                 pending = EngineLogs.Register(
                     text,
                     combatInProgress,
                     headlessHost,
                     ManagedThreadId.Current);
+        }
+        if (retiredWork)
+        {
+            // The line still belongs in the host log, at a level that
+            // carries no revision — the same trade ReportFault makes. Naming
+            // the event it would have been says which line was withheld
+            // without repeating the stack the engine just wrote.
+            SafeLog.Info("retired "
+                + ErrorEvents.FromLogLine(text, combatInProgress, headlessHost));
+            return;
         }
         if (pending is not null)
         {
@@ -262,7 +289,10 @@ public static class Signals
     // synthetic completion into the response.
     private static void HoldAsyncSilently(Task task)
     {
-        lock (Gate) FireAndForget.Track(task);
+        // Its own owner, never the stamp of the work whose line it is
+        // deciding: the window is bookkeeping, not the run's work, and
+        // rebinding that stamp here would move the work's own ownership.
+        lock (Gate) FireAndForget.Track(task, null);
         _ = task.ContinueWith(_ =>
         {
             List<TaskCompletionSource<bool>>? wake = null;

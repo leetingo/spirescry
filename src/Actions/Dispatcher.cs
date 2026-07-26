@@ -67,12 +67,19 @@ public static class Dispatcher
         ProtocolVocabulary.Cheats.All.Select(shape => shape.Name).ToArray();
 
     // Fixtures for the ordinary fire-and-forget ownership regression: one
-    // parked task per host, released on demand.
-    private const int OrphanAsyncFaultDelayMs = 200;
+    // parked task per host, released on demand down either channel a
+    // completion can take into the wrong run — the task's own fault, or an
+    // engine Error line the engine logs and swallows.
+    private const int OrphanAsyncReleaseDelayMs = 200;
     private const string OrphanAsyncLabel = "orphan-async";
     private const string OrphanAsyncFaultMessage =
         "forced orphan fire-and-forget failure";
-    private static TaskCompletionSource<bool>? _orphanAsync;
+    private const string OrphanAsyncLogMessage =
+        "SpirescryForcedException: forced orphan fire-and-forget engine log "
+        + "error (cheat async-orphan-log)";
+    private static TaskCompletionSource<OrphanAsyncRelease>? _orphanAsync;
+
+    private enum OrphanAsyncRelease { Fault, EngineLog }
 
     public static DispatchResult Dispatch(string action, JsonElement args) => action switch
     {
@@ -119,7 +126,10 @@ public static class Dispatcher
             "energy" => SetCombatResource("Energy", args),
             "async-fault" => CheatAsyncFault(),
             "async-orphan" => CheatAsyncOrphan(),
-            "async-orphan-fault" => CheatAsyncOrphanFault(),
+            "async-orphan-fault" =>
+                CheatAsyncOrphanRelease(OrphanAsyncRelease.Fault),
+            "async-orphan-log" =>
+                CheatAsyncOrphanRelease(OrphanAsyncRelease.EngineLog),
             "engine-error" => CheatEngineError(),
             "engine-error-delayed" => CheatEngineErrorDelayed(),
             "observation-fault" => CheatObservationFault(),
@@ -143,10 +153,10 @@ public static class Dispatcher
     }
 
     // Parks an ordinary fire-and-forget task under the CURRENT run so a
-    // later release can fault it from a run that has since been abandoned:
+    // later release can land it from a run that has since been abandoned:
     // the ordinary-work twin of the event-orphan cheats. Requires a run —
-    // menu work is deliberately never retired, so a parked menu task would
-    // simply hold the follow probe busy forever.
+    // menu work is adopted by the run it brings up, so a parked menu task
+    // would be reported as that run's, which is not what this tests.
     private static DispatchResult CheatAsyncOrphan()
     {
         if (LocalRunContext.StateOnly is null)
@@ -155,31 +165,45 @@ public static class Dispatcher
         if (_orphanAsync is { Task.IsCompleted: false })
             return DispatchResult.Reject(RejectionCodes.BadState,
                 "an orphan async task is already parked");
-        _orphanAsync = new TaskCompletionSource<bool>(
+        _orphanAsync = new TaskCompletionSource<OrphanAsyncRelease>(
             TaskCreationOptions.RunContinuationsAsynchronously);
-        DecisionSurfaceActions.Track(_orphanAsync.Task, OrphanAsyncLabel);
+        DecisionSurfaceActions.Track(
+            ParkedOrphanAsync(_orphanAsync.Task), OrphanAsyncLabel);
         return DispatchResult.Success();
     }
 
-    // Releases the parked task as a fault behind a short delay, so the
-    // caller chooses whether it lands at the menu or inside the next
-    // new-run window.
-    private static DispatchResult CheatAsyncOrphanFault()
+    // Releases the parked task behind a short delay, so the caller chooses
+    // whether it lands at the menu or inside the next new-run window, and
+    // which channel it lands on.
+    private static DispatchResult CheatAsyncOrphanRelease(
+        OrphanAsyncRelease release)
     {
         if (_orphanAsync is not { } orphan)
             return DispatchResult.Reject(RejectionCodes.BadState,
                 "no orphan async task is parked");
         _orphanAsync = null;
-        _ = FaultOrphanAsync(orphan);
+        _ = ReleaseOrphanAsync(orphan, release);
         return DispatchResult.Success();
     }
 
-    private static async Task FaultOrphanAsync(
-        TaskCompletionSource<bool> orphan)
+    // The parked work itself. Its await captures the execution context of
+    // the job that started it, so the engine log line below is written from
+    // inside the owning run's async flow — exactly like the engine's own
+    // log-and-swallow chains.
+    private static async Task ParkedOrphanAsync(
+        Task<OrphanAsyncRelease> release)
     {
-        await Task.Delay(OrphanAsyncFaultDelayMs).ConfigureAwait(false);
-        orphan.TrySetException(
-            new InvalidOperationException(OrphanAsyncFaultMessage));
+        if (await release.ConfigureAwait(false) == OrphanAsyncRelease.Fault)
+            throw new InvalidOperationException(OrphanAsyncFaultMessage);
+        MegaCrit.Sts2.Core.Logging.Log.Error(OrphanAsyncLogMessage);
+    }
+
+    private static async Task ReleaseOrphanAsync(
+        TaskCompletionSource<OrphanAsyncRelease> orphan,
+        OrphanAsyncRelease release)
+    {
+        await Task.Delay(OrphanAsyncReleaseDelayMs).ConfigureAwait(false);
+        orphan.TrySetResult(release);
     }
 
     // Drives the engine's own Error logger synchronously — the regression

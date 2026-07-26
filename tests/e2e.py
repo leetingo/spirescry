@@ -801,26 +801,26 @@ def p17():
     to_menu()
 
 
-@case("P17b abandoned fire-and-forget work cannot enter the next run")
-def p17b():
-    # #145: ordinary dispatcher work is run-owned too. P16/P17 cover the
-    # event-option channel; this covers the plain tracked-task channel, whose
-    # completions reach the same revision stream, error journal and follow
-    # result — and which used to publish into whatever run happened to be
-    # live when a long-abandoned task finally landed.
-    orphan_fault = "forced orphan fire-and-forget failure"
-    launch(seed="CIASYNCOLD")
+def orphan_async_channel(release, marker, seed):
+    """One release channel of the #145 fixture, over the same four timings.
+
+    An abandoned run's tracked work reaches the next run two ways: its own
+    fault, and any engine Error line it writes — the engine catches
+    exceptions from fire-and-forget chains and only logs them, so that
+    second shape publishes an error without ever faulting a task the mod
+    holds, and then completes successfully. Both land in the same revision
+    stream, error journal and follow result, so both are tested here.
+    """
+    launch(seed=seed + "L")
 
     # Baseline first: work still owned by the run that dispatched it must
-    # keep reporting its fault. Ownership suppresses orphans, not faults.
+    # keep reporting. Ownership suppresses orphans, not failures.
     run("cheat", "async-orphan")
     status, health = http("GET", "/health")
     assert status == 200 and health["pendingAsync"] == 1, health
-    live = run("cheat", "async-orphan-fault", "--follow", "3000",
-               allow_errors=True)
+    live = run("cheat", release, "--follow", "3000", allow_errors=True)
     assert live["settled"] is True, live
-    assert any(orphan_fault in error for error in live["errors"]), \
-        live["errors"]
+    assert any(marker in error for error in live["errors"]), live["errors"]
 
     # Park a second task, then walk away from the run that owns it. The
     # zombie must leave the pending ledger at the rotation: it is parked on a
@@ -833,33 +833,55 @@ def p17b():
     status, health = http("GET", "/health")
     assert status == 200 and health["pendingAsync"] == 0, health
 
-    # (a) the fault lands at the menu, immediately before the next run — the
-    # window where a published error would be attributed to the run about to
-    # start, or leak into its very first follow response.
+    # (a) it lands at the menu, immediately before the next run — the window
+    # where a published error would be attributed to the run about to start,
+    # or leak into its very first follow response.
     menu_rev = obs()["rev"]
-    run("cheat", "async-orphan-fault")
+    run("cheat", release)
     time.sleep(0.6)
     quiet = run("obs", "--since", str(menu_rev), "--wait", "500")
-    assert not any(orphan_fault in event["type"]
+    assert not any(marker in event["type"]
                    for event in quiet.get("events") or []), quiet
-    fresh = run("new-run", "IRONCLAD", "--seed", "CIASYNCNEW",
-                "--follow", "3000")
+    fresh = run("new-run", "IRONCLAD", "--seed", seed + "A", "--follow", "3000")
     assert fresh["outcome"] != "timeout", fresh
     assert fresh["errors"] == [], fresh["errors"]
 
-    # (b) the fault lands DURING new-run: released from the menu, it resolves
-    # while the next run is being built, so a run-blind tracker would attach
-    # it to the run that just came up.
+    # (b) it lands across new-run: released a heartbeat before the verb, it
+    # resolves while the next run is being built or just after it comes up —
+    # the window where a run-blind tracker hands an abandoned run's failure
+    # to the run the agent is actually playing.
     run("cheat", "async-orphan")
     run("abandon", "--follow", "3000")
-    run("cheat", "async-orphan-fault")
-    during = run("new-run", "IRONCLAD", "--seed", "CIASYNCDUR",
-                 "--follow", "3000")
+    handover_rev = obs()["rev"]
+    run("cheat", release)
+    during = run("new-run", "IRONCLAD", "--seed", seed + "B", "--follow", "3000")
     assert during["outcome"] != "timeout", during
     assert during["errors"] == [], during["errors"]
+    # follow only reports what its own step accepted, so give a release that
+    # outlived the handover time to land and check everything the journal
+    # took since the menu — the new run is live for all of it.
+    time.sleep(0.6)
+    window = run("obs", "--since", str(handover_rev), "--wait", "500")
+    assert not any(marker in event["type"]
+                   for event in window.get("events") or []), window
     status, health = http("GET", "/health")
     assert status == 200 and health["pendingAsync"] == 0, health
     to_menu()
+
+
+@case("P17b abandoned fire-and-forget work cannot enter the next run")
+def p17b():
+    # #145: ordinary dispatcher work is run-owned too. P16/P17 cover the
+    # event-option channel; this covers the plain tracked-task channel, whose
+    # completions reach the same revision stream, error journal and follow
+    # result — and which used to publish into whatever run happened to be
+    # live when a long-abandoned task finally landed.
+    orphan_async_channel("async-orphan-fault",
+                         "forced orphan fire-and-forget failure",
+                         "CIASYNCF")
+    orphan_async_channel("async-orphan-log",
+                         "forced orphan fire-and-forget engine log error",
+                         "CIASYNCG")
 
 
 @case("P14 event economics are part of the semantic fingerprint")
