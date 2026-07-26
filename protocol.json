@@ -171,6 +171,14 @@
       "arguments": []
     },
     {
+      "name": "async-orphan",
+      "arguments": []
+    },
+    {
+      "name": "async-orphan-fault",
+      "arguments": []
+    },
+    {
       "name": "engine-error",
       "arguments": []
     },

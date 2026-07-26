@@ -252,6 +252,8 @@ public static class ProtocolVocabulary
                 Shape("stars", new ProtocolArgument("value", ProtocolArgumentType.Integer)),
                 Shape("energy", new ProtocolArgument("value", ProtocolArgumentType.Integer)),
                 Shape("async-fault"),
+                Shape("async-orphan"),
+                Shape("async-orphan-fault"),
                 Shape("engine-error"),
                 Shape("engine-error-delayed"),
                 Shape("observation-fault"),

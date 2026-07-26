@@ -177,14 +177,12 @@ internal readonly record struct DecisionSurfaceResult(
 
 internal static class DecisionSurfaceActions
 {
-    public static void Track(Task task, string context)
-    {
+    // Signals also reports the fault to the log: it is the only place that
+    // knows whether the completion still belongs to the current run, and a
+    // separate Error line here would put a retired run's fault back into the
+    // live error journal through the engine log callback.
+    public static void Track(Task task, string context) =>
         Signals.TrackAsync(task, context);
-        _ = task.ContinueWith(t =>
-        {
-            if (t.Exception is { } ex) SafeLog.Error(context, ex.InnerException ?? ex);
-        }, TaskContinuationOptions.OnlyOnFaulted);
-    }
 
     public static DecisionSurfaceResult ResolveAlternativeIndex(
         int? requestedIdx, int count, out int idx)

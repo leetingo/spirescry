@@ -801,6 +801,67 @@ def p17():
     to_menu()
 
 
+@case("P17b abandoned fire-and-forget work cannot enter the next run")
+def p17b():
+    # #145: ordinary dispatcher work is run-owned too. P16/P17 cover the
+    # event-option channel; this covers the plain tracked-task channel, whose
+    # completions reach the same revision stream, error journal and follow
+    # result — and which used to publish into whatever run happened to be
+    # live when a long-abandoned task finally landed.
+    orphan_fault = "forced orphan fire-and-forget failure"
+    launch(seed="CIASYNCOLD")
+
+    # Baseline first: work still owned by the run that dispatched it must
+    # keep reporting its fault. Ownership suppresses orphans, not faults.
+    run("cheat", "async-orphan")
+    status, health = http("GET", "/health")
+    assert status == 200 and health["pendingAsync"] == 1, health
+    live = run("cheat", "async-orphan-fault", "--follow", "3000",
+               allow_errors=True)
+    assert live["settled"] is True, live
+    assert any(orphan_fault in error for error in live["errors"]), \
+        live["errors"]
+
+    # Park a second task, then walk away from the run that owns it. The
+    # zombie must leave the pending ledger at the rotation: it is parked on a
+    # run nobody is playing, and counting it as work the board owes would
+    # hold the follow probe busy for every later run.
+    run("cheat", "async-orphan")
+    abandoned = run("abandon", "--follow", "3000")
+    assert abandoned["outcome"] != "timeout", abandoned
+    assert abandoned["obs"]["phase"] == PHASE.MAIN_MENU, abandoned["obs"]
+    status, health = http("GET", "/health")
+    assert status == 200 and health["pendingAsync"] == 0, health
+
+    # (a) the fault lands at the menu, immediately before the next run — the
+    # window where a published error would be attributed to the run about to
+    # start, or leak into its very first follow response.
+    menu_rev = obs()["rev"]
+    run("cheat", "async-orphan-fault")
+    time.sleep(0.6)
+    quiet = run("obs", "--since", str(menu_rev), "--wait", "500")
+    assert not any(orphan_fault in event["type"]
+                   for event in quiet.get("events") or []), quiet
+    fresh = run("new-run", "IRONCLAD", "--seed", "CIASYNCNEW",
+                "--follow", "3000")
+    assert fresh["outcome"] != "timeout", fresh
+    assert fresh["errors"] == [], fresh["errors"]
+
+    # (b) the fault lands DURING new-run: released from the menu, it resolves
+    # while the next run is being built, so a run-blind tracker would attach
+    # it to the run that just came up.
+    run("cheat", "async-orphan")
+    run("abandon", "--follow", "3000")
+    run("cheat", "async-orphan-fault")
+    during = run("new-run", "IRONCLAD", "--seed", "CIASYNCDUR",
+                 "--follow", "3000")
+    assert during["outcome"] != "timeout", during
+    assert during["errors"] == [], during["errors"]
+    status, health = http("GET", "/health")
+    assert status == 200 and health["pendingAsync"] == 0, health
+    to_menu()
+
+
 @case("P14 event economics are part of the semantic fingerprint")
 def p14():
     to_map(seed="CIEVENTVARS")

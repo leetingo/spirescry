@@ -1325,6 +1325,83 @@ internal static class Tests
         False(tracker.HasRetired);
     }
 
+    public static void FireAndForgetTrackerPublishesWorkOwnedByTheCurrentRun()
+    {
+        // The baseline the suppression must not eat: a verb's own async work
+        // faulting inside the run that dispatched it is exactly the fault
+        // follow and the runlog exist to report.
+        var tracker = new FireAndForgetTracker();
+        var run = new object();
+        var task = new TaskCompletionSource().Task;
+
+        tracker.ChangeRun(run);
+        tracker.Track(task);
+        Equal(1, tracker.PendingCount);
+
+        True(tracker.Complete(task));
+        Equal(0, tracker.PendingCount);
+    }
+
+    public static void FireAndForgetTrackerRetiresWorkWhenItsRunGoesAway()
+    {
+        // #145: a task parked by an abandoned run must stop being work the
+        // board owes the moment its owner is gone — the ledger drops it at
+        // the rotation, so a zombie cannot hold the follow probe busy for
+        // every later run — and its late completion must publish nothing,
+        // whether it lands at the menu or inside the next run.
+        var tracker = new FireAndForgetTracker();
+        var abandoned = new object();
+        var parked = new TaskCompletionSource().Task;
+
+        tracker.ChangeRun(abandoned);
+        tracker.Track(parked);
+        tracker.ChangeRun(null);                 // back to the main menu
+
+        Equal(0, tracker.PendingCount);
+        False(tracker.Complete(parked));
+
+        // The same task released later, once a new run is live, stays retired.
+        tracker.ChangeRun(abandoned);
+        tracker.Track(parked);
+        tracker.ChangeRun(new object());
+        Equal(0, tracker.PendingCount);
+        False(tracker.Complete(parked));
+    }
+
+    public static void FireAndForgetTrackerKeepsMenuWorkThatStartsTheNextRun()
+    {
+        // `new-run` tracks the very task that mints the next RunState, so a
+        // rotation is the expected outcome of that work, not evidence it was
+        // orphaned. Retiring it would hide the failure of the verb that
+        // started the run — and leave the agent with no error at all.
+        var tracker = new FireAndForgetTracker();
+        var starting = new TaskCompletionSource().Task;
+
+        tracker.Track(starting);                 // tracked with no run active
+        tracker.ChangeRun(new object());
+
+        Equal(1, tracker.PendingCount);
+        True(tracker.Complete(starting));
+    }
+
+    public static void FireAndForgetTrackerKeepsWorkAcrossARedundantRefresh()
+    {
+        // RefreshRunIdentity runs on every tick and every settlement probe.
+        // Re-stating the same run must not rotate anything: in-flight work
+        // would otherwise be retired between two frames of one run.
+        var tracker = new FireAndForgetTracker();
+        var run = new object();
+        var task = new TaskCompletionSource().Task;
+
+        tracker.ChangeRun(run);
+        tracker.Track(task);
+        tracker.ChangeRun(run);
+        tracker.ChangeRun(run);
+
+        Equal(1, tracker.PendingCount);
+        True(tracker.Complete(task));
+    }
+
     public static void RevisionJournalsStayBoundedAndQueryByRevision()
     {
         var journal = new RevisionJournal(capacity: 2);

@@ -66,6 +66,14 @@ public static class Dispatcher
     public static readonly string[] Cheats =
         ProtocolVocabulary.Cheats.All.Select(shape => shape.Name).ToArray();
 
+    // Fixtures for the ordinary fire-and-forget ownership regression: one
+    // parked task per host, released on demand.
+    private const int OrphanAsyncFaultDelayMs = 200;
+    private const string OrphanAsyncLabel = "orphan-async";
+    private const string OrphanAsyncFaultMessage =
+        "forced orphan fire-and-forget failure";
+    private static TaskCompletionSource<bool>? _orphanAsync;
+
     public static DispatchResult Dispatch(string action, JsonElement args) => action switch
     {
         "new-run" => NewRun(args),
@@ -110,6 +118,8 @@ public static class Dispatcher
             "stars" => SetCombatResource("Stars", args),
             "energy" => SetCombatResource("Energy", args),
             "async-fault" => CheatAsyncFault(),
+            "async-orphan" => CheatAsyncOrphan(),
+            "async-orphan-fault" => CheatAsyncOrphanFault(),
             "engine-error" => CheatEngineError(),
             "engine-error-delayed" => CheatEngineErrorDelayed(),
             "observation-fault" => CheatObservationFault(),
@@ -130,6 +140,46 @@ public static class Dispatcher
     {
         DecisionSurfaceActions.Track(ForcedAsyncFault(), "forced-async-fault");
         return DispatchResult.Success();
+    }
+
+    // Parks an ordinary fire-and-forget task under the CURRENT run so a
+    // later release can fault it from a run that has since been abandoned:
+    // the ordinary-work twin of the event-orphan cheats. Requires a run —
+    // menu work is deliberately never retired, so a parked menu task would
+    // simply hold the follow probe busy forever.
+    private static DispatchResult CheatAsyncOrphan()
+    {
+        if (LocalRunContext.StateOnly is null)
+            return DispatchResult.Reject(RejectionCodes.BadState,
+                "requires an active run to own the parked work");
+        if (_orphanAsync is { Task.IsCompleted: false })
+            return DispatchResult.Reject(RejectionCodes.BadState,
+                "an orphan async task is already parked");
+        _orphanAsync = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        DecisionSurfaceActions.Track(_orphanAsync.Task, OrphanAsyncLabel);
+        return DispatchResult.Success();
+    }
+
+    // Releases the parked task as a fault behind a short delay, so the
+    // caller chooses whether it lands at the menu or inside the next
+    // new-run window.
+    private static DispatchResult CheatAsyncOrphanFault()
+    {
+        if (_orphanAsync is not { } orphan)
+            return DispatchResult.Reject(RejectionCodes.BadState,
+                "no orphan async task is parked");
+        _orphanAsync = null;
+        _ = FaultOrphanAsync(orphan);
+        return DispatchResult.Success();
+    }
+
+    private static async Task FaultOrphanAsync(
+        TaskCompletionSource<bool> orphan)
+    {
+        await Task.Delay(OrphanAsyncFaultDelayMs).ConfigureAwait(false);
+        orphan.TrySetException(
+            new InvalidOperationException(OrphanAsyncFaultMessage));
     }
 
     // Drives the engine's own Error logger synchronously — the regression
