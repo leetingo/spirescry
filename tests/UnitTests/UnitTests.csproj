@@ -27,6 +27,7 @@
     <Compile Include="../../src/State/EventOptionTracker.cs" Link="EventOptionTracker.cs" />
     <Compile Include="../../src/State/RunOutcomeRules.cs" Link="RunOutcomeRules.cs" />
     <Compile Include="../../src/State/ProceedReadiness.cs" Link="ProceedReadiness.cs" />
+    <Compile Include="../../src/State/RestSiteSeat.cs" Link="RestSiteSeat.cs" />
     <Compile Include="../../src/State/RevisionJournal.cs" Link="RevisionJournal.cs" />
     <Compile Include="../../src/State/TaskFault.cs" Link="TaskFault.cs" />
     <Compile Include="../../headless/Host/FirstChanceFilter.cs" Link="FirstChanceFilter.cs" />

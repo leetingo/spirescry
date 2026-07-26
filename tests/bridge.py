@@ -301,13 +301,15 @@ def resolve_transient_phase(d, *, claim_reward_tiles=False,
         return _follow_before(deadline, "leave")
     elif phase == PHASE.REST_SITE and not d.get("proceedAvailable"):
         # A rest site owes the seat a decision before it can be left; proceed
-        # is rejected until one option has been spent.
-        option = next((option for option in d.get("options", [])
-                       if option.get("enabled")), None)
-        if option is None:
-            raise AssertionError(
-                "rest site advertises neither an enabled option nor a way out")
-        return _follow_before(deadline, "option", str(option["idx"]))
+        # is rejected until one option has actually been spent. An option can
+        # decline without consuming anything, so work down the list instead
+        # of retrying the first one until the deadline.
+        for option in [o for o in d.get("options", []) if o.get("enabled")]:
+            d = _follow_before(deadline, "option", str(option["idx"]))
+            if d.get("phase") != PHASE.REST_SITE or d.get("proceedAvailable"):
+                return d
+        raise AssertionError(
+            "rest site advertises neither a spendable option nor a way out")
     else:
         return _follow_before(deadline, "proceed")
 

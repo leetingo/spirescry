@@ -33,11 +33,16 @@ internal static class ProceedReadiness
         || !options.Any(option => !option.IsLocked && !option.WasChosen);
 
     // A rest site may be left once the seat has nothing left to choose, or
-    // has already spent its choice. NRestSiteRoom enables its proceed button
+    // has already spent its rest. NRestSiteRoom enables its proceed button
     // on exactly those two edges: no options when the screen activates, and
     // AfterSelectingOptionAsync. The second edge is load-bearing — a hook
     // can leave the remaining options standing after one is taken, and the
     // GUI still lets that player walk away.
-    internal static bool RestSiteReady(int optionCount, bool optionChosen) =>
-        optionCount == 0 || optionChosen;
+    //
+    // `optionSpent` means a selection the engine reported as *successful*,
+    // not merely one that was started: an option whose sub-picker is
+    // cancelled consumes nothing, leaves every option on the board and
+    // leaves the GUI's button disabled. See RestSiteSeat.
+    internal static bool RestSiteReady(int optionCount, bool optionSpent) =>
+        optionCount == 0 || optionSpent;
 }

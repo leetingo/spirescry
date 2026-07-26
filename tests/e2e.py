@@ -2527,8 +2527,32 @@ def i6():
     assert [option["id"] for option in unmoved["options"]] == \
         [option["id"] for option in entered["options"]], unmoved["options"]
 
+    # Backing out of an option's own picker consumes nothing: the seat still
+    # owes the room a decision even though the synchronizer has already
+    # stamped its chosen index. Reading that stamp as "spent" let proceed
+    # leave a rest site with both options and full hp intact.
     smith = next(option for option in entered["options"]
                  if option["id"] == "SMITH" and option["enabled"])
+    cancelling = bridge.follow("option", str(smith["idx"]))
+    assert cancelling["phase"] == PHASE.CARD_SELECT, cancelling
+    backed_out = bridge.follow("skip")
+    if backed_out["phase"] != PHASE.REST_SITE:
+        backed_out = bridge.wait_phase(PHASE.REST_SITE)
+    assert backed_out.get("proceedAvailable") is False, backed_out
+    assert "proceed" not in run("obs", "--decision")["legal"], \
+        run("obs", "--decision")["legal"]
+    assert [option["id"] for option in backed_out["options"]] == \
+        [option["id"] for option in entered["options"]], backed_out["options"]
+    assert backed_out["player"]["hp"] == entered["player"]["hp"], \
+        (entered["player"]["hp"], backed_out["player"]["hp"])
+
+    reject(["proceed"], REJECTION.BAD_STATE)
+    intact = obs()
+    assert intact["phase"] == PHASE.REST_SITE, intact
+    assert [option["id"] for option in intact["options"]] == \
+        [option["id"] for option in entered["options"]], intact["options"]
+
+    # The same option, carried through: now the room is spent and lets go.
     picking = bridge.follow("option", str(smith["idx"]))
     assert picking["phase"] == PHASE.CARD_SELECT, picking
     settled = bridge.follow("pick-card", "0")

@@ -1454,13 +1454,13 @@ internal static class Tests
     public static void RestSiteProceedWaitsForTheSeatToSpendItsChoice()
     {
         False(ProceedReadiness.RestSiteReady(
-            optionCount: 2, optionChosen: false));
+            optionCount: 2, optionSpent: false));
         True(ProceedReadiness.RestSiteReady(
-            optionCount: 0, optionChosen: false));
+            optionCount: 0, optionSpent: false));
         // A hook can leave the untaken options standing after one is taken;
         // the GUI enables its proceed button all the same.
         True(ProceedReadiness.RestSiteReady(
-            optionCount: 1, optionChosen: true));
+            optionCount: 1, optionSpent: true));
 
         var unchosen = new SnapshotContract(Phase.RestSite)
         {
@@ -1475,6 +1475,33 @@ internal static class Tests
 
         Equal("option,abandon", string.Join(',',
             DecisionProjection.LegalVerbs(unchosen, runActive: true)));
+    }
+
+    public static void RestSiteSeatOnlyCountsSelectionsThatConsumedSomething()
+    {
+        var room = new object();
+        False(RestSiteSeat.HasSpentItsChoice(room));
+
+        // SMITH, then cancelling its card grid: the synchronizer still
+        // stamps a chosen index, but its own success flag says false and
+        // nothing left the board — the seat still owes a decision.
+        RestSiteSeat.RecordWhenSucceeded(Task.FromResult(false), room);
+        False(RestSiteSeat.HasSpentItsChoice(room));
+
+        // A selection that threw did not spend the rest either.
+        var faulted = Task.FromException<bool>(
+            new InvalidOperationException("boom"));
+        RestSiteSeat.RecordWhenSucceeded(faulted, room);
+        False(RestSiteSeat.HasSpentItsChoice(room));
+        _ = faulted.Exception;  // observed for real by the dispatcher's Track
+
+        RestSiteSeat.RecordWhenSucceeded(Task.FromResult(true), room);
+        True(RestSiteSeat.HasSpentItsChoice(room));
+
+        // Keyed to the room it happened in, so the next rest site starts
+        // unspent without a room-entry hook.
+        False(RestSiteSeat.HasSpentItsChoice(new object()));
+        False(RestSiteSeat.HasSpentItsChoice(null));
     }
 
     public static void DecisionUnavailableTransitionsDoNotAdvertiseActions()
