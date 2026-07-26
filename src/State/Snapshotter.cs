@@ -3,6 +3,7 @@ using MegaCrit.Sts2.Core.Combat;
 using MegaCrit.Sts2.Core.Entities.Cards;
 using MegaCrit.Sts2.Core.Entities.Creatures;
 using MegaCrit.Sts2.Core.Entities.Players;
+using MegaCrit.Sts2.Core.Entities.Potions;
 using MegaCrit.Sts2.Core.Events.Custom.CrystalSphereEvent.CrystalSphereItems;
 using MegaCrit.Sts2.Core.Events;
 using MegaCrit.Sts2.Core.HoverTips;
@@ -11,6 +12,7 @@ using MegaCrit.Sts2.Core.Localization.DynamicVars;
 using MegaCrit.Sts2.Core.Models.Events;
 using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Models.Monsters;
+using MegaCrit.Sts2.Core.Models.Potions;
 using MegaCrit.Sts2.Core.Models.Powers;
 using MegaCrit.Sts2.Core.MonsterMoves.Intents;
 using MegaCrit.Sts2.Core.Nodes;
@@ -708,6 +710,8 @@ internal static class Snapshotter
             entry.Purchasable = e.IsStocked && e.EnoughGold && potionHasRoom;
             return entry;
         }
+        // The stall sells one removal, so it carries the one idx `buy
+        // card_removal` accepts — the dispatcher rejects every other.
         var removal = inv.CardRemovalEntry is { } cr
             ? Item(new
             {
@@ -715,7 +719,7 @@ internal static class Snapshotter
                 price = cr.Cost,
                 used = cr.Used,
                 affordable = cr.EnoughGold,
-            }, semanticState:
+            }, MerchantRules.CardRemovalIndex, semanticState:
             [
                 SemanticToken(
                     "cardRemoval",
@@ -729,7 +733,7 @@ internal static class Snapshotter
                 && inv.CardRemovalEntry.EnoughGold;
         var snapshot = new SnapshotContract(phase)
         {
-            Player = FooterView(),
+            Player = MerchantFooterView(player),
             Cards = inv.CharacterCardEntries.Select(CardEntry).ToArray(),
             Colorless = inv.ColorlessCardEntries.Select(CardEntry).ToArray(),
             Relics = inv.RelicEntries
@@ -741,6 +745,35 @@ internal static class Snapshotter
         };
         return snapshot;
     }
+
+    // The shop's own top-level `potions` is merchant stock, so the belt is
+    // only visible through the footer. Mark on it which potion the merchant
+    // will actually take: `playable` here, obs.legal's potion-use, and the
+    // dispatcher's redemption gate are one statement (MerchantRules).
+    private static SnapshotPlayerContract? MerchantFooterView(Player? player)
+    {
+        var footer = FooterView();
+        if (footer is null || player is null) return footer;
+        var slots = player.PotionSlots;
+        var belt = footer.Potions;
+        foreach (var item in belt)
+            item.Playable =
+                item.Slot is { } slot && slot >= 0 && slot < slots.Count
+                && slots[slot] is { } held
+                && MerchantPotionRedeemable(held, player);
+        footer.Potions = belt;
+        return footer;
+    }
+
+    // Mirrors Dispatcher.PotionUse's shop branch — see MerchantRules.
+    internal static bool MerchantPotionRedeemable(
+        PotionModel potion, Player player) =>
+        MerchantRules.RedeemableAtMerchant(
+            potion is FoulPotion,
+            potion.Usage == PotionUsage.AnyTime,
+            player.Creature is { IsDead: false },
+            player.CanUseOrRemovePotions,
+            DecisionSurface.Current.MerchantPotionInteractionAvailable(potion));
 
     private static SnapshotContract RestSiteSnapshot(Phase phase)
     {
@@ -1159,6 +1192,12 @@ internal static class Snapshotter
                 return option;
             }).ToArray(),
         };
+        // The Fake Merchant is a shop wearing an event: it stocks relics the
+        // buy verb purchases by idx. Publishing them in the ordinary
+        // top-level shape gives them the ordinary `purchasable` gate, which
+        // is what obs.legal derives buy from — the `fakeMerchant` view stays
+        // for clients that already read it.
+        if (ev is FakeMerchant stall) snapshot.Relics = FakeMerchantRelics(stall);
         snapshot.AddExtensions(new
         {
             title = SafeText(ev.Title),
@@ -1174,6 +1213,26 @@ internal static class Snapshotter
         });
         return snapshot;
     }
+
+    private static SnapshotItemContract[] FakeMerchantRelics(FakeMerchant fake) =>
+        (fake.Inventory?.RelicEntries ?? [])
+            .Select((entry, i) =>
+            {
+                var item = Item(new
+                {
+                    title = entry.Model is { } relic ? SafeText(relic.Title) : null,
+                    description = entry.Model is { } described
+                        ? SafeText(described.DynamicDescription)
+                        : null,
+                    cost = entry.Cost,
+                    price = entry.Cost,
+                    stocked = entry.IsStocked,
+                    affordable = entry.EnoughGold,
+                }, i, model: entry.Model?.Id.Entry);
+                item.Purchasable = entry.IsStocked && entry.EnoughGold;
+                return item;
+            })
+            .ToArray();
 
     private static string[] FakeMerchantState(FakeMerchant fake)
     {

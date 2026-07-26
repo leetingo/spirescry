@@ -35,6 +35,10 @@ internal static class DecisionProjection
                 if (snapshot.Options.Any(option =>
                     option.Locked != true && option.Chosen != true))
                     Add("option");
+                // The Fake Merchant is a shop wearing an event: it stocks
+                // relics the buy verb purchases. Only its entries carry
+                // `purchasable`, so an ordinary event never advertises buy.
+                if (ShopHasPurchase(snapshot)) Add("buy");
                 Add("proceed");
                 break;
             case Phase.RestSite:
@@ -44,6 +48,12 @@ internal static class DecisionProjection
                 break;
             case Phase.Shop:
                 if (ShopHasPurchase(snapshot)) Add("buy");
+                // The merchant redeems a Foul Potion for gold. Snapshotter
+                // marks the belt entry `playable` exactly when the
+                // dispatcher's redemption gate would pass, so an ordinary
+                // potion never advertises a use the shop would reject.
+                if (BeltPotions(snapshot).Any(potion => potion.Playable == true))
+                    Add("potion-use");
                 if (snapshot.Available != false) Add("leave");
                 break;
             case Phase.Treasure:
@@ -104,16 +114,24 @@ internal static class DecisionProjection
 
         if (runActive)
         {
-            if (VisiblePotionCount(snapshot) > 0) Add("potion-discard");
+            if (BeltPotions(snapshot).Length > 0) Add("potion-discard");
             Add("abandon");
         }
         return legal.ToArray();
     }
 
-    private static int VisiblePotionCount(SnapshotContract snapshot) =>
-        snapshot.HasTopLevelPotions
-            ? snapshot.Potions.Length
-            : snapshot.Player?.Potions.Length ?? 0;
+    // The player's potion belt — what potion-use and potion-discard address.
+    // Combat has no player footer and publishes the belt at the top level;
+    // wherever a footer exists the top-level `potions` array belongs to the
+    // screen, and in a shop that is the merchant's stock. Reading stock as a
+    // belt both hid discardable potions behind a sold-out shelf and offered
+    // slots the player does not own.
+    private static SnapshotItemContract[] BeltPotions(SnapshotContract snapshot) =>
+        snapshot.Player is { } player
+            ? player.Potions
+            : snapshot.HasTopLevelPotions
+                ? snapshot.Potions
+                : [];
 
     private static bool ShopHasPurchase(SnapshotContract snapshot)
     {

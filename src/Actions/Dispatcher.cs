@@ -661,6 +661,13 @@ public static class Dispatcher
         if (idx < 0)
             return DispatchResult.Reject(RejectionCodes.BadIndex,
                 $"{kind} idx {idx} must be non-negative");
+        // One stall, one index — the one obs.cardRemoval.idx publishes.
+        // Ignoring idx here let any number remove a card, so the reject the
+        // observation implies never happened.
+        if (kind == "card_removal" && !MerchantRules.IsCardRemovalIndex(idx))
+            return DispatchResult.Reject(RejectionCodes.BadIndex,
+                $"card_removal has one entry, at idx "
+                    + $"{MerchantRules.CardRemovalIndex}; got {idx}");
 
         if (RequireRunContext(out var run, "shop inventory not available") is { } runErr)
             return runErr;
@@ -954,14 +961,10 @@ public static class Dispatcher
         // Mirror the potion popup's model-layer gates. The headless fallback
         // covers only the custom UI-node check: Phase.Shop has already
         // established the semantic MerchantRoom and host mode intentionally
-        // has no NMerchantButton to satisfy that check.
-        var usable = potion is FoulPotion
-            && potion.Usage == PotionUsage.AnyTime
-            && player.Creature is { IsDead: false }
-            && player.CanUseOrRemovePotions
-            && DecisionSurface.Current
-                .MerchantPotionInteractionAvailable(potion);
-        if (!usable)
+        // has no NMerchantButton to satisfy that check. Snapshotter runs the
+        // same gate to mark the belt entry `playable`, so obs.legal's
+        // potion-use and this reject cannot disagree.
+        if (!Snapshotter.MerchantPotionRedeemable(potion, player))
             return DispatchResult.Reject(RejectionCodes.NotPlayable,
                 $"{potion.Id.Entry} has no available merchant interaction in this shop");
         return FromDecisionSurface(
