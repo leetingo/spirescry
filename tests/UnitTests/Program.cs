@@ -383,28 +383,83 @@ internal static class Tests
         Equal(2, ticks.Captures);
     }
 
-    public static void SettlementLetsAbandonSettleOnTheMenuItAskedFor()
+    public static void SettlementReportsAnOwnerChangeOnTheMenuUnderTheSameRunId()
     {
-        // abandon owns the transition it requested: run:none is its boundary,
-        // not a stolen observation.
+        // #144, the shape no headless boot can produce: HeadlessDecisionSurface
+        // .AbandonRun nulls RunManager.State, so identity flips with the menu
+        // — but the GUI does not. It keeps the retired RunState loaded behind
+        // ReturnToMainMenuAfterRun, which is why PhaseDetector lets a visible
+        // main menu win over RunManager's terminal flags and why new-run's
+        // run_exists rejection says to abandon first. A foreign abandon there
+        // leaves the accepted identity live under a quiet, decision-free menu:
+        // identity alone would read that as Settled, and Settled is replayable,
+        // so the run log would fingerprint the main menu as this verb's result.
         var clock = new FakeSettlementClock();
         var ticks = new FakeSettlementTicks(clock,
-            Probe(revision: 6, phase: Phase.MainMenu, busy: false,
-                runId: "none"));
+            Probe(revision: 5, busy: true),
+            Probe(revision: 6, tick: 3, phase: Phase.MainMenu, busy: false,
+                runId: "run"));
         var module = new SettlementModule(ticks, clock);
 
-        var result = module.Follow(Request(
-            timeoutMs: 100, ownership: RunOwnership.EndsRun))
+        var result = module.Follow(Request(timeoutMs: 100))
             .GetAwaiter().GetResult();
 
-        Equal(SettlementOutcome.Settled, result.Outcome);
+        Equal(SettlementOutcome.OwnerChanged, result.Outcome);
+        // The identity never moved — the board did.
+        Equal("run", result.Probe.RunId);
+    }
+
+    public static void SettlementKeepsOnlyTheFaultsSeenWhileTheRunWasOwned()
+    {
+        // Errors are read cumulatively from a revision (Signals.ErrorsSince),
+        // so the capture that discovers the owner change also carries whatever
+        // the new owner's abandon or launch logged. Attributing those to this
+        // verb would decorate its run-log entry with a foreign run's faults.
+        var clock = new FakeSettlementClock();
+        var executing = new SettlementActivity(
+            FireAndForgetCount: 0, EventOptionExecuting: true,
+            ExecutorRunning: false, QueuedActionCount: 0);
+        var ticks = new FakeSettlementTicks(clock,
+            Probe(revision: 5, phase: Phase.Event, activity: executing,
+                errors: ["fault:ours"]),
+            Probe(revision: 6, tick: 3, phase: Phase.MainMenu, busy: false,
+                runId: "none", errors: ["fault:ours", "fault:theirs"]));
+        var module = new SettlementModule(ticks, clock);
+
+        var result = module.Follow(Request(timeoutMs: 100))
+            .GetAwaiter().GetResult();
+
+        Equal(SettlementOutcome.OwnerChanged, result.Outcome);
+        Equal(1, result.Probe.Errors.Count);
+        Equal("fault:ours", result.Probe.Errors[0]);
+    }
+
+    public static void SettlementLetsAbandonSettleOnTheMenuItAskedFor()
+    {
+        // abandon owns the transition it requested: the menu is its boundary,
+        // not a stolen observation — whether the engine has already dropped
+        // the run identity or is still holding the retired state (GUI).
+        foreach (var runId in new[] { "none", "run" })
+        {
+            var clock = new FakeSettlementClock();
+            var ticks = new FakeSettlementTicks(clock,
+                Probe(revision: 6, phase: Phase.MainMenu, busy: false,
+                    runId: runId));
+            var module = new SettlementModule(ticks, clock);
+
+            var result = module.Follow(Request(
+                timeoutMs: 100, ownership: RunOwnership.EndsRun))
+                .GetAwaiter().GetResult();
+
+            Equal(SettlementOutcome.Settled, result.Outcome);
+        }
     }
 
     public static void SettlementLetsNewRunAdoptTheRunItMints()
     {
         // RunState is published a beat after acceptance, so new-run is
-        // routinely accepted while the identity is still `none` and settles
-        // on the run it just created.
+        // routinely accepted from the menu while the identity is still `none`,
+        // and settles on the run it just created.
         var clock = new FakeSettlementClock();
         var ticks = new FakeSettlementTicks(clock,
             Probe(revision: 6, phase: Phase.Event, busy: false,
@@ -413,6 +468,7 @@ internal static class Tests
 
         var result = module.Follow(Request(
             timeoutMs: 100,
+            phaseBefore: Phase.MainMenu,
             acceptedRunId: RunOwnershipRules.NoRun,
             ownership: RunOwnership.StartsRun))
             .GetAwaiter().GetResult();
@@ -421,24 +477,35 @@ internal static class Tests
         Equal("fresh-run", result.Probe.RunId);
     }
 
-    public static void SettlementDeniesNewRunAMenuBoundary()
+    public static void SettlementDeniesNewRunAMenuBoundaryOnceItsRunIsUp()
     {
-        // ... but a new-run that ends up back on the menu was abandoned by
-        // somebody else. Settling there would fingerprint the menu as the
-        // result of starting a run.
+        // A launch reads main_menu under a concrete run id while the local
+        // seat mounts — RunState identity exists before the seat does, which
+        // is why Signals.RefreshRunIdentity reads StateOnly and PhaseDetector
+        // does not. So new-run may sit on the menu holding its own id, but
+        // once its board has been seen, a return to the menu is somebody
+        // else's abandon: settling there would fingerprint the main menu as
+        // the result of starting a run.
         var clock = new FakeSettlementClock();
         var ticks = new FakeSettlementTicks(clock,
-            Probe(revision: 6, phase: Phase.MainMenu, busy: false,
+            Probe(revision: 5, phase: Phase.MainMenu, busy: true,
+                runId: "minted-run"),
+            Probe(revision: 6, tick: 3, phase: Phase.Map, busy: true,
+                runId: "minted-run"),
+            Probe(revision: 7, tick: 4, phase: Phase.MainMenu, busy: false,
                 runId: "none"));
         var module = new SettlementModule(ticks, clock);
 
         var result = module.Follow(Request(
             timeoutMs: 100,
+            phaseBefore: Phase.MainMenu,
             acceptedRunId: "minted-run",
             ownership: RunOwnership.StartsRun))
             .GetAwaiter().GetResult();
 
         Equal(SettlementOutcome.OwnerChanged, result.Outcome);
+        // The launch window itself was not mistaken for an owner change.
+        Equal(3, ticks.Captures);
     }
 
     public static void RunOwnershipScopesEachVerbToTheRunThatAcceptedIt()
@@ -447,23 +514,44 @@ internal static class Tests
         Equal(RunOwnership.EndsRun, RunOwnershipRules.For("abandon"));
         Equal(RunOwnership.Bound, RunOwnershipRules.For("play"));
 
-        // Same run: never an owner change, whatever the verb does. A run
-        // that ends naturally keeps its RunState through game_over.
-        False(RunOwnershipRules.IsOwnerChange(RunOwnership.Bound, "a", "a"));
-        False(RunOwnershipRules.IsOwnerChange(RunOwnership.EndsRun, "a", "a"));
-        False(RunOwnershipRules.IsOwnerChange(RunOwnership.StartsRun, "a", "a"));
+        // Same run, still on its own board: never an owner change, whatever
+        // the verb does. A run that ends naturally keeps its RunState through
+        // game_over, so a bound verb settles there under its own identity.
+        False(OwnerChange(RunOwnership.Bound, "a", "a"));
+        False(OwnerChange(RunOwnership.Bound, "a", "a", Phase.GameOver));
+        False(OwnerChange(RunOwnership.EndsRun, "a", "a"));
+        False(OwnerChange(RunOwnership.StartsRun, "a", "a"));
 
         // A bound verb owns exactly one identity.
-        True(RunOwnershipRules.IsOwnerChange(RunOwnership.Bound, "a", "b"));
-        True(RunOwnershipRules.IsOwnerChange(RunOwnership.Bound, "a", "none"));
-        True(RunOwnershipRules.IsOwnerChange(RunOwnership.Bound, "none", "b"));
+        True(OwnerChange(RunOwnership.Bound, "a", "b"));
+        True(OwnerChange(RunOwnership.Bound, "a", "none"));
+        True(OwnerChange(RunOwnership.Bound, "none", "b"));
+
+        // ... and identity alone is not ownership: the engine can keep the
+        // retired run loaded behind a visible main menu, so a verb that was
+        // acting inside a run is unowned there under its own id.
+        True(OwnerChange(RunOwnership.Bound, "a", "a", Phase.MainMenu));
 
         // The lifecycle verbs own their own transition, and only that one.
-        False(RunOwnershipRules.IsOwnerChange(RunOwnership.EndsRun, "a", "none"));
-        True(RunOwnershipRules.IsOwnerChange(RunOwnership.EndsRun, "a", "b"));
-        False(RunOwnershipRules.IsOwnerChange(RunOwnership.StartsRun, "none", "b"));
-        True(RunOwnershipRules.IsOwnerChange(RunOwnership.StartsRun, "a", "b"));
-        True(RunOwnershipRules.IsOwnerChange(RunOwnership.StartsRun, "a", "none"));
+        False(OwnerChange(RunOwnership.EndsRun, "a", "none"));
+        False(OwnerChange(RunOwnership.EndsRun, "a", "a", Phase.MainMenu));
+        False(OwnerChange(RunOwnership.EndsRun, "a", "none", Phase.MainMenu));
+        True(OwnerChange(RunOwnership.EndsRun, "a", "b"));
+        False(OwnerChange(RunOwnership.StartsRun, "none", "b"));
+        True(OwnerChange(RunOwnership.StartsRun, "a", "b"));
+        True(OwnerChange(RunOwnership.StartsRun, "a", "none"));
+
+        // new-run's launch window legitimately reads main_menu under the id
+        // it just minted, until its board has actually been seen.
+        False(OwnerChange(
+            RunOwnership.StartsRun, "a", "a", Phase.MainMenu,
+            runSeenInPlay: false));
+        True(OwnerChange(RunOwnership.StartsRun, "a", "a", Phase.MainMenu));
+
+        // Only a live identity outside the menu proves the board was seen.
+        True(RunOwnershipRules.SeenInPlay("a", Phase.Map));
+        False(RunOwnershipRules.SeenInPlay("a", Phase.MainMenu));
+        False(RunOwnershipRules.SeenInPlay("none", Phase.Map));
     }
 
     public static void OwnerChangeIsNeitherABoundaryNorAnOwnedObservation()
@@ -2087,6 +2175,18 @@ internal static class Tests
         tracker.Drop();
         return tracker;
     }
+
+    // Defaults describe the common case: a verb dispatched inside a run, whose
+    // board this window has therefore already seen.
+    private static bool OwnerChange(
+        RunOwnership ownership,
+        string acceptedRunId,
+        string observedRunId,
+        Phase observedPhase = Phase.Map,
+        bool runSeenInPlay = true) =>
+        RunOwnershipRules.IsOwnerChange(
+            ownership, acceptedRunId, observedRunId, observedPhase,
+            runSeenInPlay);
 
     private static SettlementRequest Request(
         Phase phaseBefore = Phase.Map,

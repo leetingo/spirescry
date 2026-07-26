@@ -792,6 +792,21 @@ fn replay_value(client: &impl ReplayTransport, log: &Value) -> CliResult<Value> 
                     action,
                 )
             })?;
+        // Both non-boundary outcomes stop the replay, but they are different
+        // failures: a timeout is the reconstruction being too slow, an owner
+        // change is somebody else abandoning or restarting the run underneath
+        // it. Naming the second one as the first sends the reader hunting for
+        // a stuck engine.
+        if outcome == SettlementOutcome::OwnerChanged {
+            return Err(format!(
+                "divergence at verb {} ({}): the run being reconstructed stopped \
+                 being the live run mid-verb (a concurrent abandon or new-run) — \
+                 replay needs the host to itself",
+                idx + 1,
+                action,
+            )
+            .into());
+        }
         if !outcome.reached_boundary() {
             return Err(format!(
                 "divergence at verb {} ({}): reconstruction timed out",

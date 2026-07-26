@@ -155,6 +155,11 @@ internal sealed class SettlementModule
         // Settled is replayable.
         var observed = new List<string>();
         var observedKeys = new HashSet<string>(StringComparer.Ordinal);
+        // A verb dispatched inside a run has already seen its board; new-run
+        // has not until a probe shows one, because a launch reads main_menu
+        // while the local seat mounts.
+        var runSeenInPlay = RunOwnershipRules.SeenInPlay(
+            request.AcceptedRunId, request.PhaseBefore);
 
         while (true)
         {
@@ -167,17 +172,22 @@ internal sealed class SettlementModule
             {
                 return FaultResult(request, "observation", exception, observed);
             }
-            probe = RetainObservedErrors(probe, observed, observedKeys);
-            // Ownership outranks every other reading of this probe. Once the
-            // live run is not the one that accepted the verb, the phase,
-            // the queues and the quiet all describe someone else's board —
-            // classifying them would report a boundary this action never
-            // reached (and, for Settled, a replayable one). The errors seen
-            // in this window still ride along: they were logged while the
-            // accepted run was live.
+            // Ownership outranks every other reading of this probe, and is
+            // settled before its errors are folded in. Once the accepted run
+            // is not the board on screen, the phase, the queues and the quiet
+            // all describe somebody else's game — classifying them would
+            // report a boundary this action never reached (and, for Settled, a
+            // replayable one), and this capture's fresh fault tokens may have
+            // been logged by whoever took the run away. Only the tokens
+            // already observed while the run was still ours ride along.
             if (RunOwnershipRules.IsOwnerChange(
-                request.Ownership, request.AcceptedRunId, probe.RunId))
-                return new SettlementResult(SettlementOutcome.OwnerChanged, probe);
+                request.Ownership, request.AcceptedRunId, probe.RunId,
+                probe.Phase, runSeenInPlay))
+                return new SettlementResult(
+                    SettlementOutcome.OwnerChanged,
+                    probe with { Errors = observed.ToArray() });
+            runSeenInPlay |= RunOwnershipRules.SeenInPlay(probe.RunId, probe.Phase);
+            probe = RetainObservedErrors(probe, observed, observedKeys);
             var outcome = CandidateOutcome(
                 probe, request.PhaseBefore, request.AcceptedRevision);
             if (outcome is { } candidate)

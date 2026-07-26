@@ -71,11 +71,12 @@ public static class RunLog
             var entry = Verbs.FirstOrDefault(verb => verb.Id == entryId);
             if (entry is null) return;
             // The observation behind an owner change was captured from
-            // another run, or from the menu after this one was retired.
+            // another run, or from the menu the accepted run was retired to.
             // Nothing read off that board — the run it names, the phase it
             // parked in, its fingerprint — describes this verb, so the entry
-            // keeps only what it owns: the outcome and the errors logged
-            // while its own run was live.
+            // keeps only what it owns: the outcome, plus the fault tokens
+            // SettlementModule.Follow had already observed while the accepted
+            // run was still the board on screen.
             var ownsObservation = outcome.OwnsObservation();
             var observedRunId = observation.RunId;
             if (ownsObservation

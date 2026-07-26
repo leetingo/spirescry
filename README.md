@@ -111,9 +111,12 @@ that accepted the verb: if another client abandons that run or starts a new
 one before the window closes, the response is `owner_changed` with
 `settled: false` — never a `settled` verdict read off the new run or the main
 menu — and the run-log entry keeps no phase or fingerprint from that foreign
-board. Only the two lifecycle verbs move their own run: `new-run` adopts the
-run it mints, `abandon` settles on the menu it asked for.
-If an accepted mutation is followed by an
+board. Ownership is the run's board, not just its id: the engine can keep a
+retired run's state loaded behind a visible main menu, so a verb that was
+acting inside a run is unowned there even when the id has not changed yet.
+Only the two lifecycle verbs move their own run: `new-run` adopts the run it
+mints, `abandon` settles on the menu it asked for. If an accepted mutation is
+followed by an
 observation or response-construction failure, the bridge still returns this
 typed envelope with `action`, `acceptedRev`, `runId`,
 `observationAvailable: false`, and `obs: null`; the matching run-log entry is
