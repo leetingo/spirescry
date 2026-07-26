@@ -85,6 +85,34 @@ internal static class Screens
     public static EventModel? CurrentEvent() =>
         (LocalRunContext.Current?.State.CurrentRoom as EventRoom)?.LocalMutableEvent;
 
+    // The two proceed gates, adapted from live engine state to the shared
+    // value rules. Observation and dispatch read the same helper in both
+    // boots, so what /obs advertises and what /step accepts cannot drift.
+    public static bool EventProceedReady(EventModel? ev) =>
+        ev is null
+        || ProceedReadiness.EventReady(
+            ev.IsFinished,
+            (ev.CurrentOptions ?? [])
+                .Select(option => new ProceedReadiness.EventOptionGate(
+                    option.IsProceed, option.IsLocked, option.WasChosen))
+                .ToArray());
+
+    public static bool RestSiteProceedReady()
+    {
+        var options = RestOptions();
+        if (options is null) return false;
+        return ProceedReadiness.RestSiteReady(
+            options.Count, RestSiteOptionChosen());
+    }
+
+    // The synchronizer remembers the seat's last pick for the whole room —
+    // the only durable record that a rest site has been spent once a hook
+    // leaves the untaken options on the board.
+    private static bool RestSiteOptionChosen() =>
+        LocalRunContext.Current is { } run
+        && run.Manager.RestSiteSynchronizer?
+            .GetChosenOptionIndex(run.Player.NetId) is not null;
+
     public static MerchantInventory? ShopInventory(RunState? rs) =>
         (rs?.CurrentRoom as MerchantRoom)?.GetLocalInventory();
 

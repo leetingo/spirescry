@@ -68,8 +68,8 @@ def fresh_run(seed="SWEEP", character="IRONCLAD"):
             bridge.PHASE.MAIN_MENU, after_rev=d["rev"])
     bridge.launch_run(
         character=character, seed=seed, timeout=30)
-    run("proceed")
-    bridge.wait_phase(bridge.PHASE.MAP, timeout=20)
+    # Neow owes the seat a decision; proceed only opens once it is taken.
+    bridge.walk_world(bridge.PHASE.MAP)
 
 
 def wedge_events(since):

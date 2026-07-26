@@ -360,8 +360,8 @@ it.
 | `main_menu` | — | `new-run <CHARACTER>` (bad names are rejected with the valid list) |
 | `map` | `next`: reachable nodes (col/row/type) | `map-move <col> <row>` |
 | `combat` | `you`, `hand`, `enemies`, `potions`, `piles`, `turn` | `play <MODEL> [--target <id>]`, `end-turn`, `potion-use <slot> [--target <id>]` |
-| `event` | `options[]` (idx/title/description/locked) | `option <idx>` — some options only mark `chosen`: rescry after each, and when nothing new is pickable, `proceed`. `proceed` also pages dialogue and leaves once `finished`. |
-| `rest_site` | `options[]` | `option <idx>` (upgrade opens a deck picker); `options` empty → `proceed` → map |
+| `event` | `options[]` (idx/title/description/locked), `proceedAvailable` | `option <idx>` — some options only mark `chosen`: rescry after each. `proceed` is offered only when the page owes nothing (`finished`, every option locked/chosen, or the page carries its own leave option); firing it early is rejected, so a page with a live choice must be answered, Neow's blessing included. |
+| `rest_site` | `options[]`, `proceedAvailable` | `option <idx>` (upgrade opens a deck picker); `proceed` → map only once the seat has spent its choice or `options` is empty — both boots reject it before that |
 | `shop` | goods with idx + prices | `buy <kind> --idx <n>` (kind: `card`/`colorless`/`relic`/`potion`/`card_removal`), `leave` |
 | `treasure` | `chestOpened`, `relics` | Closed chest (`chestOpened:false`, `relics:[]` — unopened, not empty): `pick-relic 0` **opens** it; rescry, then choose from the now-visible offer. Open chest: `pick-relic <idx>` takes, `skip` declines. `proceed` leaves — in headless even with the chest unopened, so don't read `legal:[…,proceed]` as "nothing here". `chestOpened:true` with `relics:[]` is a resolved offer. |
 | `relic_reward` | relics on offer | `pick-relic <idx>`, `skip` |

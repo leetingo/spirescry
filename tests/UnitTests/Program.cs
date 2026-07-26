@@ -1397,6 +1397,86 @@ internal static class Tests
             DecisionProjection.LegalVerbs(resolved, runActive: true)));
     }
 
+    public static void EventProceedIsWithheldUntilThePageOffersAWayOut()
+    {
+        static ProceedReadiness.EventOptionGate Option(
+            bool proceed = false, bool locked = false, bool chosen = false) =>
+            new(proceed, locked, chosen);
+
+        // Neow: three live boons, no leave option, event unfinished. The GUI
+        // renders no way past them, so neither may the bridge.
+        var required = new[] { Option(), Option(), Option() };
+        False(ProceedReadiness.EventReady(finished: false, required));
+
+        // The engine's own two exits: a finished event (NEventRoom swaps the
+        // page for a synthetic PROCEED) and a page carrying its own leave.
+        True(ProceedReadiness.EventReady(finished: true, required));
+        True(ProceedReadiness.EventReady(
+            finished: false, [Option(), Option(proceed: true)]));
+
+        // A locked leave is not an exit, and a spent or locked choice is not
+        // a required decision — proceed and option stay complementary, so a
+        // page whose options are all used up is never a dead end.
+        False(ProceedReadiness.EventReady(
+            finished: false, [Option(), Option(proceed: true, locked: true)]));
+        True(ProceedReadiness.EventReady(
+            finished: false, [Option(locked: true), Option(chosen: true)]));
+        True(ProceedReadiness.EventReady(finished: false, []));
+    }
+
+    public static void DecisionEventProceedFollowsTheEventPageGate()
+    {
+        var pending = new SnapshotContract(Phase.Event)
+        {
+            Options =
+            [
+                new SnapshotItemContract { Index = 0 },
+                new SnapshotItemContract { Index = 1 },
+            ],
+            ProceedAvailable = false,
+            Player = new SnapshotPlayerContract { Potions = [] },
+        };
+
+        Equal("option,abandon", string.Join(',',
+            DecisionProjection.LegalVerbs(pending, runActive: true)));
+
+        var resolved = new SnapshotContract(Phase.Event)
+        {
+            Options = [],
+            ProceedAvailable = true,
+            Player = new SnapshotPlayerContract { Potions = [] },
+        };
+
+        Equal("proceed,abandon", string.Join(',',
+            DecisionProjection.LegalVerbs(resolved, runActive: true)));
+    }
+
+    public static void RestSiteProceedWaitsForTheSeatToSpendItsChoice()
+    {
+        False(ProceedReadiness.RestSiteReady(
+            optionCount: 2, optionChosen: false));
+        True(ProceedReadiness.RestSiteReady(
+            optionCount: 0, optionChosen: false));
+        // A hook can leave the untaken options standing after one is taken;
+        // the GUI enables its proceed button all the same.
+        True(ProceedReadiness.RestSiteReady(
+            optionCount: 1, optionChosen: true));
+
+        var unchosen = new SnapshotContract(Phase.RestSite)
+        {
+            Options =
+            [
+                new SnapshotItemContract { Index = 0, Enabled = true },
+                new SnapshotItemContract { Index = 1, Enabled = true },
+            ],
+            ProceedAvailable = false,
+            Player = new SnapshotPlayerContract { Potions = [] },
+        };
+
+        Equal("option,abandon", string.Join(',',
+            DecisionProjection.LegalVerbs(unchosen, runActive: true)));
+    }
+
     public static void DecisionUnavailableTransitionsDoNotAdvertiseActions()
     {
         foreach (var phase in new[] { Phase.Event, Phase.Rewards })
