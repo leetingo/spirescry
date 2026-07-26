@@ -1521,6 +1521,7 @@ internal static class Snapshotter
     {
         var decision = DecisionSurface.Current.CardSelect;
         if (decision is null) return new SnapshotContract(phase) { Available = false };
+        var picked = SelectionProjection.Picked(decision.Selected);
         var snapshot = new SnapshotContract(phase)
         {
             Player = FooterView(),
@@ -1531,8 +1532,7 @@ internal static class Snapshotter
                 model: card.Id.Entry,
                 selector: CardSpecifier.From(card),
                 semanticState: [CardStateToken(card)],
-                selected: SelectionProjection.IsSelected(
-                    card, decision.Selected))).ToArray(),
+                selected: SelectionProjection.IsSelected(card, picked))).ToArray(),
             Selected = decision.Selected.Select(CardSpecifier.From).ToArray(),
             SemanticState =
             [
@@ -1559,6 +1559,7 @@ internal static class Snapshotter
     {
         var decision = DecisionSurface.Current.HandSelect;
         if (decision is null) return new SnapshotContract(phase) { Available = false };
+        var picked = SelectionProjection.Picked(decision.Selected);
         var snapshot = new SnapshotContract(phase)
         {
             Confirmable = decision.Confirmable,
@@ -1568,8 +1569,7 @@ internal static class Snapshotter
                 selector: card is null ? null : CardSpecifier.From(card),
                 semanticState: card is null ? [SemanticToken("card", (object?)null)]
                     : [CardStateToken(card, liveCost: true)],
-                selected: SelectionProjection.IsSelected(
-                    card, decision.Selected))).ToArray(),
+                selected: SelectionProjection.IsSelected(card, picked))).ToArray(),
             Selected = decision.Selected.Select(CardSpecifier.From).ToArray(),
             SemanticState =
             [

@@ -490,7 +490,8 @@ internal static class Tests
         // row forever — toggling it on and off instead of completing.
         var first = new SelectableCard("DEFEND_SILENT");
         var second = new SelectableCard("DEFEND_SILENT");
-        var picked = new List<SelectableCard> { first };
+        var picked = SelectionProjection.Picked(
+            new List<SelectableCard> { first });
 
         True(SelectionProjection.IsSelected(first, picked));
         False(SelectionProjection.IsSelected(second, picked));
@@ -523,9 +524,28 @@ internal static class Tests
         // GUI hand rows can be holders with no card node; they are reported
         // as a card-less slot and must never claim to be picked.
         Equal(false, SelectionProjection.IsSelected(
-            (SelectableCard?)null, new[] { new SelectableCard("STRIKE_SILENT") }));
+            (SelectableCard?)null,
+            SelectionProjection.Picked(
+                new[] { new SelectableCard("STRIKE_SILENT") })));
         Equal(false, SelectionProjection.IsSelected(
-            new SelectableCard("STRIKE_SILENT"), (IReadOnlyCollection<SelectableCard>?)null));
+            new SelectableCard("STRIKE_SILENT"),
+            SelectionProjection.Picked((IEnumerable<SelectableCard>?)null)));
+    }
+
+    public static void SelectionProjectionReadsThePickedListOncePerSnapshot()
+    {
+        // The picker hands out the live list its pick verb mutates, so the
+        // rows of one snapshot are answered from a reading taken once —
+        // never from a collection that can change between rows.
+        var card = new SelectableCard("STRIKE_SILENT");
+        var selected = new List<SelectableCard>();
+        var picked = SelectionProjection.Picked(selected);
+
+        selected.Add(card);
+
+        False(SelectionProjection.IsSelected(card, picked));
+        True(SelectionProjection.IsSelected(
+            card, SelectionProjection.Picked(selected)));
     }
 
     public static void EventOptionTrackerOutlivesAbandonThenNewRunRotations()
@@ -2043,11 +2063,16 @@ internal static class Tests
     // pass this suite only by accident.
     private sealed record SelectableCard(string Model);
 
+    // One snapshot's worth of rows, projected the way Snapshotter does it:
+    // read the picked instances once, then answer every row from that.
     private static string Flags(
         IReadOnlyList<SelectableCard?> candidates,
-        IReadOnlyCollection<SelectableCard> picked) =>
-        string.Concat(candidates.Select(card =>
+        IReadOnlyCollection<SelectableCard> selected)
+    {
+        var picked = SelectionProjection.Picked(selected);
+        return string.Concat(candidates.Select(card =>
             SelectionProjection.IsSelected(card, picked) ? "x" : "-"));
+    }
 
     private static void Equal(object? expected, object? actual)
     {
