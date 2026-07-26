@@ -140,11 +140,11 @@ internal static class Tests
 
     public static void ProtocolVersionCoversTheMandatoryOkEnvelope()
     {
-        // v5 makes `ok` mandatory on every body, snapshots included. A v4
-        // host answered /obs without it, and a v5 CLI calls a body with no
-        // boolean `ok` malformed, so the pairing has to be rejected as an
-        // incompatible host before any route is read.
-        Equal(5, ProtocolVocabulary.ProtocolVersion);
+        // v6 makes `ok` mandatory on every body, snapshots included. Every
+        // earlier host answered /obs without it, and a v6 CLI calls a body
+        // with no boolean `ok` malformed, so the pairing has to be rejected
+        // as an incompatible host before any route is read.
+        Equal(6, ProtocolVocabulary.ProtocolVersion);
     }
 
     public static void ResponseEnvelopeStampsOkFromTheHttpStatus()

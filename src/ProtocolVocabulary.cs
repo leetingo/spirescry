@@ -99,17 +99,21 @@ public static class ProtocolVocabulary
         Converters = { new JsonStringEnumConverter(JsonNamingPolicy.CamelCase) },
     };
 
-    // v5 makes the `ok` envelope flag mandatory on every body, snapshots
-    // included; a v5 CLI rejects a body without it as malformed. A v4 host
-    // answered /obs with no flag at all, so pairing one with a v5 CLI must
-    // fail as an incompatible host rather than as a malformed response on
-    // whichever route the caller happened to reach first.
+    // v6 makes the `ok` envelope flag mandatory on every body, snapshots
+    // included; a v6 CLI rejects a body without it as malformed. Every
+    // earlier host answered /obs with no flag at all, so pairing one with a
+    // v6 CLI must fail as an incompatible host rather than as a malformed
+    // response on whichever route the caller happened to reach first.
+    //
+    // v5 added `owner_changed` as a settlement outcome: a follow whose run
+    // stopped owning the accepted action reports the ownership change rather
+    // than settling against whatever run replaced it.
     //
     // v4 kept the typed semanticState projection internal by default and
     // required replay/diagnostic callers to request its expanded wire form.
     // A v3 CLI would hash the bounded response without those tokens and
     // report a false divergence, so compatibility must fail first.
-    public const int ProtocolVersion = 5;
+    public const int ProtocolVersion = 6;
 
     public static string CreateArtifactJson() =>
         JsonSerializer.Serialize(new ArtifactDocument(
