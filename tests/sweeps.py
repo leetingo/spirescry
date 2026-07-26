@@ -405,17 +405,23 @@ def relics(log=print):
     return failures
 
 
+# The sweep kinds this module offers, by the argument that selects one.
+# Module-level so tests/gate_coverage_test.py can check that the pre-merge
+# gate really runs an e2e case for every kind — a new sweep added here
+# without a case would otherwise never run.
+SWEEPS = {
+    "encounters": encounters,
+    "cards": cards,
+    "potions": potions,
+    "relics": relics,
+}
+
+
 if __name__ == "__main__":
     sweep = sys.argv[1] if len(sys.argv) == 2 else ""
-    choices = {
-        "encounters": encounters,
-        "cards": cards,
-        "potions": potions,
-        "relics": relics,
-    }
-    if sweep not in choices:
-        sys.exit("usage: sweeps.py encounters|cards|potions|relics")
-    failed = choices[sweep]()
+    if sweep not in SWEEPS:
+        sys.exit("usage: sweeps.py " + "|".join(SWEEPS))
+    failed = SWEEPS[sweep]()
     # Name the failures — a bare exit code forces a full re-run under a
     # debugger just to learn WHICH entry broke.
     for name, why in failed.items():

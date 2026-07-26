@@ -15,8 +15,9 @@
 #                (--foreground: exec in this process; for sandboxed
 #                executors that reap background children)
 #   verify       conformance: tests/parity.py on both boots + key-set diff
-#   gate         the pre-merge gate: the CI set plus the e2e suite CI cannot
-#                run (needs headless-setup; e2e port via SPIRESCRY_GATE_PORT)
+#   gate         the pre-merge gate: the CI set plus the whole e2e suite CI
+#                cannot run — exhaustive content sweeps included, never
+#                --quick (needs headless-setup; port via SPIRESCRY_GATE_PORT)
 #   stamp        print the buildHash this checkout would stamp (git ref +
 #                content hash of the source trees and every lib/*.dll)
 #   stop         stop a running game or host
@@ -571,8 +572,9 @@ verify() {
 
 # Everything that must pass before a merge: the GitHub-hosted CI set plus the
 # end-to-end suite. CI cannot run e2e — the host is built from the game's
-# non-distributable dlls — so this is the only place those cases are exercised.
-# Needs ./build.sh headless-setup to have been run once.
+# non-distributable dlls — so this is the only place those cases are exercised,
+# the exhaustive content sweeps among them. Needs ./build.sh headless-setup
+# to have been run once.
 gate() {
     [ -d headless/build/lib ] \
         || die "headless/build/lib missing — run: ./build.sh headless-setup"
@@ -601,7 +603,8 @@ gate() {
     step "gate: python unit tests"
     for t in protocol_contract_test projection_schema_drift_test \
              world_walker_test parity_settlement_test e2e_settlement_test \
-             build_identity_test play_skill_fault_protocol_test; do
+             build_identity_test play_skill_fault_protocol_test \
+             gate_coverage_test; do
         python3 "tests/$t.py"
     done
 
@@ -612,8 +615,12 @@ gate() {
     tests/build_stop_test.sh
     tests/play_skill_preflight_test.sh
 
-    step "gate: end-to-end (quick, self-booted on port $gate_port)"
-    STS2_AGENT_PORT="$gate_port" python3 tests/e2e.py --boot --quick
+    # No --quick here, ever: the exhaustive M1–M4 content sweeps (every
+    # encounter, card, potion, relic) only ever run here, so skipping them
+    # leaves that surface unguarded. --quick is the local iteration loop.
+    # tests/gate_coverage_test.py fails if this line drops back to it.
+    step "gate: end-to-end (exhaustive, self-booted on port $gate_port)"
+    STS2_AGENT_PORT="$gate_port" python3 tests/e2e.py --boot
 
     ok "gate passed — CI set plus the local-only e2e suite"
 }

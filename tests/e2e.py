@@ -41,7 +41,10 @@ no Steam). Case groups:
                           tear the host down
   e2e.py                  run against an already-listening bridge
                           (boot-log and audit-trail cases are skipped)
-  e2e.py --quick          skip the M sweeps, E1 clicks first options only
+  e2e.py --quick          LOCAL ITERATION ONLY: skip the M sweeps, E1
+                          clicks first options only. `./build.sh gate`
+                          never passes it — the gate runs everything, and
+                          tests/gate_coverage_test.py holds it to that.
   e2e.py --only P1,M2     run a subset (case-name prefixes)
   e2e.py --keys-out F     write the parity key sets to F
   e2e.py --log F          host stderr file (with --boot)
@@ -2326,6 +2329,10 @@ def e3():
 
 
 # ---------- M: exhaustive content sweeps ----------
+#
+# One case per sweep kind in tests/sweeps.py (SWEEPS). deep=True marks the
+# slow tail --quick drops for local iteration; the pre-merge gate runs them
+# all, and tests/gate_coverage_test.py fails if a kind here goes uncovered.
 
 @case("M1 bestiary: every encounter loads, fights, resolves", deep=True)
 def m1():
@@ -2496,18 +2503,34 @@ def boot_host(log_path):
     sys.exit(f"bridge not up after 60s — see {log_path}")
 
 
-def main():
-    global LOG_PATH, ARGS
+def build_parser():
     ap = argparse.ArgumentParser()
     ap.add_argument("--boot", action="store_true")
     ap.add_argument("--quick", action="store_true",
-                    help="skip the exhaustive sweeps (M*), first-option E1")
+                    help="LOCAL ITERATION ONLY — skip the exhaustive sweeps "
+                         "(M*), first-option E1; never for the pre-merge gate")
     ap.add_argument("--only", help="comma-separated case-name prefixes")
     ap.add_argument("--keys-out")
     ap.add_argument("--log", default=os.path.join(
         os.environ.get("TMPDIR", "/tmp"), "spirescry-ci-host.log"))
     ap.add_argument("--list", action="store_true")
-    ARGS = ap.parse_args()
+    return ap
+
+
+def skip_reason(boot_only, deep, *, boot, quick):
+    """Why an invocation with these flags would not run a case — None if
+    it runs. A plain rule over the case flags so tests/gate_coverage_test.py
+    can ask what a given argv (the gate's, say) actually covers."""
+    if boot_only and not boot:
+        return "needs --boot"
+    if deep and quick:
+        return "--quick"
+    return None
+
+
+def main():
+    global LOG_PATH, ARGS
+    ARGS = build_parser().parse_args()
 
     if ARGS.list:
         for name, boot_only, deep, _ in CASES:
@@ -2529,11 +2552,10 @@ def main():
         for name, boot_only, deep, fn in CASES:
             if only and not any(name.startswith(p) for p in only):
                 continue
-            if boot_only and not ARGS.boot:
-                print(f"SKIP {name} (needs --boot)")
-                continue
-            if deep and ARGS.quick:
-                print(f"SKIP {name} (--quick)")
+            skipped = skip_reason(boot_only, deep,
+                                  boot=ARGS.boot, quick=ARGS.quick)
+            if skipped:
+                print(f"SKIP {name} ({skipped})")
                 continue
             print(f"== {name}")
             t0 = time.monotonic()
@@ -2563,7 +2585,7 @@ def main():
 
     ran = sum(1 for name, b, deep, _ in CASES
               if (not only or any(name.startswith(p) for p in only))
-              and (ARGS.boot or not b) and not (deep and ARGS.quick))
+              and skip_reason(b, deep, boot=ARGS.boot, quick=ARGS.quick) is None)
     print(f"\n{ran - len(failures)}/{ran} cases passed"
           + (f"; FAILED: {failures}" if failures else ""))
     if failures and LOG_PATH:
