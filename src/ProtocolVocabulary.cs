@@ -9,13 +9,17 @@ namespace Spirescry.State
 
     // The typed result of following one accepted bridge verb to a boundary.
     // Wire spellings live in ProtocolVocabulary.SettlementOutcomes below so
-    // every generated consumer derives the same four-value vocabulary.
+    // every generated consumer derives the same five-value vocabulary.
     public enum SettlementOutcome
     {
         Settled,
         NextDecision,
         Fault,
         Timeout,
+        // The run that accepted the verb stopped being the live run before
+        // its follow window closed (a concurrent abandon or new-run). The
+        // action's own outcome was never observed.
+        OwnerChanged,
     }
 }
 
@@ -99,11 +103,16 @@ public static class ProtocolVocabulary
         Converters = { new JsonStringEnumConverter(JsonNamingPolicy.CamelCase) },
     };
 
-    // v4 keeps the typed semanticState projection internal by default and
-    // requires replay/diagnostic callers to request its expanded wire form.
+    // v5 adds the owner_changed settlement outcome. A v4 consumer cannot
+    // decode it, so it would read an unowned follow as an outcome-less
+    // response rather than as the explicit "your run is gone" signal —
+    // compatibility must fail first.
+    //
+    // v4 kept the typed semanticState projection internal by default and
+    // required replay/diagnostic callers to request its expanded wire form.
     // A v3 CLI would hash the bounded response without those tokens and
-    // report a false divergence, so compatibility must fail first.
-    public const int ProtocolVersion = 4;
+    // report a false divergence.
+    public const int ProtocolVersion = 5;
 
     public static string CreateArtifactJson() =>
         JsonSerializer.Serialize(new ArtifactDocument(
@@ -202,9 +211,10 @@ public static class ProtocolVocabulary
         public const string NextDecision = "next_decision";
         public const string Fault = "fault";
         public const string Timeout = "timeout";
+        public const string OwnerChanged = "owner_changed";
 
         public static IReadOnlyList<string> All { get; } = Array.AsReadOnly(
-            [Settled, NextDecision, Fault, Timeout]);
+            [Settled, NextDecision, Fault, Timeout, OwnerChanged]);
 
         public static string Name(SettlementOutcome outcome) => outcome switch
         {
@@ -212,6 +222,7 @@ public static class ProtocolVocabulary
             SettlementOutcome.NextDecision => NextDecision,
             SettlementOutcome.Fault => Fault,
             SettlementOutcome.Timeout => Timeout,
+            SettlementOutcome.OwnerChanged => OwnerChanged,
             _ => throw new ArgumentOutOfRangeException(nameof(outcome), outcome, null),
         };
     }

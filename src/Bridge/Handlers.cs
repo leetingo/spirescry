@@ -264,7 +264,8 @@ public static class Handlers
             acceptedRev,
             acceptedTick,
             timeoutMs,
-            acceptedRunId));
+            acceptedRunId,
+            RunOwnershipRules.For(action)));
         return FollowResponse(
             action, startedRev, acceptedRev, acceptedRunId,
             result, logEntryId, includeSemanticState);

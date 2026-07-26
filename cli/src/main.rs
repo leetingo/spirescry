@@ -343,6 +343,13 @@ fn main() -> ExitCode {
                      capture a fault-bundle and inspect acceptedRev/runId first"
                 );
             }
+            if settlement_outcome == Some(SettlementOutcome::OwnerChanged) {
+                eprintln!(
+                    "spirescry: the run that accepted this action stopped being the live run \
+                     before it settled; its result was never observed — the response's 'obs' \
+                     belongs to whatever owns the game now, not to acceptedRunId"
+                );
+            }
             let text = serde_json::to_string_pretty(&v).unwrap();
             // A plain println! panics on a closed pipe (e.g. `| head -1`);
             // write directly so that just exits quietly instead.
@@ -2496,8 +2503,14 @@ mod tests {
                 SettlementOutcome::NextDecision,
                 SettlementOutcome::Fault,
                 SettlementOutcome::Timeout,
+                SettlementOutcome::OwnerChanged,
             ]
         );
+        // A follow that lost its run never reached a boundary and can never
+        // be replayed: replay must diverge on it instead of accepting the
+        // observation that came back from another run.
+        assert!(!SettlementOutcome::OwnerChanged.reached_boundary());
+        assert!(!SettlementOutcome::OwnerChanged.is_replayable());
         assert_eq!(artifact["faultEventTokens"], Value::Object(faults));
         assert_eq!(artifact["cheatArgumentShapes"], json!(cheats));
     }

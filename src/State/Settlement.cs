@@ -12,11 +12,21 @@ internal static class SettlementOutcomeRules
     public static string WireName(this SettlementOutcome outcome) =>
         ProtocolVocabulary.SettlementOutcomes.Name(outcome);
 
+    // Both non-boundary outcomes leave the accepted action's own result
+    // unobserved: a timeout ran out of window, an owner change lost the run
+    // the window was watching.
     public static bool ReachedBoundary(this SettlementOutcome outcome) =>
-        outcome is not SettlementOutcome.Timeout;
+        outcome is not (SettlementOutcome.Timeout or SettlementOutcome.OwnerChanged);
 
     public static bool IsReplayable(this SettlementOutcome outcome) =>
         outcome is SettlementOutcome.Settled or SettlementOutcome.NextDecision;
+
+    // An owner change parks on a board the verb never acted on — another
+    // run's, or the main menu's. Its phase and fingerprint belong to that
+    // board, so nothing derived from the observation may be attributed to
+    // this verb.
+    public static bool OwnsObservation(this SettlementOutcome outcome) =>
+        outcome is not SettlementOutcome.OwnerChanged;
 }
 
 internal sealed record SettlementRequest(
@@ -25,7 +35,8 @@ internal sealed record SettlementRequest(
     long AcceptedRevision,
     long AcceptedTick,
     int TimeoutMs,
-    string AcceptedRunId = "none");
+    string AcceptedRunId = "none",
+    RunOwnership Ownership = RunOwnership.Bound);
 
 internal sealed record SettlementProbe(
     long Tick,
@@ -157,6 +168,16 @@ internal sealed class SettlementModule
                 return FaultResult(request, "observation", exception, observed);
             }
             probe = RetainObservedErrors(probe, observed, observedKeys);
+            // Ownership outranks every other reading of this probe. Once the
+            // live run is not the one that accepted the verb, the phase,
+            // the queues and the quiet all describe someone else's board —
+            // classifying them would report a boundary this action never
+            // reached (and, for Settled, a replayable one). The errors seen
+            // in this window still ride along: they were logged while the
+            // accepted run was live.
+            if (RunOwnershipRules.IsOwnerChange(
+                request.Ownership, request.AcceptedRunId, probe.RunId))
+                return new SettlementResult(SettlementOutcome.OwnerChanged, probe);
             var outcome = CandidateOutcome(
                 probe, request.PhaseBefore, request.AcceptedRevision);
             if (outcome is { } candidate)

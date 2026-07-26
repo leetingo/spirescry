@@ -10,7 +10,8 @@ no Steam). Case groups:
   B  boot: /health shape, boot-log assertions (Harmony patches landed,
      ModelDb registered clean, timestamped lines)
   P  protocol: rev monotonicity, long-poll semantics, route/verb/cheat
-     rejections with actionable codes
+     rejections with actionable codes, follow windows scoped to the run
+     that accepted the verb
   R  run lifecycle: seeded determinism, every character boots + fights,
      abandon from map and mid-combat (regression: #66)
   C  combat economy: block, energy accounting, bad_target, overdraw
@@ -56,6 +57,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import traceback
 import urllib.error
@@ -75,6 +77,7 @@ from protocol import (  # noqa: E402
     PHASE,
     PROTOCOL_VERSION,
     REJECTION,
+    SETTLEMENT_OUTCOME,
 )
 
 run, obs = bridge.run, bridge.obs
@@ -798,6 +801,97 @@ def p17():
                    for event in released["events"]), released["events"]
     status, health = http("GET", "/health")
     assert status == 200 and health["pendingEventOptions"] == 0, health
+    to_menu()
+
+
+@case("P18 a followed verb never settles against another run")
+def p18():
+    # #144. The bridge answers requests concurrently, so a second client's
+    # abandon can land while an accepted verb is still being followed. The
+    # menu it leaves behind is quiet and decision-free — exactly what the
+    # settlement loop reads as a boundary — so the verb used to report
+    # `settled` with `runId: none`, and the run log recorded a MAIN-MENU
+    # fingerprint as that verb's replayable outcome. The action's own
+    # result was never observed; only an explicit owner change can say so.
+    # (Landing on a different run's ID is the same rotation one beat later;
+    # SettlementReportsAnOwnerChangeWhenAnotherRunTakesOver pins that half,
+    # where the timing is deterministic.)
+    to_menu()
+    # new-run adopts the run it mints: its own follow still settles, and
+    # the entry it writes is the same-run baseline asserted below.
+    launched = run("new-run", "IRONCLAD", "--seed", "CIOWNERSCOPE",
+                   "--follow", "8000")
+    # Whether the Neow page has already mounted decides between the two
+    # replayable boundaries; both belong to the run new-run just minted.
+    assert launched["outcome"] in (SETTLEMENT_OUTCOME.SETTLED,
+                                   SETTLEMENT_OUTCOME.NEXT_DECISION), launched
+    accepted_run = launched["runId"]
+    assert accepted_run != "none", launched
+    bridge.wait_phase(PHASE.EVENT)
+    # Parked option work holds every follow window in this run open.
+    run("cheat", "event-orphan")
+
+    followed = {}
+
+    def follow_gold():
+        followed["status"], followed["response"] = http("POST", "/step", {
+            "action": "cheat", "args": {"name": "gold", "value": 77},
+            "follow": 9000})
+
+    def gold_accepted():
+        return any(verb["action"] == "cheat"
+                   and verb.get("args", {}).get("name") == "gold"
+                   for verb in run("runlog")["verbs"])
+
+    follower = threading.Thread(target=follow_gold)
+    follower.start()
+    try:
+        # Acceptance precedes the follow window and is visible in the run
+        # log, so wait for it instead of racing a sleep.
+        deadline = time.monotonic() + 15
+        while not gold_accepted():
+            assert time.monotonic() < deadline, "the gold cheat was never accepted"
+            time.sleep(0.05)
+        abandoned = run("abandon", "--follow", "5000")
+    finally:
+        follower.join(60)
+    assert not follower.is_alive(), "the followed verb never came back"
+
+    status, unowned = followed["status"], followed["response"]
+    assert status == 200 and unowned.get("ok") is True, unowned
+    assert unowned["acceptedRunId"] == accepted_run, unowned
+    assert unowned["outcome"] == SETTLEMENT_OUTCOME.OWNER_CHANGED, unowned
+    assert unowned["settled"] is False, unowned
+    assert unowned["runId"] != accepted_run, unowned
+
+    # abandon owns the transition it asked for: still a real boundary.
+    assert abandoned["settled"] is True, abandoned
+    assert abandoned["outcome"] in (SETTLEMENT_OUTCOME.SETTLED,
+                                    SETTLEMENT_OUTCOME.NEXT_DECISION), abandoned
+    assert abandoned["runId"] == "none", abandoned
+    assert abandoned["obs"]["phase"] == PHASE.MAIN_MENU, abandoned["obs"]
+
+    verbs = run("runlog")["verbs"]
+    gold = next(verb for verb in reversed(verbs)
+                if verb["action"] == "cheat"
+                and verb.get("args", {}).get("name") == "gold")
+    assert gold["runId"] == accepted_run, gold
+    assert gold["outcome"] == SETTLEMENT_OUTCOME.OWNER_CHANGED, gold
+    assert "fingerprint" not in gold, gold
+    assert "phaseAfter" not in gold, gold
+    # Same-run entries keep attributing their own boundary.
+    started = next(verb for verb in verbs if verb["action"] == "new-run")
+    assert started["runId"] == accepted_run, started
+    assert started["outcome"] == launched["outcome"], (started, launched)
+    assert started.get("fingerprint"), started
+    assert started["phaseAfter"] == PHASE.EVENT, started
+
+    # Release the parked task in a fresh run (P16's shape) so the orphan
+    # slot is free for the next case.
+    launch(seed="CIOWNERNEXT")
+    released = run("cheat", "event-orphan-fault", "--follow", "3000",
+                   allow_errors=True)
+    assert released["settled"] is True, released
     to_menu()
 
 
