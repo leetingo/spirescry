@@ -33,7 +33,7 @@ internal static class RunLogRules
     // A history belongs to exactly one identified run, and starts at its
     // beginning — a follow-on prefix of somebody else's run cannot be replayed
     // from a clean menu.
-    internal static bool IsCoherent(
+    private static bool IsCoherent(
         string runId, IReadOnlyList<RunLogVerbFacts> verbs) =>
         runId != NoRun
         && verbs.Count > 0
@@ -43,7 +43,7 @@ internal static class RunLogRules
     // Only a settled or next-decision boundary yields state worth comparing
     // against; a faulted or timed-out verb left the engine somewhere replay
     // cannot check, so its fingerprint is deliberately absent.
-    internal static bool IsVerified(RunLogVerbFacts verb) =>
+    private static bool IsVerified(RunLogVerbFacts verb) =>
         verb.Outcome is { } outcome
         && outcome.IsReplayable()
         && !string.IsNullOrWhiteSpace(verb.Fingerprint);
