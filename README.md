@@ -267,6 +267,14 @@ must never be attributed to the source run.
 ./build.sh stop             # stops whichever is running
 ```
 
+Either launcher owns the child it starts. The bridge port must be free
+first; the `/health` that answers must report *this checkout's* `buildHash`
+(a 2xx from a bridge left over from another build is a failure, not a
+success); and a launch that never sees its bridge reclaims exactly the
+process it spawned before reporting failure. A successful launch records
+that child's PID and process snapshot, so `stop` signals it only while both
+still match.
+
 **In-game** boots load the mod inside the game process and drive the real
 UI. The **host** boot loads an IL-patched `sts2.dll` against a stub
 GodotSharp in a plain .NET process. Each composition root selects one
