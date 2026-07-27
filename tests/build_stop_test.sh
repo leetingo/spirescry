@@ -75,7 +75,21 @@ run_host_timeout() {
         SPIRESCRY_TEST_HOST_PIDFILE="$timeout_host_pidfile" \
         SPIRESCRY_TEST_REAL_PS="$real_ps" \
         SPIRESCRY_TEST_START_COUNT="$scratch/start-count" \
+        SPIRESCRY_TEST_COMMAND_COUNT="$scratch/command-count" \
         "$repo/build.sh" host
+}
+
+# A bare `grep -q <<<"$output"` exits 1 under `set -e` having printed
+# nothing at all, which is how a launch regression once reached CI as a
+# blank failing step. Always show what was expected and what was captured.
+assert_contains() {
+    grep -q "$3" <<<"$2" || {
+        echo "expected $1 to contain: $3" >&2
+        echo "--- captured output ---" >&2
+        echo "$2" >&2
+        echo "--- end ---" >&2
+        exit 1
+    }
 }
 
 assert_alive() {
@@ -101,7 +115,7 @@ if output="$(run_host_timeout 2>&1)"; then
     echo "bridge-less host unexpectedly reported success: $output" >&2
     exit 1
 fi
-grep -q 'bridge not up after 30s' <<<"$output"
+assert_contains 'bridge timeout message' "$output" 'bridge not up after 30s'
 [ -s "$timeout_host_pidfile" ] || {
     echo "bridge-less host did not expose its test PID" >&2
     exit 1
@@ -117,12 +131,58 @@ if ! python3 -c 'import socket, sys; s=socket.socket(); s.bind(("127.0.0.1", int
     timeout_failure=1
 fi
 stop_output="$(run_stop 2>&1)"
-grep -q 'nothing running' <<<"$stop_output"
+assert_contains 'stop after a reclaimed launch' "$stop_output" 'nothing running'
 if kill -0 "$timeout_host_pid" 2>/dev/null; then
     kill -KILL "$timeout_host_pid" 2>/dev/null || true
     timeout_failure=1
 fi
 [ "$timeout_failure" = 0 ] || exit 1
+
+# A backgrounded child does not become the host at fork: until nohup execs
+# it still carries this script's own argv. Launch must wait that window out
+# instead of concluding the PID it just forked is a stranger — doing so
+# aborted the launch AND left the child running, which is how this suite
+# once failed in CI having printed nothing at all. Report the parent's argv
+# for the first samples, then the truth.
+rm -f "$timeout_host_pidfile" "$scratch/command-count" "$fakebin/ps"
+printf '%s\n' \
+    '#!/bin/sh' \
+    'case "$*" in' \
+    '    *command=*)' \
+    '        count=0' \
+    '        [ ! -f "$SPIRESCRY_TEST_COMMAND_COUNT" ] || read -r count < "$SPIRESCRY_TEST_COMMAND_COUNT"' \
+    '        count=$((count + 1))' \
+    '        printf "%s\\n" "$count" > "$SPIRESCRY_TEST_COMMAND_COUNT"' \
+    '        if [ "$count" -le 3 ]; then' \
+    '            printf "Mon Jan  1 00:00:00 2026 /bin/bash build.sh host\\n"' \
+    '            exit 0' \
+    '        fi' \
+    '        exec "$SPIRESCRY_TEST_REAL_PS" "$@"' \
+    '        ;;' \
+    '    *) exec "$SPIRESCRY_TEST_REAL_PS" "$@" ;;' \
+    'esac' \
+    > "$fakebin/ps"
+chmod +x "$fakebin/ps"
+
+if preexec_output="$(run_host_timeout 2>&1)"; then
+    echo "pre-exec host unexpectedly reported success: $preexec_output" >&2
+    exit 1
+fi
+# Reaching the bridge deadline is the proof: the launch identified its child
+# instead of dying in the pre-exec window.
+assert_contains 'pre-exec launch' "$preexec_output" 'bridge not up after 30s'
+[ -s "$timeout_host_pidfile" ] || {
+    echo "pre-exec host did not expose its test PID" >&2
+    exit 1
+}
+preexec_pid="$(cat "$timeout_host_pidfile")"
+if kill -0 "$preexec_pid" 2>/dev/null; then
+    kill -KILL "$preexec_pid" 2>/dev/null || true
+    echo "pre-exec launch left host PID $preexec_pid running" >&2
+    exit 1
+fi
+rm -f "$fakebin/ps"
+ln -s "$real_ps" "$fakebin/ps"
 
 # A matching command is not enough identity: the kernel may recycle the PID
 # for a new invocation of that same command. Let both launch-time reads and
@@ -173,7 +233,7 @@ if output="$(run_stop 2>&1)"; then
     echo "corrupt pidfile unexpectedly reported success: $output" >&2
     exit 1
 fi
-grep -q 'invalid host pidfile' <<<"$output"
+assert_contains 'corrupt pidfile report' "$output" 'invalid host pidfile'
 
 sleep 60 &
 unrelated_pid=$!
@@ -183,7 +243,7 @@ if output="$(run_stop 2>&1)"; then
     exit 1
 fi
 assert_alive "$unrelated_pid"
-grep -q 'does not belong to this host' <<<"$output"
+assert_contains 'reused PID report' "$output" 'does not belong to this host'
 
 # An environment that cannot inspect a live PID must fail honestly: it may
 # neither discard the launch record nor guess that the process has exited.
@@ -195,7 +255,7 @@ if output="$(run_stop 2>&1)"; then
 fi
 assert_alive "$unrelated_pid"
 [ -e "$pidfile" ]
-grep -q 'cannot inspect PID' <<<"$output"
+assert_contains 'uninspectable PID report' "$output" 'cannot inspect PID'
 ln -sf "$real_ps" "$fakebin/ps"
 
 kill "$unrelated_pid"
@@ -213,7 +273,7 @@ if output="$(run_stop 2>&1)"; then
     exit 1
 fi
 assert_alive "$reused_host_pid"
-grep -q 'was reused or restarted' <<<"$output"
+assert_contains 'changed identity report' "$output" 'was reused or restarted'
 kill "$reused_host_pid"
 wait "$reused_host_pid" 2>/dev/null || true
 
@@ -230,20 +290,20 @@ if output="$(run_stop 2>&1)"; then
     exit 1
 fi
 assert_alive "$host_pid"
-grep -q 'has no saved process snapshot' <<<"$output"
+assert_contains 'snapshot-less pidfile report' "$output" 'has no saved process snapshot'
 
 host_snapshot="$(ps -p "$host_pid" -o lstart= -o command= 2>/dev/null \
     | sed -E 's/^[[:space:]]+//')"
 printf '%s\n%s\n' "$host_pid" "$host_snapshot" > "$pidfile"
 output="$(run_stop 2>&1)"
 assert_dead "$host_pid"
-grep -q 'stopped' <<<"$output"
+assert_contains 'successful stop report' "$output" 'stopped'
 [ ! -e "$pidfile" ]
 
 ln -sf /usr/bin/false "$fakebin/pgrep"
 printf '99999999\n' > "$pidfile"
 output="$(run_stop 2>&1)"
-grep -q 'nothing running' <<<"$output"
+assert_contains 'stale pidfile report' "$output" 'nothing running'
 [ ! -e "$pidfile" ]
 
 echo "build stop tests passed"

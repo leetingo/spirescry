@@ -43,6 +43,12 @@ fi
 
 HOST_DLL="$REPO/headless/Host/bin/Release/spirescry_host.dll"
 
+# How long launch_host waits for its backgrounded child to finish exec'ing
+# before it gives up on identifying it: 100 × 0.1s. Generous on purpose —
+# the window is normally sub-millisecond, and the only cost of waiting is
+# paid by a launch that was going to fail anyway.
+HOST_IDENTIFY_ATTEMPTS=100
+
 # Stamped into both builds; /health reports it as buildHash so a running
 # host can be matched to its build inputs. A git ref alone cannot do
 # that: it misses source edits made after the build (dirty or not) and a
@@ -326,18 +332,46 @@ launch_host() {
     step "launch host (bridge port $STS2_AGENT_PORT, log $log)"
     nohup dotnet "$HOST_DLL" > "$log" 2>&1 &
     host_pid=$!
+    # A backgrounded child is not `dotnet` at fork: between bash's fork and
+    # nohup's execve it still carries this script's argv, or is not yet
+    # visible to `ps` at all. A single sample taken microseconds after `&`
+    # therefore fails to identify a perfectly healthy host — a race that
+    # stranded the child and exited with no diagnostics at all in CI. Poll
+    # until the exec lands, and stop early only when the child really died.
+    host_identified=0
+    host_snapshot=""
+    host_attempt=0
+    while [ "$host_attempt" -lt "$HOST_IDENTIFY_ATTEMPTS" ]; do
+        host_attempt=$((host_attempt + 1))
+        if [ "$(process_state "$host_pid")" = dead ]; then break; fi
+        host_snapshot_status=0
+        host_snapshot="$(process_snapshot "$host_pid")" || host_snapshot_status=$?
+        if [ "$host_snapshot_status" = 0 ] \
+            && is_this_host_snapshot "$host_snapshot"; then
+            host_identified=1
+            break
+        fi
+        sleep 0.1
+    done
+    if [ "$host_identified" != 1 ]; then
+        if [ "$(process_state "$host_pid")" = dead ]; then
+            die "host exited before its bridge started — see $log"
+        fi
+        # Still live but never named itself: it is either uninspectable or
+        # not this host at all, and signalling a PID we cannot identify is
+        # exactly what every other path here refuses to do.
+        die "launched host PID $host_pid could not be identified — it may still be running"
+    fi
+    # Only now that the command has settled: a `ps` failure here is a real
+    # inspection failure, not the pre-exec window above.
     host_start_status=0
     host_start_identity="$(process_start_identity "$host_pid")" || host_start_status=$?
-    host_snapshot_status=0
-    host_snapshot="$(process_snapshot "$host_pid")" || host_snapshot_status=$?
     host_start_confirm_status=0
     host_start_confirm="$(process_start_identity "$host_pid")" || host_start_confirm_status=$?
     [ "$(process_state "$host_pid")" = live ] \
         && [ "$host_start_status" = 0 ] \
         && [ "$host_start_confirm_status" = 0 ] \
-        && [ "$host_start_identity" = "$host_start_confirm" ] \
-        && [ "$host_snapshot_status" = 0 ] \
-        && is_this_host_snapshot "$host_snapshot" || \
+        && [ "$host_start_identity" = "$host_start_confirm" ] || \
         die "launched host PID $host_pid could not be identified"
     # wait_bridge calls die on deadline. Run it in a subshell so launch_host
     # can still reclaim the exact child it started before returning failure.
