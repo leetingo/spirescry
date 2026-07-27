@@ -67,6 +67,21 @@ internal static class RunOwnershipRules
         return ownership != RunOwnership.StartsRun || acceptedRunId != NoRun;
     }
 
+    // A launch that has not shown its board yet has nothing to settle on.
+    // new-run is routinely accepted while RunState identity is still `none`
+    // (Signals.RefreshRunIdentity publishes a beat later), so a quiet menu
+    // under run:none is neither an owner change nor this verb's result — the
+    // run simply has not arrived. Classifying it would report settled:true
+    // with runId `none` and fingerprint the main menu as the outcome of
+    // starting a run, which is exactly what #144 forbids. Keep waiting: a
+    // launch that never leaves the menu is a timeout, and a timeout is not
+    // replayable.
+    public static bool AwaitingOwnBoard(
+        RunOwnership ownership, Phase observedPhase, bool runSeenInPlay) =>
+        ownership == RunOwnership.StartsRun
+        && observedPhase == Phase.MainMenu
+        && !runSeenInPlay;
+
     // Has the run's own board been seen? A live identity outside the main
     // menu is the only observation that proves it — including the accepted
     // phase and run id of a verb that was already dispatched inside a run.

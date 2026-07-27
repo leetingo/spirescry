@@ -115,7 +115,9 @@ board. Ownership is the run's board, not just its id: the engine can keep a
 retired run's state loaded behind a visible main menu, so a verb that was
 acting inside a run is unowned there even when the id has not changed yet.
 Only the two lifecycle verbs move their own run: `new-run` adopts the run it
-mints, `abandon` settles on the menu it asked for. If an accepted mutation is
+mints, `abandon` settles on the menu it asked for. `new-run` never settles on
+the menu it started from — a launch that never puts its board on screen
+reports `timeout`, not a replayable main-menu boundary under `run:none`. If an accepted mutation is
 followed by an
 observation or response-construction failure, the bridge still returns this
 typed envelope with `action`, `acceptedRev`, `runId`,

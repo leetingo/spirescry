@@ -190,6 +190,14 @@ internal sealed class SettlementModule
             probe = RetainObservedErrors(probe, observed, observedKeys);
             var outcome = CandidateOutcome(
                 probe, request.PhaseBefore, request.AcceptedRevision);
+            // A launch still parked on the menu has no board of its own to
+            // report yet. A fault still names the action's outcome — it is
+            // conclusive and not replayable — but every other reading of a
+            // pre-launch menu belongs to no run at all.
+            if (outcome is not SettlementOutcome.Fault
+                && RunOwnershipRules.AwaitingOwnBoard(
+                    request.Ownership, probe.Phase, runSeenInPlay))
+                outcome = null;
             if (outcome is { } candidate)
             {
                 // A fault token is conclusive even if opaque engine work is

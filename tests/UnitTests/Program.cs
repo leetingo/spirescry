@@ -477,6 +477,68 @@ internal static class Tests
         Equal("fresh-run", result.Probe.RunId);
     }
 
+    public static void SettlementDeniesNewRunAMenuBoundaryBeforeItsRunIsUp()
+    {
+        // #144, the last shape the ownership check alone cannot see: new-run
+        // is accepted while identity is still `none`, and the launch stalls
+        // (or a foreign abandon lands) with the window open. The next probe
+        // reads a quiet main menu under run:none — the accepted identity, so
+        // no owner change — and quiet is Settled, which is replayable. That
+        // would fingerprint the main menu as the result of starting a run.
+        // A launch that never leaves the menu is a timeout, not a boundary.
+        var clock = new FakeSettlementClock();
+        var ticks = new FakeSettlementTicks(clock, 5,
+            Probe(revision: 6, phase: Phase.MainMenu, busy: false,
+                runId: RunOwnershipRules.NoRun));
+        var module = new SettlementModule(ticks, clock);
+
+        var result = module.Follow(Request(
+            timeoutMs: 5,
+            phaseBefore: Phase.MainMenu,
+            acceptedRunId: RunOwnershipRules.NoRun,
+            ownership: RunOwnership.StartsRun))
+            .GetAwaiter().GetResult();
+
+        Equal(SettlementOutcome.Timeout, result.Outcome);
+        False(result.Outcome.IsReplayable());
+    }
+
+    public static void SettlementStillReportsALaunchFaultOnTheMenu()
+    {
+        // Waiting for the board out is not a reason to sit on a fault: it
+        // names the action's own outcome and is never replayable.
+        var clock = new FakeSettlementClock();
+        var ticks = new FakeSettlementTicks(clock, 5,
+            Probe(revision: 6, phase: Phase.MainMenu, busy: false,
+                runId: RunOwnershipRules.NoRun, errors: ["fault:launch"]));
+        var module = new SettlementModule(ticks, clock);
+
+        var result = module.Follow(Request(
+            timeoutMs: 100,
+            phaseBefore: Phase.MainMenu,
+            acceptedRunId: RunOwnershipRules.NoRun,
+            ownership: RunOwnership.StartsRun))
+            .GetAwaiter().GetResult();
+
+        Equal(SettlementOutcome.Fault, result.Outcome);
+        Equal(1, ticks.Captures);
+    }
+
+    public static void RunOwnershipMakesALaunchWaitForItsOwnBoard()
+    {
+        // Only new-run, only the menu, only before its board has been seen.
+        True(RunOwnershipRules.AwaitingOwnBoard(
+            RunOwnership.StartsRun, Phase.MainMenu, runSeenInPlay: false));
+        False(RunOwnershipRules.AwaitingOwnBoard(
+            RunOwnership.StartsRun, Phase.MainMenu, runSeenInPlay: true));
+        False(RunOwnershipRules.AwaitingOwnBoard(
+            RunOwnership.StartsRun, Phase.Map, runSeenInPlay: false));
+        False(RunOwnershipRules.AwaitingOwnBoard(
+            RunOwnership.EndsRun, Phase.MainMenu, runSeenInPlay: false));
+        False(RunOwnershipRules.AwaitingOwnBoard(
+            RunOwnership.Bound, Phase.MainMenu, runSeenInPlay: false));
+    }
+
     public static void SettlementDeniesNewRunAMenuBoundaryOnceItsRunIsUp()
     {
         // A launch reads main_menu under a concrete run id while the local
