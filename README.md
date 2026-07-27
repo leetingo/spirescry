@@ -409,6 +409,13 @@ so no one is tempted to reach for `--quick` over someone else's bug. Any
 other fault still fails, and a quarantined entry that starts passing fails
 too — the list only shrinks (`tests/sweep_quarantine_test.py`).
 
+Each e2e case is named `<id> <what it proves>`, and the id is its handle:
+`python3 tests/e2e.py --only P14` runs exactly that one case (any other
+pattern is a case-name prefix, so `--only M` runs the M family). Ids are
+unique — registering a second case under a taken id raises at import, naming
+the id and both titles, and `tests/e2e_case_ids_test.py` holds that in place
+so two branches cannot each add the same id and only collide on merge.
+
 CI runs only the pure unit tests (`unit-tests.yml`, GitHub-hosted): the
 host is built from the game's non-distributable dlls, so the end-to-end
 suite stays local — **run `./build.sh gate` before merging**. A green CI
