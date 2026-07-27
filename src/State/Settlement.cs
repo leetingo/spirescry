@@ -12,11 +12,21 @@ internal static class SettlementOutcomeRules
     public static string WireName(this SettlementOutcome outcome) =>
         ProtocolVocabulary.SettlementOutcomes.Name(outcome);
 
+    // Both non-boundary outcomes leave the accepted action's own result
+    // unobserved: a timeout ran out of window, an owner change lost the run
+    // the window was watching.
     public static bool ReachedBoundary(this SettlementOutcome outcome) =>
-        outcome is not SettlementOutcome.Timeout;
+        outcome is not (SettlementOutcome.Timeout or SettlementOutcome.OwnerChanged);
 
     public static bool IsReplayable(this SettlementOutcome outcome) =>
         outcome is SettlementOutcome.Settled or SettlementOutcome.NextDecision;
+
+    // An owner change parks on a board the verb never acted on — another
+    // run's, or the main menu's. Its phase and fingerprint belong to that
+    // board, so nothing derived from the observation may be attributed to
+    // this verb.
+    public static bool OwnsObservation(this SettlementOutcome outcome) =>
+        outcome is not SettlementOutcome.OwnerChanged;
 }
 
 internal sealed record SettlementRequest(
@@ -25,7 +35,8 @@ internal sealed record SettlementRequest(
     long AcceptedRevision,
     long AcceptedTick,
     int TimeoutMs,
-    string AcceptedRunId = "none");
+    string AcceptedRunId = "none",
+    RunOwnership Ownership = RunOwnership.Bound);
 
 internal sealed record SettlementProbe(
     long Tick,
@@ -144,6 +155,11 @@ internal sealed class SettlementModule
         // Settled is replayable.
         var observed = new List<string>();
         var observedKeys = new HashSet<string>(StringComparer.Ordinal);
+        // A verb dispatched inside a run has already seen its board; new-run
+        // has not until a probe shows one, because a launch reads main_menu
+        // while the local seat mounts.
+        var runSeenInPlay = RunOwnershipRules.SeenInPlay(
+            request.AcceptedRunId, request.PhaseBefore);
 
         while (true)
         {
@@ -156,9 +172,32 @@ internal sealed class SettlementModule
             {
                 return FaultResult(request, "observation", exception, observed);
             }
+            // Ownership outranks every other reading of this probe, and is
+            // settled before its errors are folded in. Once the accepted run
+            // is not the board on screen, the phase, the queues and the quiet
+            // all describe somebody else's game — classifying them would
+            // report a boundary this action never reached (and, for Settled, a
+            // replayable one), and this capture's fresh fault tokens may have
+            // been logged by whoever took the run away. Only the tokens
+            // already observed while the run was still ours ride along.
+            if (RunOwnershipRules.IsOwnerChange(
+                request.Ownership, request.AcceptedRunId, probe.RunId,
+                probe.Phase, runSeenInPlay))
+                return new SettlementResult(
+                    SettlementOutcome.OwnerChanged,
+                    probe with { Errors = observed.ToArray() });
+            runSeenInPlay |= RunOwnershipRules.SeenInPlay(probe.RunId, probe.Phase);
             probe = RetainObservedErrors(probe, observed, observedKeys);
             var outcome = CandidateOutcome(
                 probe, request.PhaseBefore, request.AcceptedRevision);
+            // A launch still parked on the menu has no board of its own to
+            // report yet. A fault still names the action's outcome — it is
+            // conclusive and not replayable — but every other reading of a
+            // pre-launch menu belongs to no run at all.
+            if (outcome is not SettlementOutcome.Fault
+                && RunOwnershipRules.AwaitingOwnBoard(
+                    request.Ownership, probe.Phase, runSeenInPlay))
+                outcome = null;
             if (outcome is { } candidate)
             {
                 // A fault token is conclusive even if opaque engine work is

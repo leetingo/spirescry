@@ -77,19 +77,29 @@ public static class RunLog
         {
             var entry = Verbs.FirstOrDefault(verb => verb.Id == entryId);
             if (entry is null) return;
+            // The observation behind an owner change was captured from
+            // another run, or from the menu the accepted run was retired to.
+            // Nothing read off that board — the run it names, the phase it
+            // parked in, its fingerprint — describes this verb, so the entry
+            // keeps only what it owns: the outcome, plus the fault tokens
+            // SettlementModule.Follow had already observed while the accepted
+            // run was still the board on screen.
+            var ownsObservation = outcome.OwnsObservation();
             var observedRunId = observation.RunId;
-            if (entry.Action == RunLogRules.OpeningAction
+            if (ownsObservation
+                && entry.Action == RunLogRules.OpeningAction
                 && observedRunId is not (null or RunLogRules.NoRun)
                 && CanAdopt(observedRunId))
                 AdoptRun(observedRunId, captureMetadata: false);
             entry.Outcome = outcome;
-            entry.PhaseAfter = observation.PhaseName;
+            if (ownsObservation)
+                entry.PhaseAfter = observation.PhaseName;
             // Engine faults during this verb's window: preserved in the
             // diagnostic recipe so a polluted run stays attributable even
             // after the host log rotates away.
             if (errors is { Length: > 0 })
                 entry.Errors = errors.ToArray();
-            entry.Fingerprint = outcome.IsReplayable()
+            entry.Fingerprint = ownsObservation && outcome.IsReplayable()
                 ? Fingerprint(observation)
                 : null;
         }

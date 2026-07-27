@@ -92,11 +92,12 @@ public sealed class HttpBridge
                 ("GET", "/health") => await Handlers.Health(),
                 ("GET", "/models") => await Handlers.Models(req.QueryString["kind"]),
                 ("GET", "/runlog") => await Handlers.GetRunLog(),
+                // The raw query, not the parsed collection: a valueless
+                // `?compact` lands under that collection's null key, which
+                // reads back as an omitted parameter. ObservationQuery
+                // splits it itself. `known` is repeatable and unaffected.
                 ("GET", "/obs") => await Handlers.Obs(
-                    req.QueryString["since"], req.QueryString["wait"],
-                    req.QueryString["compact"], req.QueryString["decision"],
-                    req.QueryString.GetValues("known"),
-                    req.QueryString["semanticState"]),
+                    req.Url?.Query, req.QueryString.GetValues("known")),
                 ("POST", "/step") => await Handlers.Step(body),
                 _ => Response.Error(RejectionCodes.NotFound, $"no route {req.HttpMethod} {path}", 404),
             };

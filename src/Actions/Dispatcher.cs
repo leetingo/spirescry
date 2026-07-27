@@ -66,6 +66,21 @@ public static class Dispatcher
     public static readonly string[] Cheats =
         ProtocolVocabulary.Cheats.All.Select(shape => shape.Name).ToArray();
 
+    // Fixtures for the ordinary fire-and-forget ownership regression: one
+    // parked task per host, released on demand down either channel a
+    // completion can take into the wrong run — the task's own fault, or an
+    // engine Error line the engine logs and swallows.
+    private const int OrphanAsyncReleaseDelayMs = 200;
+    private const string OrphanAsyncLabel = "orphan-async";
+    private const string OrphanAsyncFaultMessage =
+        "forced orphan fire-and-forget failure";
+    private const string OrphanAsyncLogMessage =
+        "SpirescryForcedException: forced orphan fire-and-forget engine log "
+        + "error (cheat async-orphan-log)";
+    private static TaskCompletionSource<OrphanAsyncRelease>? _orphanAsync;
+
+    private enum OrphanAsyncRelease { Fault, EngineLog }
+
     public static DispatchResult Dispatch(string action, JsonElement args) => action switch
     {
         "new-run" => NewRun(args),
@@ -110,6 +125,12 @@ public static class Dispatcher
             "stars" => SetCombatResource("Stars", args),
             "energy" => SetCombatResource("Energy", args),
             "async-fault" => CheatAsyncFault(),
+            "async-orphan" => CheatAsyncOrphan(),
+            "async-orphan-ends-run" => CheatAsyncOrphan(endsRun: true),
+            "async-orphan-fault" =>
+                CheatAsyncOrphanRelease(OrphanAsyncRelease.Fault),
+            "async-orphan-log" =>
+                CheatAsyncOrphanRelease(OrphanAsyncRelease.EngineLog),
             "engine-error" => CheatEngineError(),
             "engine-error-delayed" => CheatEngineErrorDelayed(),
             "observation-fault" => CheatObservationFault(),
@@ -130,6 +151,64 @@ public static class Dispatcher
     {
         DecisionSurfaceActions.Track(ForcedAsyncFault(), "forced-async-fault");
         return DispatchResult.Success();
+    }
+
+    // Parks an ordinary fire-and-forget task under the CURRENT run so a
+    // later release can land it from a run that has since been abandoned:
+    // the ordinary-work twin of the event-orphan cheats. Requires a run —
+    // menu work is adopted by the run it brings up, so a parked menu task
+    // would be reported as that run's, which is not what this tests.
+    //
+    // `endsRun` parks it the way `abandon` tracks its teardown instead:
+    // owned by the run, but exempt from the rotation that run's own
+    // departure causes, so its failure stays reportable at the menu.
+    private static DispatchResult CheatAsyncOrphan(bool endsRun = false)
+    {
+        if (LocalRunContext.StateOnly is null)
+            return DispatchResult.Reject(RejectionCodes.BadState,
+                "requires an active run to own the parked work");
+        if (_orphanAsync is { Task.IsCompleted: false })
+            return DispatchResult.Reject(RejectionCodes.BadState,
+                "an orphan async task is already parked");
+        _orphanAsync = new TaskCompletionSource<OrphanAsyncRelease>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        DecisionSurfaceActions.Track(
+            ParkedOrphanAsync(_orphanAsync.Task), OrphanAsyncLabel, endsRun);
+        return DispatchResult.Success();
+    }
+
+    // Releases the parked task behind a short delay, so the caller chooses
+    // whether it lands at the menu or inside the next new-run window, and
+    // which channel it lands on.
+    private static DispatchResult CheatAsyncOrphanRelease(
+        OrphanAsyncRelease release)
+    {
+        if (_orphanAsync is not { } orphan)
+            return DispatchResult.Reject(RejectionCodes.BadState,
+                "no orphan async task is parked");
+        _orphanAsync = null;
+        _ = ReleaseOrphanAsync(orphan, release);
+        return DispatchResult.Success();
+    }
+
+    // The parked work itself. Its await captures the execution context of
+    // the job that started it, so the engine log line below is written from
+    // inside the owning run's async flow — exactly like the engine's own
+    // log-and-swallow chains.
+    private static async Task ParkedOrphanAsync(
+        Task<OrphanAsyncRelease> release)
+    {
+        if (await release.ConfigureAwait(false) == OrphanAsyncRelease.Fault)
+            throw new InvalidOperationException(OrphanAsyncFaultMessage);
+        MegaCrit.Sts2.Core.Logging.Log.Error(OrphanAsyncLogMessage);
+    }
+
+    private static async Task ReleaseOrphanAsync(
+        TaskCompletionSource<OrphanAsyncRelease> orphan,
+        OrphanAsyncRelease release)
+    {
+        await Task.Delay(OrphanAsyncReleaseDelayMs).ConfigureAwait(false);
+        orphan.TrySetResult(release);
     }
 
     // Drives the engine's own Error logger synchronously — the regression
@@ -333,6 +412,8 @@ public static class Dispatcher
             ? CombatManager.Instance!.DebugOnlyGetState()!
             : run.State;
         var card = scope.CreateCard(proto, player);
+        if (StampConstructionContext(card, entry, player) is { } cardCtxErr)
+            return cardCtxErr;
         var makeUpgraded = args.TryGetProperty("upgraded", out var upgraded)
             && upgraded.ValueKind == JsonValueKind.True;
         if (TryGetString(args, "name", out var cheatName) && cheatName == "card-upgraded")
@@ -372,12 +453,62 @@ public static class Dispatcher
             BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance,
             binder: null, types: [typeof(Player)], modifiers: null)
             ?.Invoke(relic, [player]);
+        if (StampConstructionContext(relic, entry, player) is { } relicCtxErr)
+            return relicCtxErr;
 
         // Pickup relics such as ASTROLABE open a deck picker from their
         // AfterObtained hook. The selected decision surface owns whether
         // that task settles inline or parks on its choice completion.
         return FromDecisionSurface(
             DecisionSurface.Current.ObtainRelic(relic, player));
+    }
+
+    // Context-bound content (SEA_GLASS, MAD_SCIENCE, …) is never constructed
+    // bare by the game: its event or reward factory stamps a saved property
+    // first and the model's own code assumes it. Direct injection has to do
+    // the same or the sweeps read the model's justified complaint as a
+    // product fault. ContextBoundContent owns which models and which values;
+    // resolving them against engine types is this side of the seam.
+    //
+    // A missing property means the game renamed it — reject loudly rather
+    // than inject an unconfigured model and blame the engine for the fallout.
+    private static DispatchResult? StampConstructionContext(
+        object model, string entry, Player player)
+    {
+        foreach (var context in ContextBoundContent.For(entry))
+        {
+            if (Reflect.PropertyType(model, context.Property) is not { } declared)
+                return DispatchResult.Reject(RejectionCodes.Internal,
+                    $"'{entry}' needs construction context '{context.Property}', "
+                    + $"which {model.GetType().Name} no longer exposes");
+
+            object? value;
+            switch (context.Value)
+            {
+                case ConstructionValue.OwnerCharacterId:
+                    value = player.Character?.Id;
+                    if (value is null)
+                        return DispatchResult.Reject(RejectionCodes.BadState,
+                            $"'{entry}' needs an owning character, and the local player has none");
+                    break;
+                case ConstructionValue.EnumMember:
+                    var target = Nullable.GetUnderlyingType(declared) ?? declared;
+                    if (!target.IsEnum
+                        || !Enum.TryParse(target, context.Member, out value))
+                        return DispatchResult.Reject(RejectionCodes.Internal,
+                            $"'{entry}' needs {context.Property} = {context.Member}, "
+                            + $"which is not a member of {target.Name}");
+                    break;
+                default:
+                    return DispatchResult.Reject(RejectionCodes.Internal,
+                        $"'{entry}' declares an unknown construction value {context.Value}");
+            }
+
+            if (!Reflect.SetProperty(model, context.Property, value))
+                return DispatchResult.Reject(RejectionCodes.Internal,
+                    $"'{entry}' construction context '{context.Property}' has no setter");
+        }
+        return null;
     }
 
     // Leaves every enemy at 1 HP with no block, so one normal play ends the
@@ -658,9 +789,11 @@ public static class Dispatcher
         if (!TryGetInt(args, "idx", out var idx))
             return DispatchResult.Reject(RejectionCodes.BadRequest,
                 "missing or invalid args.idx (32-bit integer required)");
-        if (idx < 0)
-            return DispatchResult.Reject(RejectionCodes.BadIndex,
-                $"{kind} idx {idx} must be non-negative");
+        // Whatever the request alone settles — a negative idx, or any idx but
+        // the one obs.cardRemoval publishes. MerchantRules states it so the
+        // observation and this reject cannot disagree.
+        if (MerchantRules.BuyIndexRejection(kind, idx) is { } indexErr)
+            return DispatchResult.Reject(indexErr.Code, indexErr.Message);
 
         if (RequireRunContext(out var run, "shop inventory not available") is { } runErr)
             return runErr;
@@ -954,14 +1087,10 @@ public static class Dispatcher
         // Mirror the potion popup's model-layer gates. The headless fallback
         // covers only the custom UI-node check: Phase.Shop has already
         // established the semantic MerchantRoom and host mode intentionally
-        // has no NMerchantButton to satisfy that check.
-        var usable = potion is FoulPotion
-            && potion.Usage == PotionUsage.AnyTime
-            && player.Creature is { IsDead: false }
-            && player.CanUseOrRemovePotions
-            && DecisionSurface.Current
-                .MerchantPotionInteractionAvailable(potion);
-        if (!usable)
+        // has no NMerchantButton to satisfy that check. The snapshot marks
+        // the belt entry `playable` through this same gate, so obs.legal's
+        // potion-use and this reject cannot disagree.
+        if (!MerchantPotionGate.Redeemable(potion, player))
             return DispatchResult.Reject(RejectionCodes.NotPlayable,
                 $"{potion.Id.Entry} has no available merchant interaction in this shop");
         return FromDecisionSurface(
