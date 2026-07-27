@@ -6,6 +6,17 @@ by their own legality rules reject cleanly; potions fire; relic obtain
 hooks land. Combinatorial interactions stay out of scope (they're
 sampled by parity/V1).
 
+Most content is directly executable: injecting the model is the same
+thing the game does. A few models are context-bound — their event or
+reward factory stamps a saved property first and the model's own code
+assumes it (MAD_SCIENCE gets its card type from TINKER_TIME, SEA_GLASS
+its owning character from OROBAS). Raw injection of those is a broken
+fixture, not gameplay, so the bridge applies the construction context at
+injection and advertises it as `context` on the /models entry. These
+sweeps read that flag and insist every context-bound model is actually
+exercised — a fixture that quietly stops applying must not read as a
+clean sweep.
+
 All sweeps assume a live bridge (tests/e2e.py boots one) and leave the
 world at the main menu. Each returns a dict of failures: {} == clean.
 """
@@ -60,6 +71,19 @@ def model_entries(kind):
         return json.load(r)["entries"]
 
 
+def context_bound(entries):
+    """The models the bridge has to construct with an event/character
+    context. They must be exercised, never skipped: a fixture that stops
+    applying would otherwise hide behind a clean legality rejection."""
+    return {e["model"] for e in entries if e.get("context")}
+
+
+def unexercised(bound, exercised):
+    """A named failure for every context-bound model that never ran."""
+    return {model: "context-bound model was never exercised"
+            for model in sorted(bound - exercised)}
+
+
 def fresh_run(seed="SWEEP", character="IRONCLAD"):
     d = obs()
     if d.get("phase") != bridge.PHASE.MAIN_MENU:
@@ -68,8 +92,8 @@ def fresh_run(seed="SWEEP", character="IRONCLAD"):
             bridge.PHASE.MAIN_MENU, after_rev=d["rev"])
     bridge.launch_run(
         character=character, seed=seed, timeout=30)
-    run("proceed")
-    bridge.wait_phase(bridge.PHASE.MAP, timeout=20)
+    # Neow owes the seat a decision; proceed only opens once it is taken.
+    bridge.walk_world(bridge.PHASE.MAP)
 
 
 def wedge_events(since):
@@ -148,12 +172,14 @@ def cards(log=print, only=None):
     to reject as unplayable rather than fault."""
     failures = {}
     skipped = []
+    executed = set()
     playable_attempts = 0
     playable_executed = 0
     entries = sorted(model_entries("card"), key=lambda e: (
         POOL_CHARACTER.get(e.get("pool"), "IRONCLAD"), e["model"]))
     if only is not None:
         entries = [e for e in entries if e["model"] in only]
+    bound = context_bound(entries)
     log(f"{len(entries)} cards to sweep")
     active_character = POOL_CHARACTER.get(entries[0].get("pool"), "IRONCLAD")
     fresh_run(character=active_character)
@@ -231,6 +257,7 @@ def cards(log=print, only=None):
                 continue
             plays_in_fight += 1
             playable_executed += 1
+            executed.add(card)
             ph = bridge.walk_world(
                 initial=followed["obs"], **TRANSIENT_CLAIMS)["phase"]
             w = wedge_events(rev)
@@ -253,6 +280,13 @@ def cards(log=print, only=None):
         if (i + 1) % 50 == 0:
             log(f"  ...{i + 1}/{len(entries)} ({len(failures)} failures)")
     log(f"  cleanly rejected by card legality: {len(skipped)}")
+    if bound:
+        log(f"  context-bound cards executed: "
+            f"{len(bound & executed)}/{len(bound)} ({','.join(sorted(bound))})")
+        # A model that already failed keeps its own, more specific reason.
+        failures.update({model: why for model, why
+                         in unexercised(bound, executed).items()
+                         if model not in failures})
     # A named legality rejection is valid for cards that require a state the
     # generic sandbag cannot manufacture, but it must not let a broken play
     # path turn the whole sweep green. Require the large majority of cards
@@ -276,11 +310,13 @@ def cards(log=print, only=None):
 
 # ---------- sweep: every potion ----------
 
-def potions(log=print):
+def potions(log=print, only=None):
     """Procure and drink every potion; combat-gated ones fire against
     the sandbag, the rest on the map."""
     failures = {}
     ids = [e["model"] for e in model_entries("potion")]
+    if only is not None:
+        ids = [p for p in ids if p in only]
     log(f"{len(ids)} potions to sweep")
     fresh_run()
     enter_sandbag()
@@ -354,7 +390,9 @@ def relics(log=print):
     this module's atomic, not combinatorial, coverage contract.
     """
     failures = {}
-    ids = [e["model"] for e in model_entries("relic")]
+    entries = model_entries("relic")
+    ids = [e["model"] for e in entries]
+    bound = context_bound(entries)
     log(f"{len(ids)} relics to sweep")
     fresh_run("SWEEPREL")
 
@@ -377,6 +415,7 @@ def relics(log=print):
 
     legal_rejects = 0
     verified = 0
+    exercised = set()
     for i, relic in enumerate(ids):
         error = grant_and_settle(relic)
         if error == "LEGAL_REJECT":
@@ -396,26 +435,39 @@ def relics(log=print):
             failures[relic] = error
             return failures
         verified += 1
+        exercised.add(relic)
         if (i + 1) % 50 == 0:
             n = len(obs()["player"]["relics"])
             log(f"  ...{i + 1}/{len(ids)} verified (current belt shows {n})")
     log(f"  {verified} legal obtain hooks completed; "
         f"{legal_rejects} context-ineligible relics rejected cleanly")
+    if bound:
+        log(f"  context-bound relics exercised: "
+            f"{len(bound & exercised)}/{len(bound)} ({','.join(sorted(bound))})")
+        failures.update(unexercised(bound, exercised))
     run("abandon", allow_fail=True)
     return failures
 
 
 if __name__ == "__main__":
-    sweep = sys.argv[1] if len(sys.argv) == 2 else ""
+    sweep = sys.argv[1] if len(sys.argv) in (2, 3) else ""
     choices = {
         "encounters": encounters,
         "cards": cards,
         "potions": potions,
         "relics": relics,
     }
+    # The per-entry sweeps take an id list, which re-verifies a single fix in
+    # seconds instead of paying for the whole sweep. Filtered runs skip the
+    # coverage floor and the batch-pollution retry, so they are a debugging
+    # aid, not a substitute for the full sweep.
+    filterable = {"cards", "potions"}
     if sweep not in choices:
-        sys.exit("usage: sweeps.py encounters|cards|potions|relics")
-    failed = choices[sweep]()
+        sys.exit("usage: sweeps.py encounters|cards|potions|relics [ID,ID,...]")
+    if len(sys.argv) == 3 and sweep not in filterable:
+        sys.exit(f"sweeps.py {sweep} cannot be filtered by id")
+    failed = (choices[sweep](only=set(sys.argv[2].split(",")))
+              if len(sys.argv) == 3 else choices[sweep]())
     # Name the failures — a bare exit code forces a full re-run under a
     # debugger just to learn WHICH entry broke.
     for name, why in failed.items():

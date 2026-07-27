@@ -14,23 +14,41 @@
     <Compile Include="../../src/Reflect.cs" Link="Reflect.cs" />
     <Compile Include="../../src/RejectionCodes.cs" Link="RejectionCodes.cs" />
     <Compile Include="../../src/Bridge/ResponseEnvelope.cs" Link="ResponseEnvelope.cs" />
+    <Compile Include="../../src/Bridge/ObservationQuery.cs" Link="ObservationQuery.cs" />
     <Compile Include="../../src/State/Settlement.cs" Link="Settlement.cs" />
     <Compile Include="../../src/State/SettlementObservationCapture.cs" Link="SettlementObservationCapture.cs" />
     <Compile Include="../../src/State/RichText.cs" Link="RichText.cs" />
     <Compile Include="../../src/State/CardSpecifier.cs" Link="CardSpecifier.cs" />
     <Compile Include="../../src/State/CollectionSnapshot.cs" Link="CollectionSnapshot.cs" />
+    <Compile Include="../../src/State/ContextBoundContent.cs" Link="ContextBoundContent.cs" />
     <Compile Include="../../src/State/ConsumerSemanticRead.cs" Link="ConsumerSemanticRead.cs" />
     <Compile Include="../../src/State/CardPlayability.cs" Link="CardPlayability.cs" />
     <Compile Include="../../src/State/SnapshotContract.cs" Link="SnapshotContract.cs" />
     <Compile Include="../../src/State/DecisionProjection.cs" Link="DecisionProjection.cs" />
+    <Compile Include="../../src/State/MerchantRules.cs" Link="MerchantRules.cs" />
     <Compile Include="../../src/State/ErrorEvents.cs" Link="ErrorEvents.cs" />
     <Compile Include="../../src/State/EngineLogCorrelation.cs" Link="EngineLogCorrelation.cs" />
     <Compile Include="../../src/State/EventOptionTracker.cs" Link="EventOptionTracker.cs" />
+    <Compile Include="../../src/State/AsyncWorkOwner.cs" Link="AsyncWorkOwner.cs" />
+    <Compile Include="../../src/State/FireAndForgetTracker.cs" Link="FireAndForgetTracker.cs" />
     <Compile Include="../../src/State/RunOutcomeRules.cs" Link="RunOutcomeRules.cs" />
+    <Compile Include="../../src/State/ProceedReadiness.cs" Link="ProceedReadiness.cs" />
+    <Compile Include="../../src/State/RestSiteSeat.cs" Link="RestSiteSeat.cs" />
+    <Compile Include="../../src/State/RunLogRules.cs" Link="RunLogRules.cs" />
+    <Compile Include="../../src/State/SelectionProjection.cs" Link="SelectionProjection.cs" />
+    <Compile Include="../../src/State/RunOwnershipRules.cs" Link="RunOwnershipRules.cs" />
     <Compile Include="../../src/State/RevisionJournal.cs" Link="RevisionJournal.cs" />
     <Compile Include="../../src/State/TaskFault.cs" Link="TaskFault.cs" />
     <Compile Include="../../headless/Host/FirstChanceFilter.cs" Link="FirstChanceFilter.cs" />
     <Compile Include="../../headless/Host/HostPatchBatch.cs" Link="HostPatchBatch.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The headless Godot stubs stand in for GodotSharp at runtime, so their
+         public shape is an ABI the game assemblies bind against. Referencing
+         them here puts that shape under the unit tests CI does run — building
+         the host itself needs the game's non-distributable dlls. -->
+    <ProjectReference Include="../../headless/GodotStubs/GodotStubs.csproj" />
   </ItemGroup>
 
 </Project>

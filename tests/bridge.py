@@ -179,6 +179,33 @@ def _act_and_settle(snapshot, *args, deadline, on_obs=None):
     return settled
 
 
+def unselected_card(d):
+    """The lowest-index card of a picker that is not already selected.
+
+    `card_select` carries a per-card `selected` flag; `hand_select`
+    publishes only the top-level `selected` selector list, so a card's own
+    flag reads `None` there. Consume that list positionally instead of
+    treating every card as unselected: without it a picker asking for two
+    of five cards toggles index 0 on and off until the walker gives up
+    ("world exceeded 120 revision-driven steps ... hand_select" — CHARGE
+    and HIDDEN_DAGGERS in the M2 sweep). Two copies of one model are
+    interchangeable to the walker, so consuming in index order is exact
+    for the only pattern it produces: always take the lowest free index.
+    """
+    pending = list(d.get("selected") or [])
+    for card in d.get("cards", []):
+        flag = card.get("selected")
+        if flag:
+            continue
+        if flag is None:
+            key = card.get("selector") or card.get("model")
+            if key in pending:
+                pending.remove(key)
+                continue
+        return card
+    return None
+
+
 def kill_current_combat(*, on_obs=None, timeout=60, initial=None):
     """Cheat-kill the current combat, resolving any picker it opens."""
     deadline = time.monotonic() + timeout
@@ -188,12 +215,13 @@ def kill_current_combat(*, on_obs=None, timeout=60, initial=None):
     used_potion = False
     for _ in range(90):
         if d["phase"] in (PHASE.HAND_SELECT, PHASE.CARD_SELECT):
+            free = unselected_card(d)
             if d.get("confirmable"):
                 d = _act_and_settle(
                     d, "confirm", deadline=deadline, on_obs=on_obs)
-            elif d.get("cards"):
+            elif free is not None:
                 d = _act_and_settle(
-                    d, "pick-card", str(d["cards"][0]["idx"]),
+                    d, "pick-card", str(free["idx"]),
                     deadline=deadline, on_obs=on_obs)
             else:
                 raise AssertionError(
@@ -271,9 +299,7 @@ def resolve_transient_phase(d, *, claim_reward_tiles=False,
         if d.get("confirmable"):
             return _follow_before(deadline, "confirm")
         else:
-            card = next(
-                (card for card in d.get("cards", [])
-                 if not card.get("selected")), None)
+            card = unselected_card(d)
             if card is None:
                 raise AssertionError(
                     f"{phase} has neither selectable cards nor confirm")
@@ -299,6 +325,17 @@ def resolve_transient_phase(d, *, claim_reward_tiles=False,
         return _follow_before(deadline, "skip")
     elif phase == PHASE.SHOP:
         return _follow_before(deadline, "leave")
+    elif phase == PHASE.REST_SITE and not d.get("proceedAvailable"):
+        # A rest site owes the seat a decision before it can be left; proceed
+        # is rejected until one option has actually been spent. An option can
+        # decline without consuming anything, so work down the list instead
+        # of retrying the first one until the deadline.
+        for option in [o for o in d.get("options", []) if o.get("enabled")]:
+            d = _follow_before(deadline, "option", str(option["idx"]))
+            if d.get("phase") != PHASE.REST_SITE or d.get("proceedAvailable"):
+                return d
+        raise AssertionError(
+            "rest site advertises neither a spendable option nor a way out")
     else:
         return _follow_before(deadline, "proceed")
 
@@ -309,6 +346,40 @@ _TRANSIENT_PHASES = {
     PHASE.RELIC_REWARD,
 }
 _TERMINAL_PHASES = {PHASE.MAIN_MENU, PHASE.GAME_OVER}
+# Sub-decisions an event option can raise. Deliberately not _TRANSIENT_PHASES:
+# rewards and the crystal sphere are resolved with `proceed`, which would walk
+# out of the very room resolve_event_choices is trying to stay in.
+_EVENT_CHOICE_PICKERS = {
+    PHASE.BUNDLE_SELECT, PHASE.CARD_SELECT, PHASE.HAND_SELECT,
+    PHASE.CARD_REWARD, PHASE.RELIC_REWARD,
+}
+
+
+def resolve_event_choices(timeout=60):
+    """Take event options until the page owes the seat nothing, and stop.
+
+    `proceed` is only legal once an event has no required unresolved option,
+    so every run's opening Neow blessing — and any picker a boon opens — has
+    to be answered before the room can be left. Unlike walk_world this stays
+    in the event: callers that want to test leaving it need the page still
+    mounted.
+    """
+    deadline = time.monotonic() + timeout
+    d = obs()
+    for _ in range(40):
+        phase = d.get("phase")
+        if phase != PHASE.EVENT:
+            if phase not in _EVENT_CHOICE_PICKERS:
+                return d
+            d = resolve_transient_phase(
+                d, timeout=_remaining(deadline, "event choice to settle"))
+            continue
+        pending = [option for option in d.get("options", [])
+                   if not option.get("locked") and not option.get("chosen")]
+        if not pending:
+            return d
+        d = _follow_before(deadline, "option", str(pending[0]["idx"]))
+    raise AssertionError("event never ran out of required options")
 
 
 def walk_world(*wanted_phases, claim_reward_tiles=False,

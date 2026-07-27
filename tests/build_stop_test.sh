@@ -85,6 +85,7 @@ run_host_timeout() {
         SPIRESCRY_TEST_HOST_PIDFILE="$timeout_host_pidfile" \
         SPIRESCRY_TEST_REAL_PS="$real_ps" \
         SPIRESCRY_TEST_START_COUNT="$scratch/start-count" \
+        SPIRESCRY_TEST_COMMAND_COUNT="$scratch/command-count" \
         "$repo/build.sh" host
 }
 
@@ -143,6 +144,52 @@ if kill -0 "$timeout_host_pid" 2>/dev/null; then
     timeout_failure=1
 fi
 [ "$timeout_failure" = 0 ] || exit 1
+
+# A backgrounded child does not become the host at fork: until nohup execs
+# it still carries this script's own argv. Launch must wait that window out
+# instead of concluding the PID it just forked is a stranger — doing so
+# aborted the launch AND left the child running, which is how this suite
+# once failed in CI having printed nothing at all. Report the parent's argv
+# for the first samples, then the truth.
+rm -f "$timeout_host_pidfile" "$scratch/command-count" "$fakebin/ps"
+printf '%s\n' \
+    '#!/bin/sh' \
+    'case "$*" in' \
+    '    *command=*)' \
+    '        count=0' \
+    '        [ ! -f "$SPIRESCRY_TEST_COMMAND_COUNT" ] || read -r count < "$SPIRESCRY_TEST_COMMAND_COUNT"' \
+    '        count=$((count + 1))' \
+    '        printf "%s\\n" "$count" > "$SPIRESCRY_TEST_COMMAND_COUNT"' \
+    '        if [ "$count" -le 3 ]; then' \
+    '            printf "Mon Jan  1 00:00:00 2026 /bin/bash build.sh host\\n"' \
+    '            exit 0' \
+    '        fi' \
+    '        exec "$SPIRESCRY_TEST_REAL_PS" "$@"' \
+    '        ;;' \
+    '    *) exec "$SPIRESCRY_TEST_REAL_PS" "$@" ;;' \
+    'esac' \
+    > "$fakebin/ps"
+chmod +x "$fakebin/ps"
+
+if preexec_output="$(run_host_timeout 2>&1)"; then
+    echo "pre-exec host unexpectedly reported success: $preexec_output" >&2
+    exit 1
+fi
+# Reaching the bridge deadline is the proof: the launch identified its child
+# instead of dying in the pre-exec window.
+assert_says 'bridge not up after 30s' "$preexec_output"
+[ -s "$timeout_host_pidfile" ] || {
+    echo "pre-exec host did not expose its test PID" >&2
+    exit 1
+}
+preexec_pid="$(cat "$timeout_host_pidfile")"
+if kill -0 "$preexec_pid" 2>/dev/null; then
+    kill -KILL "$preexec_pid" 2>/dev/null || true
+    echo "pre-exec launch left host PID $preexec_pid running" >&2
+    exit 1
+fi
+rm -f "$fakebin/ps"
+ln -s "$real_ps" "$fakebin/ps"
 
 # A matching command is not enough identity: the kernel may recycle the PID
 # for a new invocation of that same command. Let both launch-time reads and

@@ -351,6 +351,13 @@ fn main() -> ExitCode {
                      capture a fault-bundle and inspect acceptedRev/runId first"
                 );
             }
+            if settlement_outcome == Some(SettlementOutcome::OwnerChanged) {
+                eprintln!(
+                    "spirescry: the run that accepted this action stopped being the live run \
+                     before it settled; its result was never observed — the response's 'obs' \
+                     belongs to whatever owns the game now, not to acceptedRunId"
+                );
+            }
             let text = serde_json::to_string_pretty(&v).unwrap();
             // A plain println! panics on a closed pipe (e.g. `| head -1`);
             // write directly so that just exits quietly instead.
@@ -709,7 +716,10 @@ fn replay_value(client: &impl ReplayTransport, log: &Value) -> CliResult<Value> 
             || verb
                 .get("fingerprint")
                 .and_then(Value::as_str)
-                .filter(|value| !value.is_empty())
+                // Blank, not merely absent: the host calls the same recipe
+                // incomplete (RunLogRules.IsVerified), so refusing anything
+                // less than a real fingerprint keeps both ends in step.
+                .filter(|value| !value.trim().is_empty())
                 .is_none()
     }) {
         return Err(format!(
@@ -812,6 +822,21 @@ fn replay_value(client: &impl ReplayTransport, log: &Value) -> CliResult<Value> 
                     action,
                 )
             })?;
+        // Both non-boundary outcomes stop the replay, but they are different
+        // failures: a timeout is the reconstruction being too slow, an owner
+        // change is somebody else abandoning or restarting the run underneath
+        // it. Naming the second one as the first sends the reader hunting for
+        // a stuck engine.
+        if outcome == SettlementOutcome::OwnerChanged {
+            return Err(format!(
+                "divergence at verb {} ({}): the run being reconstructed stopped \
+                 being the live run mid-verb (a concurrent abandon or new-run) — \
+                 replay needs the host to itself",
+                idx + 1,
+                action,
+            )
+            .into());
+        }
         if !outcome.reached_boundary() {
             return Err(format!(
                 "divergence at verb {} ({}): reconstruction timed out",
@@ -2371,6 +2396,26 @@ mod tests {
     }
 
     #[test]
+    fn replay_rejects_a_blank_fingerprint_like_the_host_does() {
+        // The host judges a whitespace-only fingerprint unverified and reports
+        // the recipe incomplete; a recipe hand-edited past that check is no
+        // more comparable here, so both ends must refuse the same one.
+        let spy = ReplaySpy::new(health(PROTOCOL_VERSION, &["new-run"], &[]));
+        let mut verb = followed_verb("new-run", json!({}));
+        verb["fingerprint"] = json!("   ");
+        let recipe = replay_recipe(vec![verb]);
+
+        let error = replay_value(&spy, &recipe).unwrap_err();
+
+        assert!(
+            error.contains("no verifiable settled fingerprint"),
+            "{error}"
+        );
+        assert!(spy.gets.borrow().is_empty());
+        assert_eq!(spy.posts.get(), 0);
+    }
+
+    #[test]
     fn replay_missing_late_capability_fails_before_obs_or_any_post() {
         let spy = ReplaySpy::new(health(PROTOCOL_VERSION, &["new-run", "cheat"], &[]));
         let recipe = replay_recipe(vec![
@@ -2604,8 +2649,14 @@ mod tests {
                 SettlementOutcome::NextDecision,
                 SettlementOutcome::Fault,
                 SettlementOutcome::Timeout,
+                SettlementOutcome::OwnerChanged,
             ]
         );
+        // A follow that lost its run never reached a boundary and can never
+        // be replayed: replay must diverge on it instead of accepting the
+        // observation that came back from another run.
+        assert!(!SettlementOutcome::OwnerChanged.reached_boundary());
+        assert!(!SettlementOutcome::OwnerChanged.is_replayable());
         assert_eq!(artifact["faultEventTokens"], Value::Object(faults));
         assert_eq!(artifact["cheatArgumentShapes"], json!(cheats));
     }
