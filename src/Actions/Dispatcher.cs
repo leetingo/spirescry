@@ -658,9 +658,11 @@ public static class Dispatcher
         if (!TryGetInt(args, "idx", out var idx))
             return DispatchResult.Reject(RejectionCodes.BadRequest,
                 "missing or invalid args.idx (32-bit integer required)");
-        if (idx < 0)
-            return DispatchResult.Reject(RejectionCodes.BadIndex,
-                $"{kind} idx {idx} must be non-negative");
+        // Whatever the request alone settles — a negative idx, or any idx but
+        // the one obs.cardRemoval publishes. MerchantRules states it so the
+        // observation and this reject cannot disagree.
+        if (MerchantRules.BuyIndexRejection(kind, idx) is { } indexErr)
+            return DispatchResult.Reject(indexErr.Code, indexErr.Message);
 
         if (RequireRunContext(out var run, "shop inventory not available") is { } runErr)
             return runErr;
@@ -954,14 +956,10 @@ public static class Dispatcher
         // Mirror the potion popup's model-layer gates. The headless fallback
         // covers only the custom UI-node check: Phase.Shop has already
         // established the semantic MerchantRoom and host mode intentionally
-        // has no NMerchantButton to satisfy that check.
-        var usable = potion is FoulPotion
-            && potion.Usage == PotionUsage.AnyTime
-            && player.Creature is { IsDead: false }
-            && player.CanUseOrRemovePotions
-            && DecisionSurface.Current
-                .MerchantPotionInteractionAvailable(potion);
-        if (!usable)
+        // has no NMerchantButton to satisfy that check. The snapshot marks
+        // the belt entry `playable` through this same gate, so obs.legal's
+        // potion-use and this reject cannot disagree.
+        if (!MerchantPotionGate.Redeemable(potion, player))
             return DispatchResult.Reject(RejectionCodes.NotPlayable,
                 $"{potion.Id.Entry} has no available merchant interaction in this shop");
         return FromDecisionSurface(

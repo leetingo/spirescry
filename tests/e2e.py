@@ -120,6 +120,12 @@ def http(method, path, body=None):
         return e.code, json.loads(e.read() or b"{}")
 
 
+def legal():
+    """The verbs the current observation advertises. Only the decision
+    projection carries them, so a legal-verb assertion needs its own read."""
+    return run("obs", "--decision")["legal"]
+
+
 def reject(args, code):
     """Expect the CLI call to fail with this error code; return stderr."""
     r = bridge.cli(*args)
@@ -1150,6 +1156,20 @@ def s1():
 
     d = obs()
     assert d["cardRemoval"] and not d["cardRemoval"]["used"], d.get("cardRemoval")
+    # One stall, one index: the removal publishes the only idx buy accepts,
+    # and a rejected index leaves the deck alone. (`cardRemoval.used` is not
+    # the witness here — the engine only flips it from a GUI node, so it
+    # reads False even after a removal lands.)
+    assert d["cardRemoval"]["idx"] == 0, d["cardRemoval"]
+    deck_before_rejects = len(d["player"]["deck"])
+    for bad in ("1", "2", "7"):
+        err = reject(["buy", "card_removal", "--idx", bad], REJECTION.BAD_INDEX)
+        assert "one entry" in err, err
+    d = obs()
+    assert d["phase"] == PHASE.SHOP, \
+        f"a rejected card_removal idx still opened its picker: {d['phase']}"
+    assert len(d["player"]["deck"]) == deck_before_rejects, \
+        "a rejected card_removal idx removed a card anyway"
     run("buy", "card_removal", "--idx", "0")
     d = bridge.wait_phase(PHASE.CARD_SELECT)
     before_rev = d["rev"]
@@ -1226,6 +1246,72 @@ def s3():
     message = result.get("msg", "").lower()
     assert PHASE.COMBAT in message, result
     assert "foul potion" in message and "merchant" in message, result
+    to_menu()
+
+
+@case("S4 shop advertises exactly the actions the dispatcher accepts")
+def s4():
+    d = to_map(seed="CISHOP")
+    shop = next(p for p in d["graph"] if p["type"] == PHASE.SHOP)
+    bridge.follow("cheat", "gold", "5000")
+    run("cheat", "goto", str(shop["col"]), str(shop["row"]))
+    d = bridge.wait_phase(PHASE.SHOP)
+
+    assert "buy" in legal() and "leave" in legal(), legal()
+    # An empty belt has nothing to discard or redeem, however full the
+    # shelf is — merchant stock is not the player's potions.
+    assert d["potions"], "no potions on the shelf to confuse with the belt"
+    for potion in list(d["player"]["potions"]):
+        d = bridge.follow("potion-discard", str(potion["slot"]))
+    assert d["player"]["potions"] == [], d["player"]["potions"]
+    assert "potion-discard" not in legal(), legal()
+    assert "potion-use" not in legal(), legal()
+
+    # A belt potion is discardable in a shop, and the dispatcher agrees.
+    d = bridge.follow("cheat", "potion", "ENERGY_POTION")
+    assert "potion-discard" in legal(), legal()
+    # ...but an ordinary potion has no merchant interaction, so potion-use
+    # stays off the list and the dispatcher rejects it.
+    assert "potion-use" not in legal(), legal()
+    ordinary = next(p for p in d["player"]["potions"]
+                    if p["model"] == "ENERGY_POTION")
+    assert ordinary["playable"] is False, ordinary
+    status, result = http("POST", "/step", {
+        "action": "potion-use", "args": {"slot": ordinary["slot"]},
+    })
+    assert status == 400 and result.get("err") == REJECTION.NOT_PLAYABLE, \
+        f"unadvertised potion-use was not rejected: {status} {result}"
+
+    # The Foul Potion is the one the merchant trades for: advertised, and
+    # accepted for gold.
+    d = bridge.follow("cheat", "potion", "FOUL_POTION")
+    assert "potion-use" in legal(), legal()
+    foul = next(p for p in d["player"]["potions"] if p["model"] == "FOUL_POTION")
+    assert foul["playable"] is True, foul
+    gold_before = d["gold"]
+    status, result = http("POST", "/step", {
+        "action": "potion-use", "args": {"slot": foul["slot"]}, "follow": 5000,
+    })
+    d = followed_http_obs(status, result, "advertised Foul Potion redemption")
+    assert d["gold"] > gold_before, (gold_before, d["gold"])
+    assert "potion-use" not in legal(), \
+        f"redeemed Foul Potion still advertises potion-use: {legal()}"
+
+    # Discard the rest of the belt; potion-discard retires with it.
+    for potion in list(d["player"]["potions"]):
+        d = bridge.follow("potion-discard", str(potion["slot"]))
+    assert d["player"]["potions"] == [], d["player"]["potions"]
+    assert "potion-discard" not in legal(), legal()
+
+    # Broke: nothing on the shelf is affordable, so buy retires too.
+    d = bridge.follow("cheat", "gold", "0")
+    assert not any(item.get("purchasable")
+                   for key in ("cards", "colorless", "relics", "potions")
+                   for item in d[key]), d
+    assert d["cardRemoval"]["purchasable"] is False, d["cardRemoval"]
+    assert "buy" not in legal(), legal()
+    reject(["buy", "relic", "--idx", "0"], REJECTION.NOT_ENOUGH_GOLD)
+    assert "leave" in legal(), legal()
     to_menu()
 
 
@@ -2550,6 +2636,27 @@ def i5():
     first = shop["relics"][0]
     assert first["model"] and first["description"] and first["stocked"], first
     assert first["price"] == first["cost"] and first["price"] > 0, first
+    # The stall also publishes the ordinary shop-stock shape, so the same
+    # `buy relic --idx N` the dispatcher takes is derivable from obs alone.
+    stock = d["relics"]
+    assert [item["model"] for item in stock] == \
+        [item["model"] for item in shop["relics"]], (stock, shop["relics"])
+    assert all(item["idx"] == i for i, item in enumerate(stock)), stock
+    assert all(item["purchasable"] for item in stock), stock
+    assert "buy" in legal(), legal()
+    # Broke: nothing is purchasable, so buy retires and the dispatcher agrees.
+    poor = bridge.follow("cheat", "gold", "0")
+    assert not any(item["purchasable"] for item in poor["relics"]), poor["relics"]
+    assert "buy" not in legal(), legal()
+    reject(["buy", "relic", "--idx", "0"], REJECTION.NOT_ENOUGH_GOLD)
+    # The stall sells relics only — no cards, potions, or card removal.
+    assert poor.get("cardRemoval") is None, poor.get("cardRemoval")
+    for kind in ("card", "colorless", "potion", "card_removal"):
+        reject(["buy", kind, "--idx", "0"], REJECTION.BAD_INDEX)
+    reject(["buy", "card_removal", "--idx", "1"], REJECTION.BAD_INDEX)
+
+    d = bridge.follow("cheat", "gold", "500")
+    assert "buy" in legal(), legal()
     before_gold = d["player"]["gold"]
     before_rev = d["rev"]
     run("buy", "relic", "--idx", "0")
@@ -2559,6 +2666,7 @@ def i5():
         after_rev=before_rev,
     )
     assert not d["fakeMerchant"]["relics"][0]["stocked"], d["fakeMerchant"]
+    assert d["relics"][0]["purchasable"] is False, d["relics"][0]
     assert d["player"]["gold"] < before_gold, d["player"]
     assert first["model"] in d["player"]["relics"], d["player"]["relics"]
     to_menu()

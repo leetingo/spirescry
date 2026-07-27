@@ -1719,23 +1719,182 @@ internal static class Tests
         }
     }
 
-    public static void DecisionPotionVisibilityPreservesTopLevelPrecedence()
+    public static void DecisionPotionDiscardReadsTheBeltNotMerchantStock()
     {
-        var inventoryPotion = new SnapshotItemContract { Index = 0 };
-        var shop = new SnapshotContract(Phase.Shop)
+        // A shop's top-level `potions` is what the merchant sells; the belt
+        // lives in the footer. Reading stock as a belt both hid a
+        // discardable potion behind a sold-out shelf and, with stock on the
+        // shelf and nothing in hand, advertised a discard of someone else's
+        // potion. The dispatcher only ever discards from the belt.
+        var belt = new SnapshotItemContract { Index = 0, Slot = 0 };
+        var emptyShelf = new SnapshotContract(Phase.Shop)
         {
             Potions = [],
-            Player = new SnapshotPlayerContract { Potions = [inventoryPotion] },
+            Player = new SnapshotPlayerContract { Potions = [belt] },
+        };
+        var stockedShelf = new SnapshotContract(Phase.Shop)
+        {
+            Potions = [new SnapshotItemContract { Index = 0 }],
+            Player = new SnapshotPlayerContract { Potions = [] },
         };
         var map = new SnapshotContract(Phase.Map)
         {
-            Player = new SnapshotPlayerContract { Potions = [inventoryPotion] },
+            Player = new SnapshotPlayerContract { Potions = [belt] },
+        };
+        // Combat publishes the belt at the top level and has no footer.
+        var combat = new SnapshotContract(Phase.Combat)
+        {
+            Side = "player",
+            ActionsDisabled = false,
+            Hand = [],
+            Potions = [belt],
         };
 
+        Equal("leave,potion-discard,abandon", string.Join(',',
+            DecisionProjection.LegalVerbs(emptyShelf, runActive: true)));
         Equal("leave,abandon", string.Join(',',
-            DecisionProjection.LegalVerbs(shop, runActive: true)));
+            DecisionProjection.LegalVerbs(stockedShelf, runActive: true)));
         Equal("potion-discard,abandon", string.Join(',',
             DecisionProjection.LegalVerbs(map, runActive: true)));
+        Equal("end-turn,potion-use,potion-discard,abandon", string.Join(',',
+            DecisionProjection.LegalVerbs(combat, runActive: true)));
+    }
+
+    public static void DecisionShopPotionUseFollowsTheRedeemableBeltEntry()
+    {
+        // Only a Foul Potion has a merchant interaction, so Snapshotter
+        // marks exactly that belt entry playable. An ordinary potion in the
+        // belt must not advertise a use the shop would reject.
+        var ordinary = new SnapshotContract(Phase.Shop)
+        {
+            Potions = [],
+            Player = new SnapshotPlayerContract
+            {
+                Potions =
+                [
+                    new SnapshotItemContract
+                    {
+                        Index = 0, Slot = 0,
+                        Model = "ENERGY_POTION", Playable = false,
+                    },
+                ],
+            },
+        };
+        var foul = new SnapshotContract(Phase.Shop)
+        {
+            Potions = [],
+            Player = new SnapshotPlayerContract
+            {
+                Potions =
+                [
+                    new SnapshotItemContract
+                    {
+                        Index = 0, Slot = 0,
+                        Model = "ENERGY_POTION", Playable = false,
+                    },
+                    new SnapshotItemContract
+                    {
+                        Index = 1, Slot = 1,
+                        Model = "FOUL_POTION", Playable = true,
+                    },
+                ],
+            },
+        };
+
+        Equal("leave,potion-discard,abandon", string.Join(',',
+            DecisionProjection.LegalVerbs(ordinary, runActive: true)));
+        Equal("potion-use,leave,potion-discard,abandon", string.Join(',',
+            DecisionProjection.LegalVerbs(foul, runActive: true)));
+    }
+
+    public static void DecisionFakeMerchantAdvertisesBuyWhileAnEntryIsAffordable()
+    {
+        // The Fake Merchant sells relics from inside an event. Its stall
+        // publishes the ordinary purchasable stock shape, so buy is
+        // advertised exactly while the dispatcher would accept one.
+        SnapshotContract Stall(params bool?[] purchasable) =>
+            new(Phase.Event)
+            {
+                Options = [],
+                Relics = purchasable
+                    .Select((flag, i) => new SnapshotItemContract
+                    {
+                        Index = i,
+                        Model = "FAKE_ANCHOR",
+                        Purchasable = flag,
+                    }).ToArray(),
+                Player = new SnapshotPlayerContract { Potions = [] },
+            };
+
+        Equal("buy,proceed,abandon", string.Join(',',
+            DecisionProjection.LegalVerbs(Stall(false, true), runActive: true)));
+        // Sold out or short of gold: proceed (or the fight) is all that's left.
+        Equal("proceed,abandon", string.Join(',',
+            DecisionProjection.LegalVerbs(Stall(false, false), runActive: true)));
+        // An ordinary event stocks nothing and never advertises buy.
+        Equal("proceed,abandon", string.Join(',',
+            DecisionProjection.LegalVerbs(Stall(), runActive: true)));
+    }
+
+    public static void MerchantBuyRejectsEveryIndexButThePublishedRemoval()
+    {
+        // A stall sells one card removal, so `buy card_removal` has exactly
+        // one target — the idx obs.cardRemoval publishes. Indexed kinds are
+        // bounded by the inventory instead, which only the dispatcher can
+        // read, so the rule leaves their in-range indices alone.
+        Equal(0, MerchantRules.CardRemovalIndex);
+        Equal(null, MerchantRules.BuyIndexRejection(
+            "card_removal", MerchantRules.CardRemovalIndex));
+
+        foreach (var idx in new[] { 1, 2, 7 })
+        {
+            var removal = MerchantRules.BuyIndexRejection("card_removal", idx);
+            Equal(RejectionCodes.BadIndex, removal?.Code);
+            Equal($"card_removal has one entry, at idx 0; got {idx}",
+                removal?.Message);
+        }
+
+        foreach (var kind in new[] { "card", "colorless", "relic", "potion" })
+        {
+            Equal(null, MerchantRules.BuyIndexRejection(kind, 0));
+            Equal(null, MerchantRules.BuyIndexRejection(kind, 7));
+            var negative = MerchantRules.BuyIndexRejection(kind, -1);
+            Equal(RejectionCodes.BadIndex, negative?.Code);
+            Equal($"{kind} idx -1 must be non-negative", negative?.Message);
+        }
+        Equal(RejectionCodes.BadIndex,
+            MerchantRules.BuyIndexRejection("card_removal", -1)?.Code);
+    }
+
+    public static void MerchantFoulPotionRedemptionNeedsEveryGate()
+    {
+        True(MerchantRules.RedeemableAtMerchant(
+            isFoulPotion: true, usableAnyTime: true, ownerAlive: true,
+            canUseOrRemovePotions: true, interactionAvailable: () => true));
+        False(MerchantRules.RedeemableAtMerchant(
+            isFoulPotion: false, usableAnyTime: true, ownerAlive: true,
+            canUseOrRemovePotions: true, interactionAvailable: () => true));
+        False(MerchantRules.RedeemableAtMerchant(
+            isFoulPotion: true, usableAnyTime: false, ownerAlive: true,
+            canUseOrRemovePotions: true, interactionAvailable: () => true));
+        False(MerchantRules.RedeemableAtMerchant(
+            isFoulPotion: true, usableAnyTime: true, ownerAlive: false,
+            canUseOrRemovePotions: true, interactionAvailable: () => true));
+        False(MerchantRules.RedeemableAtMerchant(
+            isFoulPotion: true, usableAnyTime: true, ownerAlive: true,
+            canUseOrRemovePotions: false, interactionAvailable: () => true));
+        False(MerchantRules.RedeemableAtMerchant(
+            isFoulPotion: true, usableAnyTime: true, ownerAlive: true,
+            canUseOrRemovePotions: true, interactionAvailable: () => false));
+
+        // The last gate walks the run's current room in the live game, so a
+        // belt full of ordinary potions must never reach it.
+        var asked = 0;
+        False(MerchantRules.RedeemableAtMerchant(
+            isFoulPotion: false, usableAnyTime: true, ownerAlive: true,
+            canUseOrRemovePotions: true,
+            interactionAvailable: () => { asked++; return true; }));
+        Equal(0, asked);
     }
 
     public static void SnapshotContractPreservesUnconsumedProducerFields()
