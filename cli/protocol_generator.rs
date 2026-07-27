@@ -222,7 +222,7 @@ fn emit_settlement_outcome(code: &mut String, values: &[&str]) {
              matches!(self, Self::Settled | Self::NextDecision)\n\
          }\n\
          fn reached_boundary(self) -> bool {\n\
-             self != Self::Timeout\n\
+             !matches!(self, Self::Timeout | Self::OwnerChanged)\n\
          }\n\
          }\n",
     );
