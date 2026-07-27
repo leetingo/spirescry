@@ -787,6 +787,80 @@ internal static class Tests
             isAbandoned: true, endedInVictoryRoom: false, winTime: 0));
     }
 
+    public static void SeaGlassIsBoundToItsOwningCharacter()
+    {
+        // OROBAS stamps the character whose card pool Sea Glass reads before
+        // the pick. Granted bare, AfterObtained logs "obtained without a
+        // character ID assigned" — an engine error the sweeps read as a
+        // product fault, and a silent fall back to Ironclad besides.
+        var context = ContextBoundContent.For("SEA_GLASS");
+
+        Equal(1, context.Count);
+        Equal("CharacterId", context[0].Property);
+        Equal(ConstructionValue.OwnerCharacterId, context[0].Value);
+        True(ContextBoundContent.IsContextBound("SEA_GLASS"));
+    }
+
+    public static void MadScienceIsBoundToBothPropertiesItsEventAssigns()
+    {
+        // TINKER_TIME.RiderChosen assigns the card type and the rider in one
+        // statement block before the card is added to the deck, so both are
+        // construction context. Neither type default is reachable: CardType
+        // .None makes OnPlay throw ArgumentOutOfRangeException, and
+        // RiderEffect.None skips the rider half and renders the card's
+        // description as "???".
+        var context = ContextBoundContent.For("MAD_SCIENCE");
+
+        Equal(2, context.Count);
+        Equal("TinkerTimeType", context[0].Property);
+        Equal(ConstructionValue.EnumMember, context[0].Value);
+        Equal("Attack", context[0].Member);
+        Equal("TinkerTimeRider", context[1].Property);
+        Equal(ConstructionValue.EnumMember, context[1].Value);
+        Equal("Sapping", context[1].Member);
+    }
+
+    public static void EveryStampedContextValueNamesAMember()
+    {
+        // EnumMember is the only kind that carries one, and the cheat parses
+        // it against the property's own enum — a null there would reject the
+        // injection at runtime, where only the deep sweeps would notice.
+        foreach (var entry in new[] { "SEA_GLASS", "MAD_SCIENCE" })
+            foreach (var context in ContextBoundContent.For(entry))
+                Equal(context.Value == ConstructionValue.EnumMember,
+                    !string.IsNullOrEmpty(context.Member));
+    }
+
+    public static void DirectlyExecutableContentDeclaresNoConstructionContext()
+    {
+        // The distinction the sweeps ride on: ordinary content is injected as
+        // is, and /models must not advertise a context that would make a sweep
+        // demand one.
+        Equal(0, ContextBoundContent.For("STRIKE_IRONCLAD").Count);
+        False(ContextBoundContent.IsContextBound("STRIKE_IRONCLAD"));
+        Equal(null, ContextBoundContent.PublishedContext("STRIKE_IRONCLAD"));
+    }
+
+    public static void PublishedContextNamesEveryStampedProperty()
+    {
+        // The wire form /models hands the sweeps: property names only, in
+        // table order, so a fixture that stops applying is visible from the
+        // registry alone.
+        Equal("CharacterId",
+            string.Join(",", ContextBoundContent.PublishedContext("SEA_GLASS")!));
+        Equal("TinkerTimeType,TinkerTimeRider",
+            string.Join(",", ContextBoundContent.PublishedContext("MAD_SCIENCE")!));
+    }
+
+    public static void ConstructionContextIsKeyedByTheNormalizedModelEntry()
+    {
+        // The cheats upper-case args.id before every registry lookup, so the
+        // table is keyed that way too. A lower-case probe must miss rather
+        // than half-match and stamp nothing.
+        False(ContextBoundContent.IsContextBound("sea_glass"));
+        True(ContextBoundContent.IsContextBound("SEA_GLASS"));
+    }
+
     public static void EventOptionTrackerOutlivesAbandonThenNewRunRotations()
     {
         // The P16 shape, and the regression this replaced rotation counting

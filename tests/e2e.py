@@ -2547,6 +2547,65 @@ def m5():
     to_menu()
 
 
+@case("M6 context-bound content runs through its construction fixture")
+def m6():
+    # The sweeps' fixture contract, held in a case --quick still runs: M2
+    # and M4 are deep, so without this the fixture could rot for a month.
+    #
+    # SEA_GLASS and MAD_SCIENCE are never constructed bare by the game.
+    # OROBAS stamps the character whose pool Sea Glass reads; TINKER_TIME
+    # stamps both the card type Mad Science resolves as and the rider it
+    # carries. Injected raw, the first logs "obtained without a character ID
+    # assigned" and the second throws ArgumentOutOfRangeException out of
+    # OnPlay — fixture faults the sweeps would otherwise report as product
+    # faults.
+    entries = {
+        kind: {e["model"]: e.get("context")
+               for e in http("GET", f"/models?kind={kind}")[1]["entries"]}
+        for kind in ("card", "relic")
+    }
+    assert entries["relic"]["SEA_GLASS"] == ["CharacterId"], \
+        entries["relic"]["SEA_GLASS"]
+    assert entries["card"]["MAD_SCIENCE"] == \
+        ["TinkerTimeType", "TinkerTimeRider"], entries["card"]["MAD_SCIENCE"]
+    assert entries["card"]["STRIKE_IRONCLAD"] is None, \
+        "directly executable content must not advertise a construction context"
+
+    # Mad Science: the stamped type decides how the card resolves, so an
+    # attack must arrive targetable and land on an enemy — and the stamped
+    # rider has to run too. A rider-less card still deals its damage, so
+    # damage alone would pass on a half-configured fixture: the description
+    # renders the rider clause as "???" (the game's own invalid-state
+    # placeholder) and Sapping's Weak and Vulnerable never land.
+    d = into_combat(seed="CIM6", character="IRONCLAD")
+    bridge.follow("cheat", "energy", "99")
+    d = bridge.follow("cheat", "card", "MAD_SCIENCE")
+    grafted = next(c for c in d["hand"] if c["model"] == "MAD_SCIENCE")
+    assert grafted.get("target") == "anyenemy", grafted
+    assert "?" not in (grafted.get("description") or "?"), grafted
+    victim = alive_enemy(d)
+    d = bridge.follow("play", "MAD_SCIENCE", "--target", str(victim["id"]))
+    hit = next(e for e in d["enemies"] if e["id"] == victim["id"])
+    assert hit["hp"][0] < victim["hp"][0] or not hit["alive"], (victim, hit)
+    assert {"WEAK_POWER", "VULNERABLE_POWER"} <= {p["id"] for p in hit["powers"]}, \
+        hit
+    to_menu()
+
+    # Sea Glass: SILENT, not the Ironclad the unstamped relic falls back
+    # to — the grid must be drawn from the owning character's pool.
+    pools = {e["model"]: e.get("pool")
+             for e in http("GET", "/models?kind=card")[1]["entries"]}
+    to_map(seed="CIM6R", character="SILENT")
+    d = bridge.follow("cheat", "relic", "SEA_GLASS")
+    assert d["phase"] == PHASE.CARD_SELECT, d["phase"]
+    offered = {pools.get(c["model"]) for c in d["cards"]}
+    assert offered == {"silent"}, offered
+    d = bridge.walk_world(PHASE.MAP, initial=d, claim_card_reward=True,
+                          claim_reward_tiles=True)
+    assert "SEA_GLASS" in d["player"]["relics"], d["player"]["relics"]
+    to_menu()
+
+
 # ---------- F: the full loop ----------
 
 @case("F1 act-1 parity loop")
