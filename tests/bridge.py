@@ -179,22 +179,31 @@ def _act_and_settle(snapshot, *args, deadline, on_obs=None):
     return settled
 
 
-def _first_unselected(snapshot):
-    """The first card of a selection that is not already picked.
+def unselected_card(d):
+    """The lowest-index card of a picker that is not already selected.
 
-    A hand-selection surface keeps every candidate listed and marks the
-    picked ones, so the free rows are the ones without `selected`.
-    Re-picking a marked row only toggles it back off, so a surface with no
-    free row and no confirm is stuck: say so instead of burning the step
-    budget on the same row and reporting a timeout.
+    `card_select` carries a per-card `selected` flag; `hand_select`
+    publishes only the top-level `selected` selector list, so a card's own
+    flag reads `None` there. Consume that list positionally instead of
+    treating every card as unselected: without it a picker asking for two
+    of five cards toggles index 0 on and off until the walker gives up
+    ("world exceeded 120 revision-driven steps ... hand_select" — CHARGE
+    and HIDDEN_DAGGERS in the M2 sweep). Two copies of one model are
+    interchangeable to the walker, so consuming in index order is exact
+    for the only pattern it produces: always take the lowest free index.
     """
-    card = next(
-        (card for card in snapshot.get("cards", [])
-         if not card.get("selected")), None)
-    if card is None:
-        raise AssertionError(
-            f"{snapshot.get('phase')} has neither selectable cards nor confirm")
-    return card
+    pending = list(d.get("selected") or [])
+    for card in d.get("cards", []):
+        flag = card.get("selected")
+        if flag:
+            continue
+        if flag is None:
+            key = card.get("selector") or card.get("model")
+            if key in pending:
+                pending.remove(key)
+                continue
+        return card
+    return None
 
 
 def kill_current_combat(*, on_obs=None, timeout=60, initial=None):
@@ -206,16 +215,17 @@ def kill_current_combat(*, on_obs=None, timeout=60, initial=None):
     used_potion = False
     for _ in range(90):
         if d["phase"] in (PHASE.HAND_SELECT, PHASE.CARD_SELECT):
+            free = unselected_card(d)
             if d.get("confirmable"):
                 d = _act_and_settle(
                     d, "confirm", deadline=deadline, on_obs=on_obs)
-            else:
-                # Advance the selection: re-picking a card already marked
-                # selected only toggles it back off, and a decision needing
-                # two picks would never finish.
+            elif free is not None:
                 d = _act_and_settle(
-                    d, "pick-card", str(_first_unselected(d)["idx"]),
+                    d, "pick-card", str(free["idx"]),
                     deadline=deadline, on_obs=on_obs)
+            else:
+                raise AssertionError(
+                    f"{d['phase']} has neither selectable cards nor confirm")
             continue
         if d["phase"] != PHASE.COMBAT:
             return d
@@ -289,8 +299,11 @@ def resolve_transient_phase(d, *, claim_reward_tiles=False,
         if d.get("confirmable"):
             return _follow_before(deadline, "confirm")
         else:
-            return _follow_before(
-                deadline, "pick-card", str(_first_unselected(d)["idx"]))
+            card = unselected_card(d)
+            if card is None:
+                raise AssertionError(
+                    f"{phase} has neither selectable cards nor confirm")
+            return _follow_before(deadline, "pick-card", str(card["idx"]))
     elif phase == PHASE.BUNDLE_SELECT:
         if d.get("confirmable"):
             return _follow_before(deadline, "confirm")

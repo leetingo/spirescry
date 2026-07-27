@@ -10,7 +10,8 @@ no Steam). Case groups:
   B  boot: /health shape, boot-log assertions (Harmony patches landed,
      ModelDb registered clean, timestamped lines)
   P  protocol: rev monotonicity, long-poll semantics, route/verb/cheat
-     rejections with actionable codes
+     rejections with actionable codes, follow windows scoped to the run
+     that accepted the verb
   R  run lifecycle: seeded determinism, every character boots + fights,
      abandon from map and mid-combat (regression: #66)
   C  combat economy: block, energy accounting, bad_target, overdraw
@@ -56,6 +57,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import traceback
 import urllib.error
@@ -75,6 +77,7 @@ from protocol import (  # noqa: E402
     PHASE,
     PROTOCOL_VERSION,
     REJECTION,
+    SETTLEMENT_OUTCOME,
 )
 
 run, obs = bridge.run, bridge.obs
@@ -115,6 +118,12 @@ def http(method, path, body=None):
             return r.status, json.loads(r.read() or b"{}")
     except urllib.error.HTTPError as e:
         return e.code, json.loads(e.read() or b"{}")
+
+
+def legal():
+    """The verbs the current observation advertises. Only the decision
+    projection carries them, so a legal-verb assertion needs its own read."""
+    return run("obs", "--decision")["legal"]
 
 
 def reject(args, code):
@@ -801,6 +810,198 @@ def p17():
     to_menu()
 
 
+def orphan_async_channel(release, marker, seed):
+    """One release channel of the #145 fixture, over the same four timings.
+
+    An abandoned run's tracked work reaches the next run two ways: its own
+    fault, and any engine Error line it writes — the engine catches
+    exceptions from fire-and-forget chains and only logs them, so that
+    second shape publishes an error without ever faulting a task the mod
+    holds, and then completes successfully. Both land in the same revision
+    stream, error journal and follow result, so both are tested here.
+    """
+    launch(seed=seed + "L")
+
+    # Baseline first: work still owned by the run that dispatched it must
+    # keep reporting. Ownership suppresses orphans, not failures.
+    run("cheat", "async-orphan")
+    status, health = http("GET", "/health")
+    assert status == 200 and health["pendingAsync"] == 1, health
+    live = run("cheat", release, "--follow", "3000", allow_errors=True)
+    assert live["settled"] is True, live
+    assert any(marker in error for error in live["errors"]), live["errors"]
+
+    # Park a second task, then walk away from the run that owns it. The
+    # zombie must leave the pending ledger at the rotation: it is parked on a
+    # run nobody is playing, and counting it as work the board owes would
+    # hold the follow probe busy for every later run.
+    run("cheat", "async-orphan")
+    abandoned = run("abandon", "--follow", "3000")
+    assert abandoned["outcome"] != "timeout", abandoned
+    assert abandoned["obs"]["phase"] == PHASE.MAIN_MENU, abandoned["obs"]
+    status, health = http("GET", "/health")
+    assert status == 200 and health["pendingAsync"] == 0, health
+
+    # (a) it lands at the menu, immediately before the next run — the window
+    # where a published error would be attributed to the run about to start,
+    # or leak into its very first follow response.
+    menu_rev = obs()["rev"]
+    run("cheat", release)
+    time.sleep(0.6)
+    quiet = run("obs", "--since", str(menu_rev), "--wait", "500")
+    assert not any(marker in event["type"]
+                   for event in quiet.get("events") or []), quiet
+    fresh = run("new-run", "IRONCLAD", "--seed", seed + "A", "--follow", "3000")
+    assert fresh["outcome"] != "timeout", fresh
+    assert fresh["errors"] == [], fresh["errors"]
+
+    # (b) it lands across new-run: released a heartbeat before the verb, it
+    # resolves while the next run is being built or just after it comes up —
+    # the window where a run-blind tracker hands an abandoned run's failure
+    # to the run the agent is actually playing.
+    run("cheat", "async-orphan")
+    run("abandon", "--follow", "3000")
+    handover_rev = obs()["rev"]
+    run("cheat", release)
+    during = run("new-run", "IRONCLAD", "--seed", seed + "B", "--follow", "3000")
+    assert during["outcome"] != "timeout", during
+    assert during["errors"] == [], during["errors"]
+    # follow only reports what its own step accepted, so give a release that
+    # outlived the handover time to land and check everything the journal
+    # took since the menu — the new run is live for all of it.
+    time.sleep(0.6)
+    window = run("obs", "--since", str(handover_rev), "--wait", "500")
+    assert not any(marker in event["type"]
+                   for event in window.get("events") or []), window
+    status, health = http("GET", "/health")
+    assert status == 200 and health["pendingAsync"] == 0, health
+
+    # (c) the dual: work the run-ending verb itself started. `abandon` tracks
+    # the very task that clears RunState, so ownership binds it to the run it
+    # is tearing down — retiring it at that rotation would report a clean
+    # settle for a teardown that actually failed. Its failure must still
+    # reach the error journal once the board is back at the menu.
+    run("cheat", "async-orphan-ends-run")
+    teardown_rev = obs()["rev"]
+    # No --follow here: run-ending work is deliberately still pending across
+    # its own rotation, so the probe would sit out its whole budget waiting
+    # for a task this fixture only releases below.
+    run("abandon")
+    bridge.wait_phase(PHASE.MAIN_MENU, timeout=15)
+    run("cheat", release)
+    time.sleep(0.6)
+    reported = run("obs", "--since", str(teardown_rev), "--wait", "500")
+    assert any(marker in event["type"]
+               for event in reported.get("events") or []), reported
+    to_menu()
+
+
+@case("P17b abandoned fire-and-forget work cannot enter the next run")
+def p17b():
+    # #145: ordinary dispatcher work is run-owned too. P16/P17 cover the
+    # event-option channel; this covers the plain tracked-task channel, whose
+    # completions reach the same revision stream, error journal and follow
+    # result — and which used to publish into whatever run happened to be
+    # live when a long-abandoned task finally landed.
+    orphan_async_channel("async-orphan-fault",
+                         "forced orphan fire-and-forget failure",
+                         "CIASYNCF")
+    orphan_async_channel("async-orphan-log",
+                         "forced orphan fire-and-forget engine log error",
+                         "CIASYNCG")
+
+
+@case("P18 a followed verb never settles against another run")
+def p18():
+    # #144. The bridge answers requests concurrently, so a second client's
+    # abandon can land while an accepted verb is still being followed. The
+    # menu it leaves behind is quiet and decision-free — exactly what the
+    # settlement loop reads as a boundary — so the verb used to report
+    # `settled` with `runId: none`, and the run log recorded a MAIN-MENU
+    # fingerprint as that verb's replayable outcome. The action's own
+    # result was never observed; only an explicit owner change can say so.
+    # (Landing on a different run's ID is the same rotation one beat later;
+    # SettlementReportsAnOwnerChangeWhenAnotherRunTakesOver pins that half,
+    # where the timing is deterministic.)
+    to_menu()
+    # new-run adopts the run it mints: its own follow still settles, and
+    # the entry it writes is the same-run baseline asserted below.
+    launched = run("new-run", "IRONCLAD", "--seed", "CIOWNERSCOPE",
+                   "--follow", "8000")
+    # Whether the Neow page has already mounted decides between the two
+    # replayable boundaries; both belong to the run new-run just minted.
+    assert launched["outcome"] in (SETTLEMENT_OUTCOME.SETTLED,
+                                   SETTLEMENT_OUTCOME.NEXT_DECISION), launched
+    accepted_run = launched["runId"]
+    assert accepted_run != "none", launched
+    bridge.wait_phase(PHASE.EVENT)
+    # Parked option work holds every follow window in this run open.
+    run("cheat", "event-orphan")
+
+    followed = {}
+
+    def follow_gold():
+        followed["status"], followed["response"] = http("POST", "/step", {
+            "action": "cheat", "args": {"name": "gold", "value": 77},
+            "follow": 9000})
+
+    def gold_accepted():
+        return any(verb["action"] == "cheat"
+                   and verb.get("args", {}).get("name") == "gold"
+                   for verb in run("runlog")["verbs"])
+
+    follower = threading.Thread(target=follow_gold)
+    follower.start()
+    try:
+        # Acceptance precedes the follow window and is visible in the run
+        # log, so wait for it instead of racing a sleep.
+        deadline = time.monotonic() + 15
+        while not gold_accepted():
+            assert time.monotonic() < deadline, "the gold cheat was never accepted"
+            time.sleep(0.05)
+        abandoned = run("abandon", "--follow", "5000")
+    finally:
+        follower.join(60)
+    assert not follower.is_alive(), "the followed verb never came back"
+
+    status, unowned = followed["status"], followed["response"]
+    assert status == 200 and unowned.get("ok") is True, unowned
+    assert unowned["acceptedRunId"] == accepted_run, unowned
+    assert unowned["outcome"] == SETTLEMENT_OUTCOME.OWNER_CHANGED, unowned
+    assert unowned["settled"] is False, unowned
+    assert unowned["runId"] != accepted_run, unowned
+
+    # abandon owns the transition it asked for: still a real boundary.
+    assert abandoned["settled"] is True, abandoned
+    assert abandoned["outcome"] in (SETTLEMENT_OUTCOME.SETTLED,
+                                    SETTLEMENT_OUTCOME.NEXT_DECISION), abandoned
+    assert abandoned["runId"] == "none", abandoned
+    assert abandoned["obs"]["phase"] == PHASE.MAIN_MENU, abandoned["obs"]
+
+    verbs = run("runlog")["verbs"]
+    gold = next(verb for verb in reversed(verbs)
+                if verb["action"] == "cheat"
+                and verb.get("args", {}).get("name") == "gold")
+    assert gold["runId"] == accepted_run, gold
+    assert gold["outcome"] == SETTLEMENT_OUTCOME.OWNER_CHANGED, gold
+    assert "fingerprint" not in gold, gold
+    assert "phaseAfter" not in gold, gold
+    # Same-run entries keep attributing their own boundary.
+    started = next(verb for verb in verbs if verb["action"] == "new-run")
+    assert started["runId"] == accepted_run, started
+    assert started["outcome"] == launched["outcome"], (started, launched)
+    assert started.get("fingerprint"), started
+    assert started["phaseAfter"] == PHASE.EVENT, started
+
+    # Release the parked task in a fresh run (P16's shape) so the orphan
+    # slot is free for the next case.
+    launch(seed="CIOWNERNEXT")
+    released = run("cheat", "event-orphan-fault", "--follow", "3000",
+                   allow_errors=True)
+    assert released["settled"] is True, released
+    to_menu()
+
+
 @case("P14 event economics are part of the semantic fingerprint")
 def p14():
     to_map(seed="CIEVENTVARS")
@@ -1056,6 +1257,20 @@ def s1():
 
     d = obs()
     assert d["cardRemoval"] and not d["cardRemoval"]["used"], d.get("cardRemoval")
+    # One stall, one index: the removal publishes the only idx buy accepts,
+    # and a rejected index leaves the deck alone. (`cardRemoval.used` is not
+    # the witness here — the engine only flips it from a GUI node, so it
+    # reads False even after a removal lands.)
+    assert d["cardRemoval"]["idx"] == 0, d["cardRemoval"]
+    deck_before_rejects = len(d["player"]["deck"])
+    for bad in ("1", "2", "7"):
+        err = reject(["buy", "card_removal", "--idx", bad], REJECTION.BAD_INDEX)
+        assert "one entry" in err, err
+    d = obs()
+    assert d["phase"] == PHASE.SHOP, \
+        f"a rejected card_removal idx still opened its picker: {d['phase']}"
+    assert len(d["player"]["deck"]) == deck_before_rejects, \
+        "a rejected card_removal idx removed a card anyway"
     run("buy", "card_removal", "--idx", "0")
     d = bridge.wait_phase(PHASE.CARD_SELECT)
     before_rev = d["rev"]
@@ -1132,6 +1347,72 @@ def s3():
     message = result.get("msg", "").lower()
     assert PHASE.COMBAT in message, result
     assert "foul potion" in message and "merchant" in message, result
+    to_menu()
+
+
+@case("S4 shop advertises exactly the actions the dispatcher accepts")
+def s4():
+    d = to_map(seed="CISHOP")
+    shop = next(p for p in d["graph"] if p["type"] == PHASE.SHOP)
+    bridge.follow("cheat", "gold", "5000")
+    run("cheat", "goto", str(shop["col"]), str(shop["row"]))
+    d = bridge.wait_phase(PHASE.SHOP)
+
+    assert "buy" in legal() and "leave" in legal(), legal()
+    # An empty belt has nothing to discard or redeem, however full the
+    # shelf is — merchant stock is not the player's potions.
+    assert d["potions"], "no potions on the shelf to confuse with the belt"
+    for potion in list(d["player"]["potions"]):
+        d = bridge.follow("potion-discard", str(potion["slot"]))
+    assert d["player"]["potions"] == [], d["player"]["potions"]
+    assert "potion-discard" not in legal(), legal()
+    assert "potion-use" not in legal(), legal()
+
+    # A belt potion is discardable in a shop, and the dispatcher agrees.
+    d = bridge.follow("cheat", "potion", "ENERGY_POTION")
+    assert "potion-discard" in legal(), legal()
+    # ...but an ordinary potion has no merchant interaction, so potion-use
+    # stays off the list and the dispatcher rejects it.
+    assert "potion-use" not in legal(), legal()
+    ordinary = next(p for p in d["player"]["potions"]
+                    if p["model"] == "ENERGY_POTION")
+    assert ordinary["playable"] is False, ordinary
+    status, result = http("POST", "/step", {
+        "action": "potion-use", "args": {"slot": ordinary["slot"]},
+    })
+    assert status == 400 and result.get("err") == REJECTION.NOT_PLAYABLE, \
+        f"unadvertised potion-use was not rejected: {status} {result}"
+
+    # The Foul Potion is the one the merchant trades for: advertised, and
+    # accepted for gold.
+    d = bridge.follow("cheat", "potion", "FOUL_POTION")
+    assert "potion-use" in legal(), legal()
+    foul = next(p for p in d["player"]["potions"] if p["model"] == "FOUL_POTION")
+    assert foul["playable"] is True, foul
+    gold_before = d["gold"]
+    status, result = http("POST", "/step", {
+        "action": "potion-use", "args": {"slot": foul["slot"]}, "follow": 5000,
+    })
+    d = followed_http_obs(status, result, "advertised Foul Potion redemption")
+    assert d["gold"] > gold_before, (gold_before, d["gold"])
+    assert "potion-use" not in legal(), \
+        f"redeemed Foul Potion still advertises potion-use: {legal()}"
+
+    # Discard the rest of the belt; potion-discard retires with it.
+    for potion in list(d["player"]["potions"]):
+        d = bridge.follow("potion-discard", str(potion["slot"]))
+    assert d["player"]["potions"] == [], d["player"]["potions"]
+    assert "potion-discard" not in legal(), legal()
+
+    # Broke: nothing on the shelf is affordable, so buy retires too.
+    d = bridge.follow("cheat", "gold", "0")
+    assert not any(item.get("purchasable")
+                   for key in ("cards", "colorless", "relics", "potions")
+                   for item in d[key]), d
+    assert d["cardRemoval"]["purchasable"] is False, d["cardRemoval"]
+    assert "buy" not in legal(), legal()
+    reject(["buy", "relic", "--idx", "0"], REJECTION.NOT_ENOUGH_GOLD)
+    assert "leave" in legal(), legal()
     to_menu()
 
 
@@ -2437,6 +2718,65 @@ def m5():
     to_menu()
 
 
+@case("M6 context-bound content runs through its construction fixture")
+def m6():
+    # The sweeps' fixture contract, held in a case --quick still runs: M2
+    # and M4 are deep, so without this the fixture could rot for a month.
+    #
+    # SEA_GLASS and MAD_SCIENCE are never constructed bare by the game.
+    # OROBAS stamps the character whose pool Sea Glass reads; TINKER_TIME
+    # stamps both the card type Mad Science resolves as and the rider it
+    # carries. Injected raw, the first logs "obtained without a character ID
+    # assigned" and the second throws ArgumentOutOfRangeException out of
+    # OnPlay — fixture faults the sweeps would otherwise report as product
+    # faults.
+    entries = {
+        kind: {e["model"]: e.get("context")
+               for e in http("GET", f"/models?kind={kind}")[1]["entries"]}
+        for kind in ("card", "relic")
+    }
+    assert entries["relic"]["SEA_GLASS"] == ["CharacterId"], \
+        entries["relic"]["SEA_GLASS"]
+    assert entries["card"]["MAD_SCIENCE"] == \
+        ["TinkerTimeType", "TinkerTimeRider"], entries["card"]["MAD_SCIENCE"]
+    assert entries["card"]["STRIKE_IRONCLAD"] is None, \
+        "directly executable content must not advertise a construction context"
+
+    # Mad Science: the stamped type decides how the card resolves, so an
+    # attack must arrive targetable and land on an enemy — and the stamped
+    # rider has to run too. A rider-less card still deals its damage, so
+    # damage alone would pass on a half-configured fixture: the description
+    # renders the rider clause as "???" (the game's own invalid-state
+    # placeholder) and Sapping's Weak and Vulnerable never land.
+    d = into_combat(seed="CIM6", character="IRONCLAD")
+    bridge.follow("cheat", "energy", "99")
+    d = bridge.follow("cheat", "card", "MAD_SCIENCE")
+    grafted = next(c for c in d["hand"] if c["model"] == "MAD_SCIENCE")
+    assert grafted.get("target") == "anyenemy", grafted
+    assert "?" not in (grafted.get("description") or "?"), grafted
+    victim = alive_enemy(d)
+    d = bridge.follow("play", "MAD_SCIENCE", "--target", str(victim["id"]))
+    hit = next(e for e in d["enemies"] if e["id"] == victim["id"])
+    assert hit["hp"][0] < victim["hp"][0] or not hit["alive"], (victim, hit)
+    assert {"WEAK_POWER", "VULNERABLE_POWER"} <= {p["id"] for p in hit["powers"]}, \
+        hit
+    to_menu()
+
+    # Sea Glass: SILENT, not the Ironclad the unstamped relic falls back
+    # to — the grid must be drawn from the owning character's pool.
+    pools = {e["model"]: e.get("pool")
+             for e in http("GET", "/models?kind=card")[1]["entries"]}
+    to_map(seed="CIM6R", character="SILENT")
+    d = bridge.follow("cheat", "relic", "SEA_GLASS")
+    assert d["phase"] == PHASE.CARD_SELECT, d["phase"]
+    offered = {pools.get(c["model"]) for c in d["cards"]}
+    assert offered == {"silent"}, offered
+    d = bridge.walk_world(PHASE.MAP, initial=d, claim_card_reward=True,
+                          claim_reward_tiles=True)
+    assert "SEA_GLASS" in d["player"]["relics"], d["player"]["relics"]
+    to_menu()
+
+
 # ---------- F: the full loop ----------
 
 @case("F1 act-1 parity loop")
@@ -2526,6 +2866,27 @@ def i5():
     first = shop["relics"][0]
     assert first["model"] and first["description"] and first["stocked"], first
     assert first["price"] == first["cost"] and first["price"] > 0, first
+    # The stall also publishes the ordinary shop-stock shape, so the same
+    # `buy relic --idx N` the dispatcher takes is derivable from obs alone.
+    stock = d["relics"]
+    assert [item["model"] for item in stock] == \
+        [item["model"] for item in shop["relics"]], (stock, shop["relics"])
+    assert all(item["idx"] == i for i, item in enumerate(stock)), stock
+    assert all(item["purchasable"] for item in stock), stock
+    assert "buy" in legal(), legal()
+    # Broke: nothing is purchasable, so buy retires and the dispatcher agrees.
+    poor = bridge.follow("cheat", "gold", "0")
+    assert not any(item["purchasable"] for item in poor["relics"]), poor["relics"]
+    assert "buy" not in legal(), legal()
+    reject(["buy", "relic", "--idx", "0"], REJECTION.NOT_ENOUGH_GOLD)
+    # The stall sells relics only — no cards, potions, or card removal.
+    assert poor.get("cardRemoval") is None, poor.get("cardRemoval")
+    for kind in ("card", "colorless", "potion", "card_removal"):
+        reject(["buy", kind, "--idx", "0"], REJECTION.BAD_INDEX)
+    reject(["buy", "card_removal", "--idx", "1"], REJECTION.BAD_INDEX)
+
+    d = bridge.follow("cheat", "gold", "500")
+    assert "buy" in legal(), legal()
     before_gold = d["player"]["gold"]
     before_rev = d["rev"]
     run("buy", "relic", "--idx", "0")
@@ -2535,6 +2896,7 @@ def i5():
         after_rev=before_rev,
     )
     assert not d["fakeMerchant"]["relics"][0]["stocked"], d["fakeMerchant"]
+    assert d["relics"][0]["purchasable"] is False, d["relics"][0]
     assert d["player"]["gold"] < before_gold, d["player"]
     assert first["model"] in d["player"]["relics"], d["player"]["relics"]
     to_menu()

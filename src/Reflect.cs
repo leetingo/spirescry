@@ -35,14 +35,22 @@ internal static class Reflect
     public static object? FieldValue(object obj, string name) =>
         FindField(obj.GetType(), name)?.GetValue(obj);
 
-    public static object? PropertyValue(object obj, string name) =>
-        Getters.GetOrAdd((obj.GetType(), name), static key =>
+    private static MethodInfo? FindGetter(Type type, string name) =>
+        Getters.GetOrAdd((type, name), static key =>
         {
             for (var t = key.Item1; t is not null; t = t.BaseType)
                 if (t.GetProperty(key.Item2, Flags)?.GetGetMethod(true) is { } get)
                     return get;
             return null;
-        })?.Invoke(obj, null);
+        });
+
+    public static object? PropertyValue(object obj, string name) =>
+        FindGetter(obj.GetType(), name)?.Invoke(obj, null);
+
+    // The declared type of a property, for callers that must coerce a value
+    // into it (the construction-context fixtures parse enum members).
+    public static Type? PropertyType(object obj, string name) =>
+        FindGetter(obj.GetType(), name)?.ReturnType;
 
     // Some engine properties (Creature.CurrentHp, …) have private setters;
     // the setter path still runs the property's change events.

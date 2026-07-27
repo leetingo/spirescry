@@ -343,6 +343,13 @@ fn main() -> ExitCode {
                      capture a fault-bundle and inspect acceptedRev/runId first"
                 );
             }
+            if settlement_outcome == Some(SettlementOutcome::OwnerChanged) {
+                eprintln!(
+                    "spirescry: the run that accepted this action stopped being the live run \
+                     before it settled; its result was never observed — the response's 'obs' \
+                     belongs to whatever owns the game now, not to acceptedRunId"
+                );
+            }
             let text = serde_json::to_string_pretty(&v).unwrap();
             // A plain println! panics on a closed pipe (e.g. `| head -1`);
             // write directly so that just exits quietly instead.
@@ -785,6 +792,21 @@ fn replay_value(client: &impl ReplayTransport, log: &Value) -> CliResult<Value> 
                     action,
                 )
             })?;
+        // Both non-boundary outcomes stop the replay, but they are different
+        // failures: a timeout is the reconstruction being too slow, an owner
+        // change is somebody else abandoning or restarting the run underneath
+        // it. Naming the second one as the first sends the reader hunting for
+        // a stuck engine.
+        if outcome == SettlementOutcome::OwnerChanged {
+            return Err(format!(
+                "divergence at verb {} ({}): the run being reconstructed stopped \
+                 being the live run mid-verb (a concurrent abandon or new-run) — \
+                 replay needs the host to itself",
+                idx + 1,
+                action,
+            )
+            .into());
+        }
         if !outcome.reached_boundary() {
             return Err(format!(
                 "divergence at verb {} ({}): reconstruction timed out",
@@ -2496,8 +2518,14 @@ mod tests {
                 SettlementOutcome::NextDecision,
                 SettlementOutcome::Fault,
                 SettlementOutcome::Timeout,
+                SettlementOutcome::OwnerChanged,
             ]
         );
+        // A follow that lost its run never reached a boundary and can never
+        // be replayed: replay must diverge on it instead of accepting the
+        // observation that came back from another run.
+        assert!(!SettlementOutcome::OwnerChanged.reached_boundary());
+        assert!(!SettlementOutcome::OwnerChanged.is_replayable());
         assert_eq!(artifact["faultEventTokens"], Value::Object(faults));
         assert_eq!(artifact["cheatArgumentShapes"], json!(cheats));
     }

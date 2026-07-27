@@ -191,7 +191,12 @@ Fault-event prefixes: `engine_error:`, `async_fault:`, `engine_note:`.
    continuation has completed;
    `next_decision` means an effect parked on a picker/dialogue that now
    needs one verb; `timeout` means the verb was accepted but has not
-   resolved — do not fire another verb, rescry and inspect `health`.
+   resolved — do not fire another verb, rescry and inspect `health`;
+   `owner_changed` means the run named by `acceptedRunId` stopped being
+   the live run before the verb settled (someone else abandoned it or
+   started another), so the response's `obs` is that other owner's board
+   and this verb's own result was never observed — rescry before deciding
+   anything.
    Then inspect `errors`: it lists engine exceptions logged between
    acceptance and settlement (the first two fault-event prefixes above). The
    engine logs-and-swallows faults inside its own task chains, so a verb
