@@ -565,4 +565,79 @@ assert_says 'stopped' "$output"
 assert_dead "$launched_game_pid"
 [ ! -e "$game_pidfile" ]
 
+# ---------- a child that has not exec'd yet is not an unidentifiable child ----
+
+# `nohup "$game_bin" --headless &` hands back a PID that is still a forked copy
+# of the launcher until the kernel finishes the exec. A ps sample taken inside
+# that window reports the launcher's own command line, which matches no game.
+# Treating that first sample as final both fails launches that were fine and —
+# worse — strands the child, which execs and binds the port moments later.
+#
+# fake_command_reads <n|all>: make the next <n> `command=` reads (or all of
+# them) report a command that belongs to no game.
+fake_command_reads() {
+    rm -f "$fakebin/ps" "$scratch/command-count"
+    printf '%s\n' \
+        '#!/bin/sh' \
+        "count_file=\"$scratch/command-count\"" \
+        "lies=\"$1\"" \
+        'case "$*" in' \
+        '    *command=*)' \
+        '        count=0' \
+        '        [ ! -f "$count_file" ] || read -r count < "$count_file"' \
+        '        count=$((count + 1))' \
+        '        printf "%s\\n" "$count" > "$count_file"' \
+        '        if [ "$lies" = all ] || [ "$count" -le "$lies" ]; then' \
+        '            printf "Mon Jan  1 00:00:00 2099 /bin/sh /not/the/game\\n"' \
+        '            exit 0' \
+        '        fi' \
+        '        ;;' \
+        'esac' \
+        "exec \"$real_ps\" \"\$@\"" \
+        > "$fakebin/ps"
+    chmod +x "$fakebin/ps"
+}
+
+# One late exec must not fail the launch: the child is identified as soon as it
+# becomes identifiable.
+rm -f "$game_child_pidfile" "$game_pidfile"
+health_body="$(health_json spirescry "$checkout_stamp")"
+fake_command_reads 1
+launch_status=0
+output="$(run_headless 2>&1)" || launch_status=$?
+rm -f "$fakebin/ps"
+ln -s "$real_ps" "$fakebin/ps"
+[ "$launch_status" = 0 ] || {
+    [ ! -s "$game_child_pidfile" ] || kill -KILL "$(cat "$game_child_pidfile")" 2>/dev/null || true
+    echo "a child that exec'd one ps sample late failed to launch: $output" >&2
+    exit 1
+}
+assert_says 'bridge up' "$output"
+[ -s "$game_child_pidfile" ] || {
+    echo "the slow-exec game stand-in never recorded its PID" >&2
+    exit 1
+}
+slow_exec_game_pid="$(cat "$game_child_pidfile")"
+assert_alive "$slow_exec_game_pid"
+output="$(run_game_stop 2>&1)"
+assert_says 'stopped' "$output"
+assert_dead "$slow_exec_game_pid"
+
+# A child that never becomes identifiable is still this launcher's child: it
+# must be reclaimed, not left holding the port while the launcher tells the
+# user to go check on it.
+rm -f "$game_child_pidfile" "$game_pidfile"
+health_body=""
+fake_command_reads all
+if output="$(run_headless 2>&1)"; then
+    rm -f "$fakebin/ps"
+    ln -s "$real_ps" "$fakebin/ps"
+    echo "an unidentifiable child reported launch success: $output" >&2
+    exit 1
+fi
+rm -f "$fakebin/ps"
+ln -s "$real_ps" "$fakebin/ps"
+assert_says 'could not be identified' "$output"
+assert_game_child_reclaimed "the unidentifiable-child launch"
+
 echo "build launch and stop tests passed"

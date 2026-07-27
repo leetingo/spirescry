@@ -44,6 +44,11 @@ fi
 
 HOST_DLL="$REPO/headless/Host/bin/Release/spirescry_host.dll"
 
+# How long a launcher waits (in 0.1s polls) for the child it forked to exec its
+# real binary and become identifiable. Generous: the cost of a slow exec is a
+# fraction of a second here, while giving up early strands the child.
+LAUNCH_IDENTIFY_TRIES=20
+
 # Stamped into both builds; /health reports it as buildHash so a running
 # host can be matched to its build inputs. A git ref alone cannot do
 # that: it misses source edits made after the build (dirty or not) and a
@@ -414,15 +419,41 @@ sample_child_identity() {
 # is the thing holding the port. A launcher that forked a grandchild and exited
 # would leave nothing safe to signal: the direct child is gone by the first ps
 # sample, and its grandchild is not identifiable as ours. That case fails loudly
-# ("could not be identified") rather than guessing at a PID to kill.
+# ("could not be identified") rather than guessing at a PID to kill — but a
+# child that is still live under the start identity we forked is reclaimed
+# first, identified or not.
 supervise_launch() {
     local pid="$1" label="$2" predicate="$3" deadline="$4" log="$5" pidfile="$6" hint="$7"
-    local launch_identity sample_status=0 pidtmp
+    local launch_identity="" sample_status=0 pidtmp attempt=0 identified=0
 
-    sample_child_identity "$pid" || sample_status=$?
-    [ "$sample_status" = 0 ] && "$predicate" "$CHILD_SNAPSHOT" || \
+    # The child we just forked is still this shell until it execs, so its first
+    # ps command line is the launcher's own — a race, not an answer. Poll until
+    # the exec lands (LAUNCH_IDENTIFY_TRIES × 0.1s) before ruling on identity.
+    while :; do
+        sample_status=0
+        sample_child_identity "$pid" || sample_status=$?
+        [ "$sample_status" = 0 ] || break
+        [ -n "$launch_identity" ] || launch_identity="$CHILD_START_IDENTITY"
+        # A start time that moved means this PID is no longer the child we
+        # forked; nothing here is ours to wait on or to signal.
+        [ "$CHILD_START_IDENTITY" = "$launch_identity" ] || break
+        if "$predicate" "$CHILD_SNAPSHOT"; then
+            identified=1
+            break
+        fi
+        attempt=$((attempt + 1))
+        [ "$attempt" -lt "$LAUNCH_IDENTIFY_TRIES" ] || break
+        sleep 0.1
+    done
+    if [ "$identified" = 0 ]; then
+        # We forked this PID ourselves and its start time never moved, so it is
+        # still ours to reclaim. Dying with it alive would leave it to exec and
+        # take the port — the leak this launcher exists to prevent.
+        if [ "$sample_status" = 0 ] && [ "$CHILD_START_IDENTITY" = "$launch_identity" ]; then
+            stop_exact_process "$pid" "$CHILD_SNAPSHOT" "unidentified $label"
+        fi
         die "launched $label PID $pid could not be identified — see $log, and check port $STS2_AGENT_PORT is free before relaunching"
-    launch_identity="$CHILD_START_IDENTITY"
+    fi
 
     # wait_bridge calls die on deadline. Run it in a subshell so the launcher
     # can still reclaim the exact child it started before returning failure.
