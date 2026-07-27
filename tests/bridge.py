@@ -179,6 +179,33 @@ def _act_and_settle(snapshot, *args, deadline, on_obs=None):
     return settled
 
 
+def unselected_card(d):
+    """The lowest-index card of a picker that is not already selected.
+
+    `card_select` carries a per-card `selected` flag; `hand_select`
+    publishes only the top-level `selected` selector list, so a card's own
+    flag reads `None` there. Consume that list positionally instead of
+    treating every card as unselected: without it a picker asking for two
+    of five cards toggles index 0 on and off until the walker gives up
+    ("world exceeded 120 revision-driven steps ... hand_select" — CHARGE
+    and HIDDEN_DAGGERS in the M2 sweep). Two copies of one model are
+    interchangeable to the walker, so consuming in index order is exact
+    for the only pattern it produces: always take the lowest free index.
+    """
+    pending = list(d.get("selected") or [])
+    for card in d.get("cards", []):
+        flag = card.get("selected")
+        if flag:
+            continue
+        if flag is None:
+            key = card.get("selector") or card.get("model")
+            if key in pending:
+                pending.remove(key)
+                continue
+        return card
+    return None
+
+
 def kill_current_combat(*, on_obs=None, timeout=60, initial=None):
     """Cheat-kill the current combat, resolving any picker it opens."""
     deadline = time.monotonic() + timeout
@@ -188,12 +215,13 @@ def kill_current_combat(*, on_obs=None, timeout=60, initial=None):
     used_potion = False
     for _ in range(90):
         if d["phase"] in (PHASE.HAND_SELECT, PHASE.CARD_SELECT):
+            free = unselected_card(d)
             if d.get("confirmable"):
                 d = _act_and_settle(
                     d, "confirm", deadline=deadline, on_obs=on_obs)
-            elif d.get("cards"):
+            elif free is not None:
                 d = _act_and_settle(
-                    d, "pick-card", str(d["cards"][0]["idx"]),
+                    d, "pick-card", str(free["idx"]),
                     deadline=deadline, on_obs=on_obs)
             else:
                 raise AssertionError(
@@ -271,9 +299,7 @@ def resolve_transient_phase(d, *, claim_reward_tiles=False,
         if d.get("confirmable"):
             return _follow_before(deadline, "confirm")
         else:
-            card = next(
-                (card for card in d.get("cards", [])
-                 if not card.get("selected")), None)
+            card = unselected_card(d)
             if card is None:
                 raise AssertionError(
                     f"{phase} has neither selectable cards nor confirm")
