@@ -787,6 +787,72 @@ internal static class Tests
             isAbandoned: true, endedInVictoryRoom: false, winTime: 0));
     }
 
+    public static void SelectionProjectionMarksOnlyThePickedInstance()
+    {
+        // The #147 regression: a hand routinely holds several copies of one
+        // model. Matching a selection by model lights up every copy, so the
+        // caller cannot tell which row is still free and re-picks the first
+        // row forever — toggling it on and off instead of completing.
+        var first = new SelectableCard("DEFEND_SILENT");
+        var second = new SelectableCard("DEFEND_SILENT");
+        var picked = SelectionProjection.Picked(
+            new List<SelectableCard> { first });
+
+        True(SelectionProjection.IsSelected(first, picked));
+        False(SelectionProjection.IsSelected(second, picked));
+    }
+
+    public static void SelectionProjectionAgreesWithTheSelectedCollection()
+    {
+        // Per-row flags and the top-level selected list are two views of one
+        // decision: every candidate the list names reads selected, every
+        // other candidate reads unselected, after each pick and each toggle.
+        var candidates = new[]
+        {
+            new SelectableCard("STRIKE_SILENT"),
+            new SelectableCard("DEFEND_SILENT"),
+            new SelectableCard("STRIKE_SILENT"),
+        };
+        var picked = new List<SelectableCard>();
+
+        Equal("---", Flags(candidates, picked));
+        picked.Add(candidates[2]);
+        Equal("--x", Flags(candidates, picked));
+        picked.Add(candidates[0]);
+        Equal("x-x", Flags(candidates, picked));
+        picked.Remove(candidates[2]);            // toggled back off
+        Equal("x--", Flags(candidates, picked));
+    }
+
+    public static void SelectionProjectionTreatsAnEmptyHolderAsUnselected()
+    {
+        // GUI hand rows can be holders with no card node; they are reported
+        // as a card-less slot and must never claim to be picked.
+        Equal(false, SelectionProjection.IsSelected(
+            (SelectableCard?)null,
+            SelectionProjection.Picked(
+                new[] { new SelectableCard("STRIKE_SILENT") })));
+        Equal(false, SelectionProjection.IsSelected(
+            new SelectableCard("STRIKE_SILENT"),
+            SelectionProjection.Picked((IEnumerable<SelectableCard>?)null)));
+    }
+
+    public static void SelectionProjectionReadsThePickedListOncePerSnapshot()
+    {
+        // The picker hands out the live list its pick verb mutates, so the
+        // rows of one snapshot are answered from a reading taken once —
+        // never from a collection that can change between rows.
+        var card = new SelectableCard("STRIKE_SILENT");
+        var selected = new List<SelectableCard>();
+        var picked = SelectionProjection.Picked(selected);
+
+        selected.Add(card);
+
+        False(SelectionProjection.IsSelected(card, picked));
+        True(SelectionProjection.IsSelected(
+            card, SelectionProjection.Picked(selected)));
+    }
+
     public static void SeaGlassIsBoundToItsOwningCharacter()
     {
         // OROBAS stamps the character whose card pool Sea Glass reads before
@@ -2833,6 +2899,22 @@ internal static class Tests
             combatIsEnding,
             queuesEmpty,
             allEnemiesDead);
+
+    // A value-equal stand-in for CardModel: two copies of one model compare
+    // equal, so a projection that leaned on Equals instead of identity would
+    // pass this suite only by accident.
+    private sealed record SelectableCard(string Model);
+
+    // One snapshot's worth of rows, projected the way Snapshotter does it:
+    // read the picked instances once, then answer every row from that.
+    private static string Flags(
+        IReadOnlyList<SelectableCard?> candidates,
+        IReadOnlyCollection<SelectableCard> selected)
+    {
+        var picked = SelectionProjection.Picked(selected);
+        return string.Concat(candidates.Select(card =>
+            SelectionProjection.IsSelected(card, picked) ? "x" : "-"));
+    }
 
     private static void Equal(object? expected, object? actual)
     {

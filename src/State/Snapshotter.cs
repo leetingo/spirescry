@@ -1592,6 +1592,7 @@ internal static class Snapshotter
     {
         var decision = DecisionSurface.Current.CardSelect;
         if (decision is null) return new SnapshotContract(phase) { Available = false };
+        var picked = SelectionProjection.Picked(decision.Selected);
         var snapshot = new SnapshotContract(phase)
         {
             Player = FooterView(),
@@ -1602,7 +1603,7 @@ internal static class Snapshotter
                 model: card.Id.Entry,
                 selector: CardSpecifier.From(card),
                 semanticState: [CardStateToken(card)],
-                selected: decision.Selected.Contains(card))).ToArray(),
+                selected: SelectionProjection.IsSelected(card, picked))).ToArray(),
             Selected = decision.Selected.Select(CardSpecifier.From).ToArray(),
             SemanticState =
             [
@@ -1621,10 +1622,15 @@ internal static class Snapshotter
     // Hand select runs inside the combat room — the hand flips into a
     // selection mode instead of pushing an overlay. Picked cards leave
     // ActiveHolders (into the selected row), so idx tracks what's on screen.
+    // The host's stand-in picker has no such row and keeps every candidate
+    // listed, so each row carries its own selected flag: without it a
+    // caller facing duplicate models cannot tell which row it already
+    // picked, and re-picking the first row only toggles it back off.
     private static SnapshotContract HandSelectSnapshot(Phase phase)
     {
         var decision = DecisionSurface.Current.HandSelect;
         if (decision is null) return new SnapshotContract(phase) { Available = false };
+        var picked = SelectionProjection.Picked(decision.Selected);
         var snapshot = new SnapshotContract(phase)
         {
             Confirmable = decision.Confirmable,
@@ -1633,7 +1639,8 @@ internal static class Snapshotter
                 model: card?.Id.Entry,
                 selector: card is null ? null : CardSpecifier.From(card),
                 semanticState: card is null ? [SemanticToken("card", (object?)null)]
-                    : [CardStateToken(card, liveCost: true)])).ToArray(),
+                    : [CardStateToken(card, liveCost: true)],
+                selected: SelectionProjection.IsSelected(card, picked))).ToArray(),
             Selected = decision.Selected.Select(CardSpecifier.From).ToArray(),
             SemanticState =
             [

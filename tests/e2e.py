@@ -2493,6 +2493,76 @@ def c13():
     to_menu()
 
 
+def hand_selection(d):
+    """The per-card view of what is picked, as sorted selectors."""
+    return sorted(card["selector"] for card in d["cards"]
+                  if card.get("selected"))
+
+
+@case("C14 hand selection reports which cards are already picked")
+def c14():
+    # The host's stand-in picker keeps every candidate listed after a pick,
+    # so the only way to tell a picked row from a free one is the row's own
+    # selected flag — hands hold several copies of one model, and models
+    # alone cannot distinguish them. Without the flag a caller re-picks the
+    # first row forever, toggling it on and off instead of finishing.
+    d = into_combat(seed="CIHANDSEL", character="SILENT")
+    bridge.follow("cheat", "energy", "99")
+    bridge.follow("cheat", "card", "HIDDEN_DAGGERS")
+    d = bridge.follow("play", "HIDDEN_DAGGERS")
+    assert d["phase"] == PHASE.HAND_SELECT, d
+    assert (d.get("min"), d.get("max")) == (2, 2), d
+    assert all("selected" in card for card in d["cards"]), d["cards"]
+    assert hand_selection(d) == sorted(d["selected"]) == [], d
+
+    first = d["cards"][0]
+    d = bridge.follow("pick-card", str(first["idx"]))
+    assert d["phase"] == PHASE.HAND_SELECT, d
+    assert d["cards"][first["idx"]]["selected"] is True, d["cards"]
+    assert hand_selection(d) == sorted(d["selected"]) \
+        == [first["selector"]], d
+    twin = next((card for card in d["cards"]
+                 if card["idx"] != first["idx"]
+                 and card["model"] == first["model"]), None)
+    assert twin is None or twin["selected"] is False, d["cards"]
+
+    # picking it again toggles it off — both views agree on that too
+    d = bridge.follow("pick-card", str(first["idx"]))
+    assert hand_selection(d) == sorted(d["selected"]) == [], d
+
+    # a second, different card completes the pair and resolves the effect
+    d = bridge.follow("pick-card", str(first["idx"]))
+    second = next(card for card in d["cards"] if card["idx"] != first["idx"])
+    d = bridge.follow("pick-card", str(second["idx"]))
+    assert d["phase"] == PHASE.COMBAT, d
+
+    # PURITY selects 0..3, so its partial selection needs an explicit confirm
+    bridge.follow("cheat", "energy", "99")
+    bridge.follow("cheat", "card", "PURITY")
+    d = bridge.follow("play", "PURITY")
+    assert d["phase"] == PHASE.HAND_SELECT and d.get("min") == 0, d
+    partial = next(card for card in d["cards"] if not card["selected"])
+    d = bridge.follow("pick-card", str(partial["idx"]))
+    assert hand_selection(d) == sorted(d["selected"]) \
+        == [partial["selector"]], d
+    assert d.get("confirmable") is True, d
+    d = bridge.follow("confirm")
+    assert d["phase"] == PHASE.COMBAT, d
+
+    # CHARGE picks from the draw pile rather than the hand, and lands on the
+    # same stand-in picker. Drive it with the shared walker: that generic
+    # agent path is what looped once a decision needed two distinct picks.
+    d = into_combat(seed="CIHANDSEL2", character="REGENT")
+    bridge.follow("cheat", "energy", "99")
+    bridge.follow("cheat", "card", "CHARGE")
+    d = bridge.follow("play", "CHARGE")
+    assert d["phase"] == PHASE.HAND_SELECT, d
+    assert (d.get("min"), d.get("max")) == (2, 2), d
+    d = bridge.walk_world(PHASE.COMBAT, initial=d, timeout=30)
+    assert d["phase"] == PHASE.COMBAT, d
+    to_menu()
+
+
 # ---------- V: victory ----------
 
 @case("V1 cheat-driven full clear reaches a victory game_over")

@@ -372,8 +372,8 @@ it.
 | `relic_reward` | relics on offer | `pick-relic <idx>`, `skip` |
 | `rewards` | reward tiles | `pick-reward <idx>`; `proceed` leaves, skipping the rest |
 | `card_reward` | cards on offer | `pick-card <idx>`, `skip` |
-| `card_select` | picker cards with `cost` and `upgradedPreview` | `pick-card <idx>` (toggles), `confirm` when enough are selected, `skip` only when `cancelable` |
-| `hand_select` | cards currently selectable from hand | `pick-card <idx>`, `confirm` when enough are selected (no `skip`) |
+| `card_select` | picker cards with `cost`, `upgradedPreview` and `selected` (already picked) | `pick-card <idx>` (toggles — to add a pick, name a row whose `selected` is false), `confirm` when enough are selected, `skip` only when `cancelable` |
+| `hand_select` | cards currently selectable from hand, each with `selected` (already picked) | `pick-card <idx>` (toggles — to add a pick, name a row whose `selected` is false; duplicate models share a name, so go by `idx`), `confirm` when enough are selected (no `skip`) |
 | `bundle_select` | card packs (e.g. Neow) | `pick-card <idx>`; GUI may then expose `confirm` |
 | `crystal_sphere` | divination minigame | `map-move <col> <row>` picks a cell, `option 0`/`1` picks the tool, `proceed` leaves |
 | `game_over` | `outcome`, `seed`, where the run ended: `actNumber`/`actFloor` (1-based), `mapCoord`, `encounter` (model + title). Legacy pair: `act` is the zero-based act index, `floor` the run-cumulative floor — prefer the 1-based fields in reports. | `abandon` → main menu |
