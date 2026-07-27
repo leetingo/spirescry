@@ -1704,6 +1704,222 @@ internal static class Tests
         False(tracker.HasRetired);
     }
 
+    public static void FireAndForgetTrackerPublishesWorkOwnedByTheCurrentRun()
+    {
+        // The baseline the suppression must not eat: a verb's own async work
+        // faulting inside the run that dispatched it is exactly the fault
+        // follow and the runlog exist to report.
+        var tracker = new FireAndForgetTracker();
+        var run = new object();
+        var task = new TaskCompletionSource().Task;
+        var owner = new AsyncWorkOwner();
+
+        tracker.ChangeRun(run);
+        tracker.Track(task, owner);
+        Equal(1, tracker.PendingCount);
+
+        True(tracker.Complete(task));
+        Equal(0, tracker.PendingCount);
+        // Its engine log lines are the live run's errors too.
+        False(tracker.WrittenByRetiredWork(owner));
+    }
+
+    public static void FireAndForgetTrackerRetiresWorkWhenItsRunGoesAway()
+    {
+        // #145: a task parked by an abandoned run must stop being work the
+        // board owes the moment its owner is gone — the ledger drops it at
+        // the rotation, so a zombie cannot hold the follow probe busy for
+        // every later run — and its late completion must publish nothing,
+        // whether it lands at the menu or inside the next run.
+        var tracker = new FireAndForgetTracker();
+        var abandoned = new object();
+        var parked = new TaskCompletionSource().Task;
+        var owner = new AsyncWorkOwner();
+
+        tracker.ChangeRun(abandoned);
+        tracker.Track(parked, owner);
+        tracker.ChangeRun(null);                 // back to the main menu
+
+        Equal(0, tracker.PendingCount);
+        False(tracker.Complete(parked));
+        True(tracker.WrittenByRetiredWork(owner));
+
+        // The same task released later, once a new run is live, stays retired.
+        tracker.ChangeRun(abandoned);
+        tracker.Track(parked, owner);
+        tracker.ChangeRun(new object());
+        Equal(0, tracker.PendingCount);
+        False(tracker.Complete(parked));
+        True(tracker.WrittenByRetiredWork(owner));
+    }
+
+    public static void FireAndForgetTrackerReportsWorkThatEndsItsOwnRun()
+    {
+        // #145's third criterion, for the one verb whose work IS the
+        // rotation: `abandon` tracks the task that clears RunState while that
+        // run is still active, so the retirement rule would silently
+        // downgrade the teardown's own fault and withhold every engine Error
+        // line it writes afterwards — `abandon --follow` would report a clean
+        // settle for a teardown that failed. The exemption is spent on that
+        // one rotation, so a task that never completes cannot pin the ledger.
+        var tracker = new FireAndForgetTracker();
+        var leaving = new object();
+        var teardown = new TaskCompletionSource().Task;
+        var owner = new AsyncWorkOwner();
+
+        tracker.ChangeRun(leaving);
+        tracker.Track(teardown, owner, endsRun: true);
+        tracker.ChangeRun(null);                 // the teardown's own rotation
+
+        Equal(1, tracker.PendingCount);
+        True(tracker.Complete(teardown));
+        False(tracker.WrittenByRetiredWork(owner));
+
+        // Ordinary work the same run parked is still retired by that
+        // rotation — the exemption is scoped to the teardown's own task.
+        var parked = new TaskCompletionSource().Task;
+        var parkedOwner = new AsyncWorkOwner();
+        tracker.ChangeRun(leaving);
+        tracker.Track(parked, parkedOwner);
+        tracker.ChangeRun(null);
+        Equal(0, tracker.PendingCount);
+        False(tracker.Complete(parked));
+        True(tracker.WrittenByRetiredWork(parkedOwner));
+
+        // And the flag does not make the teardown immortal: released to the
+        // menu it is adopted by the next run, then retired like anything else.
+        var lingering = new TaskCompletionSource().Task;
+        var lingeringOwner = new AsyncWorkOwner();
+        tracker.ChangeRun(leaving);
+        tracker.Track(lingering, lingeringOwner, endsRun: true);
+        tracker.ChangeRun(null);
+        tracker.ChangeRun(new object());
+        Equal(1, tracker.PendingCount);
+        tracker.ChangeRun(null);
+        Equal(0, tracker.PendingCount);
+        False(tracker.Complete(lingering));
+        True(tracker.WrittenByRetiredWork(lingeringOwner));
+    }
+
+    public static void FireAndForgetTrackerSuppressesEngineLogsFromRetiredWork()
+    {
+        // #145: the engine catches exceptions from fire-and-forget chains and
+        // only logs them, so an abandoned run's work can reach the live run's
+        // error journal without ever faulting a task — and it usually
+        // completes successfully afterwards, leaving nothing to correlate an
+        // identity against. The owner stamped on its async flow is the answer.
+        var tracker = new FireAndForgetTracker();
+        var abandoned = new object();
+        var retired = new AsyncWorkOwner();
+        var live = new AsyncWorkOwner();
+
+        tracker.ChangeRun(abandoned);
+        tracker.Track(new TaskCompletionSource().Task, retired);
+        tracker.ChangeRun(new object());
+        tracker.Track(new TaskCompletionSource().Task, live);
+
+        True(tracker.WrittenByRetiredWork(retired));
+        False(tracker.WrittenByRetiredWork(live));
+        // The engine's own threads and the boot path carry no stamp, and a
+        // job that tracked nothing never bound one: unknown context must
+        // degrade toward reporting an error, never toward hiding one.
+        False(tracker.WrittenByRetiredWork(null));
+        False(tracker.WrittenByRetiredWork(new AsyncWorkOwner()));
+    }
+
+    public static void FireAndForgetTrackerAdoptsMenuWorkIntoTheRunItStarts()
+    {
+        // `new-run` tracks the very task that mints the next RunState, so a
+        // rotation is the expected outcome of that work, not evidence it was
+        // orphaned: retiring it there would hide the failure of the verb that
+        // started the run. It answers to that run from then on, so the next
+        // rotation retires it like anything else — otherwise a menu task that
+        // never completes would pin the ledger, and with it every later run's
+        // follow probe, for the rest of the process.
+        var tracker = new FireAndForgetTracker();
+        var starting = new TaskCompletionSource().Task;
+        var owner = new AsyncWorkOwner();
+        var run = new object();
+
+        tracker.Track(starting, owner);          // tracked with no run active
+        tracker.ChangeRun(run);
+
+        Equal(1, tracker.PendingCount);
+        False(tracker.WrittenByRetiredWork(owner));
+
+        tracker.ChangeRun(null);
+        Equal(0, tracker.PendingCount);
+        False(tracker.Complete(starting));
+        True(tracker.WrittenByRetiredWork(owner));
+    }
+
+    public static void FireAndForgetTrackerReportsMenuWorkThatNeverStartsARun()
+    {
+        // The other half of the same trade: a `new-run` that fails before any
+        // RunState exists completes with the board still at the menu, and it
+        // is the only report the agent will ever get.
+        var tracker = new FireAndForgetTracker();
+        var starting = new TaskCompletionSource().Task;
+        var owner = new AsyncWorkOwner();
+
+        tracker.Track(starting, owner);          // tracked with no run active
+
+        Equal(1, tracker.PendingCount);
+        True(tracker.Complete(starting));
+        False(tracker.WrittenByRetiredWork(owner));
+    }
+
+    public static void FireAndForgetTrackerKeepsWorkAcrossARedundantRefresh()
+    {
+        // RefreshRunIdentity runs on every tick and every settlement probe.
+        // Re-stating the same run must not rotate anything: in-flight work
+        // would otherwise be retired between two frames of one run.
+        var tracker = new FireAndForgetTracker();
+        var run = new object();
+        var task = new TaskCompletionSource().Task;
+        var owner = new AsyncWorkOwner();
+
+        tracker.ChangeRun(run);
+        tracker.Track(task, owner);
+        tracker.ChangeRun(run);
+        tracker.ChangeRun(run);
+
+        Equal(1, tracker.PendingCount);
+        True(tracker.Complete(task));
+        False(tracker.WrittenByRetiredWork(owner));
+    }
+
+    public static void AsyncWorkOwnerStampReachesWorkTheJobStarted()
+    {
+        // The stamp is only useful if it survives the awaits between the pump
+        // job and the log line: an engine Error written by a continuation
+        // scheduled minutes later must still resolve to the job's owner. Also
+        // pins the restore — the pump thread's next job must not inherit it.
+        var gate = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        AsyncWorkOwner? stamped = null;
+        AsyncWorkOwner? seenInsideJob = null;
+
+        var work = AsyncWorkOwner.Stamp(() =>
+        {
+            seenInsideJob = AsyncWorkOwner.Current;
+            return Observe();
+        });
+
+        stamped = seenInsideJob;
+        True(stamped is not null);
+        True(AsyncWorkOwner.Current is null);    // restored for the next job
+
+        gate.SetResult();
+        Equal(stamped, work.GetAwaiter().GetResult());
+
+        async Task<AsyncWorkOwner?> Observe()
+        {
+            await gate.Task.ConfigureAwait(false);
+            return AsyncWorkOwner.Current;
+        }
+    }
+
     public static void RevisionJournalsStayBoundedAndQueryByRevision()
     {
         var journal = new RevisionJournal(capacity: 2);

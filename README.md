@@ -332,6 +332,10 @@ picks), and text comes from tables extracted out of your local install's
   | `stars` | `value:integer` |
   | `energy` | `value:integer` |
   | `async-fault` | — |
+  | `async-orphan` | — |
+  | `async-orphan-ends-run` | — |
+  | `async-orphan-fault` | — |
+  | `async-orphan-log` | — |
   | `engine-error` | — |
   | `engine-error-delayed` | — |
   | `observation-fault` | — |
@@ -346,8 +350,9 @@ picks), and text comes from tables extracted out of your local install's
 
   They jump anywhere on the act map, end fights fast, force any event or
   encounter by model id, graft content into the run, or deliberately fault
-  tracked/logged async work and event-option ownership transitions to verify
-  the failure event stream. `models
+  tracked/logged async work and run-ownership transitions (both the
+  fire-and-forget and the event-option channel) to verify the failure event
+  stream. `models
   card|relic|potion|event|encounter|character` enumerates the current
   game build instead of baking ids into tests.
 

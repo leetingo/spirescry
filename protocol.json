@@ -172,6 +172,22 @@
       "arguments": []
     },
     {
+      "name": "async-orphan",
+      "arguments": []
+    },
+    {
+      "name": "async-orphan-ends-run",
+      "arguments": []
+    },
+    {
+      "name": "async-orphan-fault",
+      "arguments": []
+    },
+    {
+      "name": "async-orphan-log",
+      "arguments": []
+    },
+    {
       "name": "engine-error",
       "arguments": []
     },

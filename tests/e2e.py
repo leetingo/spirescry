@@ -810,6 +810,107 @@ def p17():
     to_menu()
 
 
+def orphan_async_channel(release, marker, seed):
+    """One release channel of the #145 fixture, over the same four timings.
+
+    An abandoned run's tracked work reaches the next run two ways: its own
+    fault, and any engine Error line it writes — the engine catches
+    exceptions from fire-and-forget chains and only logs them, so that
+    second shape publishes an error without ever faulting a task the mod
+    holds, and then completes successfully. Both land in the same revision
+    stream, error journal and follow result, so both are tested here.
+    """
+    launch(seed=seed + "L")
+
+    # Baseline first: work still owned by the run that dispatched it must
+    # keep reporting. Ownership suppresses orphans, not failures.
+    run("cheat", "async-orphan")
+    status, health = http("GET", "/health")
+    assert status == 200 and health["pendingAsync"] == 1, health
+    live = run("cheat", release, "--follow", "3000", allow_errors=True)
+    assert live["settled"] is True, live
+    assert any(marker in error for error in live["errors"]), live["errors"]
+
+    # Park a second task, then walk away from the run that owns it. The
+    # zombie must leave the pending ledger at the rotation: it is parked on a
+    # run nobody is playing, and counting it as work the board owes would
+    # hold the follow probe busy for every later run.
+    run("cheat", "async-orphan")
+    abandoned = run("abandon", "--follow", "3000")
+    assert abandoned["outcome"] != "timeout", abandoned
+    assert abandoned["obs"]["phase"] == PHASE.MAIN_MENU, abandoned["obs"]
+    status, health = http("GET", "/health")
+    assert status == 200 and health["pendingAsync"] == 0, health
+
+    # (a) it lands at the menu, immediately before the next run — the window
+    # where a published error would be attributed to the run about to start,
+    # or leak into its very first follow response.
+    menu_rev = obs()["rev"]
+    run("cheat", release)
+    time.sleep(0.6)
+    quiet = run("obs", "--since", str(menu_rev), "--wait", "500")
+    assert not any(marker in event["type"]
+                   for event in quiet.get("events") or []), quiet
+    fresh = run("new-run", "IRONCLAD", "--seed", seed + "A", "--follow", "3000")
+    assert fresh["outcome"] != "timeout", fresh
+    assert fresh["errors"] == [], fresh["errors"]
+
+    # (b) it lands across new-run: released a heartbeat before the verb, it
+    # resolves while the next run is being built or just after it comes up —
+    # the window where a run-blind tracker hands an abandoned run's failure
+    # to the run the agent is actually playing.
+    run("cheat", "async-orphan")
+    run("abandon", "--follow", "3000")
+    handover_rev = obs()["rev"]
+    run("cheat", release)
+    during = run("new-run", "IRONCLAD", "--seed", seed + "B", "--follow", "3000")
+    assert during["outcome"] != "timeout", during
+    assert during["errors"] == [], during["errors"]
+    # follow only reports what its own step accepted, so give a release that
+    # outlived the handover time to land and check everything the journal
+    # took since the menu — the new run is live for all of it.
+    time.sleep(0.6)
+    window = run("obs", "--since", str(handover_rev), "--wait", "500")
+    assert not any(marker in event["type"]
+                   for event in window.get("events") or []), window
+    status, health = http("GET", "/health")
+    assert status == 200 and health["pendingAsync"] == 0, health
+
+    # (c) the dual: work the run-ending verb itself started. `abandon` tracks
+    # the very task that clears RunState, so ownership binds it to the run it
+    # is tearing down — retiring it at that rotation would report a clean
+    # settle for a teardown that actually failed. Its failure must still
+    # reach the error journal once the board is back at the menu.
+    run("cheat", "async-orphan-ends-run")
+    teardown_rev = obs()["rev"]
+    # No --follow here: run-ending work is deliberately still pending across
+    # its own rotation, so the probe would sit out its whole budget waiting
+    # for a task this fixture only releases below.
+    run("abandon")
+    bridge.wait_phase(PHASE.MAIN_MENU, timeout=15)
+    run("cheat", release)
+    time.sleep(0.6)
+    reported = run("obs", "--since", str(teardown_rev), "--wait", "500")
+    assert any(marker in event["type"]
+               for event in reported.get("events") or []), reported
+    to_menu()
+
+
+@case("P17b abandoned fire-and-forget work cannot enter the next run")
+def p17b():
+    # #145: ordinary dispatcher work is run-owned too. P16/P17 cover the
+    # event-option channel; this covers the plain tracked-task channel, whose
+    # completions reach the same revision stream, error journal and follow
+    # result — and which used to publish into whatever run happened to be
+    # live when a long-abandoned task finally landed.
+    orphan_async_channel("async-orphan-fault",
+                         "forced orphan fire-and-forget failure",
+                         "CIASYNCF")
+    orphan_async_channel("async-orphan-log",
+                         "forced orphan fire-and-forget engine log error",
+                         "CIASYNCG")
+
+
 @case("P18 a followed verb never settles against another run")
 def p18():
     # #144. The bridge answers requests concurrently, so a second client's
