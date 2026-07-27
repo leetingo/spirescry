@@ -33,4 +33,12 @@
     <Compile Include="../../headless/Host/HostPatchBatch.cs" Link="HostPatchBatch.cs" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- The headless Godot stubs stand in for GodotSharp at runtime, so their
+         public shape is an ABI the game assemblies bind against. Referencing
+         them here puts that shape under the unit tests CI does run — building
+         the host itself needs the game's non-distributable dlls. -->
+    <ProjectReference Include="../../headless/GodotStubs/GodotStubs.csproj" />
+  </ItemGroup>
+
 </Project>

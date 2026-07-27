@@ -5,6 +5,9 @@ using System.Text.Json.Serialization;
 using Spirescry;
 using Spirescry.Host;
 using Spirescry.State;
+// Only the one stub type is pulled in by name: a blanket `using Godot` would
+// shadow Array, Dictionary and Object across the whole file.
+using Color = Godot.Color;
 
 // Every public static parameterless method on Tests is a test — discovered
 // here by reflection so a new test can't be silently left unregistered.
@@ -2222,6 +2225,79 @@ internal static class Tests
 
         Equal(Build("ornate").ConsumerFingerprint(),
             Build("plain").ConsumerFingerprint());
+    }
+
+    // The headless GodotSharp stub is loaded in place of the real one, so the
+    // game assemblies bind to these signatures. A shape that is absent throws
+    // MissingMethodException as soon as a game method referencing it is
+    // jitted — even along a branch that is never taken — which is how the
+    // missing copy-plus-alpha ctor killed potion use (LIQUID_MEMORIES and
+    // GIGANTIFICATION_POTION both splash `new Color(Colors.Blue/Red)`).
+    public static void ColorStubCarriesEveryGodotConstructorShape()
+    {
+        var present = typeof(Color)
+            .GetConstructors()
+            .Select(c => string.Join(",", c.GetParameters().Select(p => p.ParameterType.Name)))
+            .ToHashSet();
+        // CI has no game dlls, so this list is a hand-kept copy of the real
+        // engine's set. Refresh it whenever the game's Godot version moves:
+        //   ilspycmd -t Godot.Color lib/GodotSharp.dll
+        string[] required =
+        [
+            "Single,Single,Single,Single",
+            "Color,Single",
+            "UInt32",
+            "UInt64",
+            "String",
+            "String,Single",
+        ];
+
+        var missing = required.Where(shape => !present.Contains(shape)).ToArray();
+        Equal("none", missing.Length == 0 ? "none" : string.Join(" ", missing));
+    }
+
+    // Named colours are the same ABI surface as the constructors — an absent
+    // one faults the same way, and Colors.DarkRed is read by a method on
+    // RelicModel, a Model class headless does construct. This list is every
+    // accessor sts2.dll binds against; refresh it by scanning the game
+    // assembly's MemberRef table for the Godot.Colors parent type.
+    public static void ColorsStubCarriesEveryNamedColorTheGameBinds()
+    {
+        var present = typeof(Godot.Colors)
+            .GetProperties(BindingFlags.Public | BindingFlags.Static)
+            .Select(p => p.Name)
+            .ToHashSet();
+        string[] required =
+        [
+            "Black", "Blue", "Cyan", "DarkGray", "DarkRed", "DimGray", "Gold",
+            "Gray", "Green", "Magenta", "Purple", "Red", "Transparent", "White",
+        ];
+
+        var missing = required.Where(name => !present.Contains(name)).ToArray();
+        Equal("none", missing.Length == 0 ? "none" : string.Join(" ", missing));
+    }
+
+    // Deleting the copy ctor from the stub breaks this method's *compilation*
+    // rather than tripping the shape assertion above — if CS1503/CS7036 lands
+    // here, the stub lost `Color(Color, float)`.
+    public static void ColorCopyConstructorKeepsRgbAndReplacesAlpha()
+    {
+        var source = new Color(0.25f, 0.5f, 0.75f, 0.125f);
+
+        var opaque = new Color(source);
+        var faded = new Color(source, 0.4f);
+
+        Equal(new Color(0.25f, 0.5f, 0.75f, 1f), opaque);
+        Equal(new Color(0.25f, 0.5f, 0.75f, 0.4f), faded);
+        // The source is a value — copying must not disturb it.
+        Equal(0.125f, source.A);
+    }
+
+    public static void ColorPackedConstructorsUnpackChannelsHighToLow()
+    {
+        Equal(new Color(1f, 0f, 0f, 1f), new Color(0xFF0000FFu));
+        Equal(new Color(0f, 0f, 1f, 0f), new Color(0x0000FF00u));
+        Equal(new Color(1f, 0f, 0f, 1f), new Color(0xFFFF_0000_0000_FFFFul));
     }
 
     // One option task tracked under an owner, then retired by Drop — the

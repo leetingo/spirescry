@@ -42,6 +42,12 @@ public class RenderingServer
     public static void GlobalShaderParameterSet(StringName name, Variant value) { }
 }
 
+// Named colours are the same kind of ABI as the Color constructors: a name
+// the game references but the stub omits is a MissingMethodException the
+// moment the referencing method is jitted. Every accessor sts2.dll binds
+// against must exist here, whether or not headless ever draws with it —
+// Colors.DarkRed, for one, is read by RelicModel.UpdateTexture, a method on
+// a Model class headless does construct.
 public static class Colors
 {
     public static Color White { get; } = Color.White;
@@ -58,4 +64,7 @@ public static class Colors
     public static Color Gray { get; } = new(0.5f, 0.5f, 0.5f);
     public static Color DarkGray { get; } = new(0.25f, 0.25f, 0.25f);
     public static Color LightGray { get; } = new(0.75f, 0.75f, 0.75f);
+    public static Color DarkRed { get; } = new(0.545098f, 0, 0);
+    public static Color DimGray { get; } = new(0.411765f, 0.411765f, 0.411765f);
+    public static Color Gold { get; } = new(1, 0.843137f, 0);
 }
