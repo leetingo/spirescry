@@ -79,6 +79,17 @@ the piles. Settlement and replay still consume the full typed projection
 inside the host; `obs --semantic-state` (HTTP `?semanticState=1`) exposes it
 explicitly for diagnostics.
 
+Every `/obs` query parameter is optional, but a supplied one must be well
+formed or the request is a `bad_request`: `since` is a non-negative integer,
+`wait` an integer in `[0,60000]`, and the boolean flags (`compact`,
+`decision`, `semanticState`) take `1`/`true` or `0`/`false`, case-insensitive.
+A malformed value is never silently replaced by its default — `?wait=1s`
+quietly becoming a no-wait poll reads exactly like a long-poll that timed out.
+A parameter with no value at all (`?compact`, `?compact=`) is supplied, not
+omitted, and is rejected the same way, as is one supplied twice with
+different spellings (`?compact=1&compact=0`). `known` is the exception: it
+is the one parameter meant to repeat.
+
 Combat card `playable` values use the same final hook-aware gate as dispatch.
 When a hook blocks a card, `unplayableReason` and, when available,
 `unplayablePreventer` name the machine-readable reason and model. `legal`
@@ -103,10 +114,22 @@ upgrade candidates keep the string `upgradedPreview` and add
 the engine queues and tracked async work settle, or until a new decision
 surface appears. The response carries one of the typed settlement outcomes:
 <!-- protocol:settlement-outcomes:start -->
-`settled`, `next_decision`, `fault`, `timeout`.
+`settled`, `next_decision`, `fault`, `timeout`, `owner_changed`.
 <!-- protocol:settlement-outcomes:end -->
 It includes resolution events plus a fresh decision `obs`; `fault` also keeps
-the engine error tokens in `errors`. If an accepted mutation is followed by an
+the engine error tokens in `errors`. A follow window stays scoped to the run
+that accepted the verb: if another client abandons that run or starts a new
+one before the window closes, the response is `owner_changed` with
+`settled: false` — never a `settled` verdict read off the new run or the main
+menu — and the run-log entry keeps no phase or fingerprint from that foreign
+board. Ownership is the run's board, not just its id: the engine can keep a
+retired run's state loaded behind a visible main menu, so a verb that was
+acting inside a run is unowned there even when the id has not changed yet.
+Only the two lifecycle verbs move their own run: `new-run` adopts the run it
+mints, `abandon` settles on the menu it asked for. `new-run` never settles on
+the menu it started from — a launch that never puts its board on screen
+reports `timeout`, not a replayable main-menu boundary under `run:none`. If an accepted mutation is
+followed by an
 observation or response-construction failure, the bridge still returns this
 typed envelope with `action`, `acceptedRev`, `runId`,
 `observationAvailable: false`, and `obs: null`; the matching run-log entry is
@@ -126,6 +149,8 @@ Verbs: `new-run`,
 `abandon`, `option`, `proceed`, `map-move`, `pick-reward`, `pick-card`,
 `pick-relic`, `confirm`, `skip`, `buy`, `leave`, `play`, `end-turn`,
 `potion-use`, `potion-discard`, `cheat` — each valid in its own phase.
+Every response body — snapshots included — is a JSON object whose boolean
+`ok` agrees with the HTTP status: `true` on 2xx, `false` on 4xx/5xx.
 Errors ride on 4xx/5xx as `{"ok": false, "err": "<code>", "msg": "..."}`
 with a stable machine-readable vocabulary:
 
@@ -152,9 +177,17 @@ with a stable machine-readable vocabulary:
 <!-- protocol:rejection-codes:end -->
 
 The CLI prints failures on stderr and exits `75` (`EX_TEMPFAIL`) only for
-`not_ready`; every other bridge rejection, local validation error, transport
-failure, or malformed response exits `1`. Success exits `0`. Callers should
-branch on the exit status, not parse the rendered error text.
+`not_ready`; every other bridge rejection, local validation error (including a
+rejected argument, where clap's own `2` is normalized away), transport failure,
+or malformed response exits `1`. Success exits `0`, as do `--help` and
+`--version`. Callers should branch on the exit status, not parse the rendered
+error text. The CLI validates the envelope before printing anything: a body
+that is not an object, carries no boolean `ok`, or contradicts its HTTP status
+is malformed and never reaches stdout. `fault-bundle` is the one deliberate
+exception to the failure codes: it captures rather than requests, so an
+unreachable or faulting bridge is its subject, not its failure — it still
+prints a bundle and exits `0`, with `complete: false` marking the sections it
+could not reach.
 
 **Combat targets.** `play <model> --target <id>` and
 `potion-use <slot> --target <id>` take the combat ID shown on an enemy in the
@@ -174,11 +207,12 @@ stream as `run:<id>` / `run:none`.
 bump it from the engine's own C# events (action executor, combat manager,
 overlay stack) plus a per-tick phase diff as the safety net; a `/step`
 accepted without either (in-phase inline mutations — reward claims, shop
-buys) bumps it itself. `obs?since=` responses name the events behind the
-bump (`phase:map->combat`, `action:PlayCardAction`, `enqueued:...`,
-`step:buy`, `wedge:...`). The server clamps `wait` to `0..60000` ms. Omitting
-`--wait` (or passing `0`) is a no-wait poll; pass a positive value explicitly
-when the caller should park for a change.
+buys) bumps it itself. `obs?since=<rev>` responses name the events behind
+the bump (`phase:map->combat`, `action:PlayCardAction`, `enqueued:...`,
+`step:buy`, `wedge:...`). `wait` is bounded to `0..60000` ms — a larger one
+is a `bad_request`, not a silent clamp. Omitting `--wait` (or passing `0`)
+is a no-wait poll; pass a positive value explicitly when the caller should
+park for a change.
 
 The event log retains the latest 64 revision events. After a burst larger
 than that, an old `--since` still returns immediately with `changed: true`
@@ -209,7 +243,9 @@ ambiguous followed verb. One invocation captures health, observation, run
 log, recent events/errors, build/protocol identity, run ID/seed, and the last
 accepted verb without advancing or abandoning the run. Each section marks
 partial-capture failures explicitly, so the bundle remains useful when the
-observation endpoint itself is what failed.
+observation endpoint itself is what failed — including when nothing answered
+at all, which prints an all-unavailable bundle with `complete: false` and
+still exits `0`.
 
 The pure host also records why it exits: clean process shutdowns,
 SIGINT/SIGTERM/SIGHUP/SIGQUIT, boot failures, and unhandled managed
@@ -320,6 +356,10 @@ picks), and text comes from tables extracted out of your local install's
   | `stars` | `value:integer` |
   | `energy` | `value:integer` |
   | `async-fault` | — |
+  | `async-orphan` | — |
+  | `async-orphan-ends-run` | — |
+  | `async-orphan-fault` | — |
+  | `async-orphan-log` | — |
   | `engine-error` | — |
   | `engine-error-delayed` | — |
   | `observation-fault` | — |
@@ -334,8 +374,9 @@ picks), and text comes from tables extracted out of your local install's
 
   They jump anywhere on the act map, end fights fast, force any event or
   encounter by model id, graft content into the run, or deliberately fault
-  tracked/logged async work and event-option ownership transitions to verify
-  the failure event stream. `models
+  tracked/logged async work and run-ownership transitions (both the
+  fire-and-forget and the event-option channel) to verify the failure event
+  stream. `models
   card|relic|potion|event|encounter|character` enumerates the current
   game build instead of baking ids into tests.
 

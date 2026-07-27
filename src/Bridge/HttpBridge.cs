@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Net;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using Spirescry.State;
 
 namespace Spirescry.Bridge;
@@ -11,12 +12,33 @@ public sealed class Response
     public int Status { get; init; } = 200;
     public string Body { get; init; } = "";
 
-    public static Response Json(object payload, int status = 200) =>
-        new() { Status = status, Body = JsonSerializer.Serialize(payload) };
+    // Every route answers through here, so no route can hand back a body
+    // without the envelope flag: routes describe their result, this stamps
+    // whether it was one. A payload that is not a JSON object has no
+    // envelope to stamp and is a programming error, not a response.
+    public static Response Json(object payload, int status = 200)
+    {
+        var body = JsonSerializer.SerializeToNode(payload) as JsonObject
+            ?? throw new ArgumentException(
+                $"a bridge body must be a JSON object: {payload.GetType().Name}",
+                nameof(payload));
+        return Json(body, status);
+    }
+
+    // Snapshot-shaped bodies are assembled as raw JSON nodes rather than
+    // serialized from an anonymous payload; taking the node directly keeps
+    // a large observation from being cloned through the serializer only to
+    // reach the same rule.
+    public static Response Json(JsonObject body, int status = 200) =>
+        new()
+        {
+            Status = status,
+            Body = ResponseEnvelope.Stamp(body, status).ToJsonString(),
+        };
 
     public static Response Error(
         string code, string msg, int status = 400, string? runId = null) =>
-        Json(new { ok = false, err = code, msg, runId = runId ?? Signals.RunId }, status);
+        Json(new { err = code, msg, runId = runId ?? Signals.RunId }, status);
 }
 
 // Loopback-only HTTP server. No auth: the bridge binds 127.0.0.1
@@ -92,11 +114,12 @@ public sealed class HttpBridge
                 ("GET", "/health") => await Handlers.Health(),
                 ("GET", "/models") => await Handlers.Models(req.QueryString["kind"]),
                 ("GET", "/runlog") => await Handlers.GetRunLog(),
+                // The raw query, not the parsed collection: a valueless
+                // `?compact` lands under that collection's null key, which
+                // reads back as an omitted parameter. ObservationQuery
+                // splits it itself. `known` is repeatable and unaffected.
                 ("GET", "/obs") => await Handlers.Obs(
-                    req.QueryString["since"], req.QueryString["wait"],
-                    req.QueryString["compact"], req.QueryString["decision"],
-                    req.QueryString.GetValues("known"),
-                    req.QueryString["semanticState"]),
+                    req.Url?.Query, req.QueryString.GetValues("known")),
                 ("POST", "/step") => await Handlers.Step(body),
                 _ => Response.Error(RejectionCodes.NotFound, $"no route {req.HttpMethod} {path}", 404),
             };

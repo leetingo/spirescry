@@ -27,9 +27,12 @@ def record(d):
     if not phase or d.get("available") is False:
         return
     slot = KEYS.setdefault(phase, {})
-    # changed/events are the long-poll envelope (only present on
-    # obs --since responses), not part of the phase snapshot shape.
-    slot.setdefault("top", sorted(d.keys() - {"changed", "events"}))
+    # ok/changed/events are response-envelope keys — ok stamps every bridge
+    # body, changed/events only obs --since responses — and none of them are
+    # part of the phase snapshot shape. A followed action reports the same
+    # snapshot nested under "obs" without them, so including them here would
+    # split one phase's shape in two depending on how it was read.
+    slot.setdefault("top", sorted(d.keys() - {"ok", "changed", "events"}))
     for k, v in d.items():
         if isinstance(v, list) and v and isinstance(v[0], dict):
             slot.setdefault(k + "[]", sorted(v[0].keys()))
@@ -123,9 +126,10 @@ def drive(seed=None):
             after_rev=d["rev"])
     bridge.launch_run(seed=seed, timeout=40, on_obs=record)
 
-    step("neow: proceed past")
-    run("proceed")
-    wait_phase(bridge.PHASE.MAP)
+    # Neow's blessing is a required decision: proceed is illegal until the
+    # event page owes nothing, so take the boon and walk out of the room.
+    step("neow: take the blessing, then leave")
+    bridge.walk_world(bridge.PHASE.MAP, on_obs=record)
 
     step("map-move to first monster")
     node = next(p for p in obs()["next"] if p["type"] == "monster")
@@ -268,8 +272,7 @@ def drive(seed=None):
     run("abandon")
     wait_phase(bridge.PHASE.MAIN_MENU)
     bridge.launch_run(seed=seed, timeout=40, on_obs=record)
-    run("proceed")
-    wait_phase(bridge.PHASE.MAP)
+    bridge.walk_world(bridge.PHASE.MAP, on_obs=record)
     node = next(p for p in obs()["next"] if p["type"] == "monster")
     run("map-move", str(node["col"]), str(node["row"]))
     d = wait_phase(bridge.PHASE.COMBAT)
@@ -278,6 +281,11 @@ def drive(seed=None):
             break
         if d["phase"] == bridge.PHASE.COMBAT and d.get("side") == "player":
             d = follow("cheat", "hp", "1")
+            # Dropping to 1 hp can already end the fight, and combat
+            # teardown reports `unknown` before the run turns over. Re-read
+            # the phase rather than spending a turn that no longer exists.
+            if d["phase"] != bridge.PHASE.COMBAT:
+                continue
             d = follow("end-turn", timeout_ms=30000)
         else:
             d = bridge.wait_until(

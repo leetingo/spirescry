@@ -1,5 +1,5 @@
 {
-  "protocolVersion": 4,
+  "protocolVersion": 6,
   "rejectionCodes": [
     "bad_request",
     "bad_phase",
@@ -42,7 +42,8 @@
     "settled",
     "next_decision",
     "fault",
-    "timeout"
+    "timeout",
+    "owner_changed"
   ],
   "faultEventTokens": {
     "engineError": "engine_error:",
@@ -168,6 +169,22 @@
     },
     {
       "name": "async-fault",
+      "arguments": []
+    },
+    {
+      "name": "async-orphan",
+      "arguments": []
+    },
+    {
+      "name": "async-orphan-ends-run",
+      "arguments": []
+    },
+    {
+      "name": "async-orphan-fault",
+      "arguments": []
+    },
+    {
+      "name": "async-orphan-log",
       "arguments": []
     },
     {

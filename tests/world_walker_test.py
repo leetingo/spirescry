@@ -316,6 +316,111 @@ class WorldWalkerTests(unittest.TestCase):
         self.assertEqual([("pick-card", "3")],
                          [action for action, _ in actions])
 
+    def test_selection_advances_to_a_row_that_is_not_already_picked(self):
+        # The #147 loop: a picker keeps every candidate listed and marks the
+        # picked ones, so re-picking idx 0 only toggles it back off and a
+        # two-pick decision never finishes.
+        for phase in ("card_select", "hand_select"):
+            with self.subTest(phase=phase):
+                _, actions, _ = self.drive(
+                    [
+                        {"phase": phase, "min": 2, "cards": [
+                            {"idx": 0, "selected": True},
+                            {"idx": 1, "selected": False},
+                        ]},
+                        {"phase": "combat"},
+                        {"phase": "combat"},
+                        {"phase": "combat"},
+                    ],
+                )
+
+                self.assertEqual([("pick-card", "1")],
+                                 [action for action, _ in actions])
+
+    def test_combat_walker_advances_a_selection_by_the_same_rule(self):
+        picker = {
+            "phase": "hand_select", "rev": 50,
+            "cards": [{"idx": 0, "selected": True},
+                      {"idx": 1, "selected": False}],
+        }
+        settled = {"phase": "map", "rev": 51}
+        with mock.patch.object(
+                bridge, "follow", return_value=settled) as follow:
+            actual = bridge.kill_current_combat(initial=picker)
+
+        self.assertEqual(settled, actual)
+        follow.assert_called_once_with(
+            "pick-card", "1", timeout_ms=mock.ANY)
+
+    def test_selection_with_no_free_row_is_named_not_repicked(self):
+        stuck = {
+            "phase": "hand_select", "rev": 60, "confirmable": False,
+            "cards": [{"idx": 0, "selected": True}],
+        }
+        for walk in (
+                lambda: bridge.kill_current_combat(initial=stuck),
+                lambda: bridge.resolve_transient_phase(stuck)):
+            with self.subTest(walk=walk), \
+                    mock.patch.object(bridge, "follow") as follow:
+                with self.assertRaisesRegex(
+                        AssertionError,
+                        "hand_select has neither selectable cards nor confirm"):
+                    walk()
+
+                follow.assert_not_called()
+
+    def test_hand_select_advances_off_an_already_selected_card(self):
+        # hand_select publishes no per-card `selected` flag (#147), only
+        # the top-level selector list. Reading the absent flag as "not
+        # selected" re-picks index 0 and deselects it, and a min-2 picker
+        # never resolves: the M2 sweep died on CHARGE and HIDDEN_DAGGERS
+        # with "world exceeded 120 revision-driven steps ... hand_select".
+        hand = [{"idx": 0, "model": "BASH", "selector": "BASH"},
+                {"idx": 1, "model": "DEFEND_IRONCLAD",
+                 "selector": "DEFEND_IRONCLAD"},
+                {"idx": 2, "model": "STRIKE_IRONCLAD",
+                 "selector": "STRIKE_IRONCLAD"}]
+        settled, actions, _ = self.drive(
+            [
+                {"phase": "hand_select", "min": 2, "max": 2,
+                 "confirmable": False, "selected": [], "cards": hand},
+                {"phase": "hand_select", "min": 2, "max": 2,
+                 "confirmable": False, "selected": ["BASH"], "cards": hand},
+                {"phase": "combat"},
+                {"phase": "combat"},
+                {"phase": "combat"},
+            ],
+        )
+
+        self.assertEqual("combat", settled["phase"])
+        self.assertEqual([("pick-card", "0"), ("pick-card", "1")],
+                         [action for action, _ in actions])
+
+    def test_hand_select_skips_one_copy_per_selected_selector(self):
+        # Duplicates in the picker share a selector, so the top-level list
+        # is consumed positionally: two selected DEFEND_IRONCLAD retire the
+        # first two copies, not all three.
+        hand = [{"idx": 0, "model": "DEFEND_IRONCLAD",
+                 "selector": "DEFEND_IRONCLAD"},
+                {"idx": 1, "model": "DEFEND_IRONCLAD",
+                 "selector": "DEFEND_IRONCLAD"},
+                {"idx": 2, "model": "DEFEND_IRONCLAD",
+                 "selector": "DEFEND_IRONCLAD"}]
+        _, actions, _ = self.drive(
+            [
+                {"phase": "hand_select", "min": 3, "max": 3,
+                 "confirmable": False,
+                 "selected": ["DEFEND_IRONCLAD", "DEFEND_IRONCLAD"],
+                 "cards": hand},
+                {"phase": "combat"},
+                {"phase": "combat"},
+                {"phase": "combat"},
+            ],
+        )
+
+        self.assertEqual([("pick-card", "2")],
+                         [action for action, _ in actions])
+
     def test_walk_to_map_selects_event_option_and_finishes_combat(self):
         settled, actions, _ = self.drive(
             [

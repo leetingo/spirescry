@@ -42,7 +42,6 @@ public static class Handlers
         });
         return Response.Json(new
         {
-            ok = true,
             mod = Mod.Id,
             version = Mod.Version,
             buildHash = Mod.BuildHash,
@@ -63,38 +62,42 @@ public static class Handlers
     // (engine events / phase changes bump it) or the wait expires — the
     // event-driven replacement for sleep-polling. The response carries the
     // current revision and, when `since` was given, the events behind it.
+    // Every parameter is optional, but a supplied one must be well formed:
+    // see ObservationQuery for the encodings and why a malformed value is
+    // a bad_request instead of a silent default.
     public static async Task<Response> Obs(
-        string? sinceStr,
-        string? waitStr,
-        string? compactStr = null,
-        string? decisionStr = null,
-        string[]? knownCards = null,
-        string? semanticStateStr = null)
+        string? rawQuery,
+        string[]? knownCards = null)
     {
-        var since = long.TryParse(sinceStr, out var s) ? s : -1;
-        var wait = int.TryParse(waitStr, out var w) ? Math.Clamp(w, 0, 60_000) : 0;
-        var compact = compactStr is "1" or "true";
-        var decision = decisionStr is "1" or "true";
-        var includeSemanticState = semanticStateStr is "1" or "true";
-        if (since >= 0 && wait > 0)
-            await Signals.WaitForChange(since, wait);
+        if (!ObservationQuery.TryParse(rawQuery, out var query, out var queryError))
+            return await MainThreadPump.Instance!.Run(() =>
+            {
+                var runId = Signals.RefreshRunIdentity();
+                return Response.Error(
+                    RejectionCodes.BadRequest, queryError!, runId: runId);
+            });
+
+        if (query.ShouldPark)
+            await Signals.WaitForChange(query.Since, query.Wait);
 
         return await MainThreadPump.Instance!.Run(() =>
         {
             var runId = Signals.RefreshRunIdentity();
-            var snapshot = Snapshotter.ForCurrentPhase(compact, decision, knownCards ?? []);
+            var snapshot = Snapshotter.ForCurrentPhase(
+                query.Compact, query.Decision, knownCards ?? []);
             var revision = Signals.Revision;
             snapshot.Revision = revision;
             snapshot.RunId = runId;
-            if (decision)
+            if (query.Decision)
                 snapshot.Legal = DecisionProjection.LegalVerbs(snapshot, runId != "none");
-            var node = snapshot.ToAgentJsonObject(includeSemanticState);
-            if (since >= 0)
+            var node = snapshot.ToAgentJsonObject(query.SemanticState);
+            if (query.WantsChangeFeed)
             {
-                node["changed"] = revision > since;
-                node["events"] = JsonSerializer.SerializeToNode(Signals.EventsSince(since));
+                node["changed"] = revision > query.Since;
+                node["events"] = JsonSerializer.SerializeToNode(
+                    Signals.EventsSince(query.Since));
             }
-            return new Response { Body = node.ToJsonString() };
+            return Response.Json(node);
         });
     }
 
@@ -241,9 +244,9 @@ public static class Handlers
         // A success Msg is a note (e.g. "settled with victory cleanup").
         return result.dispatch.Msg is null
             ? Response.Json(new
-                { ok = true, enqueued = action, rev = result.rev, runId = result.runId })
+                { enqueued = action, rev = result.rev, runId = result.runId })
             : Response.Json(new
-                { ok = true, enqueued = action, rev = result.rev,
+                { enqueued = action, rev = result.rev,
                     runId = result.runId, note = result.dispatch.Msg });
     }
 
@@ -264,7 +267,8 @@ public static class Handlers
             acceptedRev,
             acceptedTick,
             timeoutMs,
-            acceptedRunId));
+            acceptedRunId,
+            RunOwnershipRules.For(action)));
         return FollowResponse(
             action, startedRev, acceptedRev, acceptedRunId,
             result, logEntryId, includeSemanticState);
@@ -295,7 +299,6 @@ public static class Handlers
                 RunLog.RecordOutcome(id, outcome, probe.Observation, errors);
             var node = new JsonObject
             {
-                ["ok"] = true,
                 ["action"] = action,
                 ["enqueued"] = action,
                 ["startedRev"] = startedRev,
@@ -310,7 +313,7 @@ public static class Handlers
                 ["events"] = JsonSerializer.SerializeToNode(events),
                 ["obs"] = observation,
             };
-            return new Response { Body = node.ToJsonString() };
+            return Response.Json(node);
         }
         catch (Exception exception)
         {
@@ -335,7 +338,6 @@ public static class Handlers
             }
             return Response.Json(new
             {
-                ok = true,
                 action,
                 enqueued = action,
                 startedRev,
@@ -355,6 +357,11 @@ public static class Handlers
 
     // The registry the cheats validate against, enumerable — sweeps drive
     // every card/potion/encounter from here instead of hardcoded lists.
+    //
+    // `context` names the saved properties the cheats stamp before the model
+    // enters play (see ContextBoundContent), and is null for the directly
+    // executable majority — so a sweep can tell the two apart and insist that
+    // context-bound content is exercised through its fixture, not skipped.
     public static async Task<Response> Models(string? kind)
     {
         var entries = await MainThreadPump.Instance!.Run<object?>(() => kind switch
@@ -367,10 +374,15 @@ public static class Handlers
                     type = c.Type.ToString().ToLowerInvariant(),
                     rarity = c.Rarity.ToString().ToLowerInvariant(),
                     pool = c.Pool.Title,
+                    context = ContextBoundContent.PublishedContext(c.Id.Entry),
                 }).ToArray(),
             "relic" => MegaCrit.Sts2.Core.Models.ModelDb.AllRelics
                 .OrderBy(r => r.Id.Entry)
-                .Select(r => (object)new { model = r.Id.Entry }).ToArray(),
+                .Select(r => (object)new
+                {
+                    model = r.Id.Entry,
+                    context = ContextBoundContent.PublishedContext(r.Id.Entry),
+                }).ToArray(),
             "potion" => MegaCrit.Sts2.Core.Models.ModelDb.AllPotions
                 .OrderBy(p => p.Id.Entry)
                 .Select(p => (object)new { model = p.Id.Entry }).ToArray(),
@@ -388,6 +400,6 @@ public static class Handlers
         return entries is null
             ? Response.Error(RejectionCodes.BadRequest,
                 "kind must be card|relic|potion|event|encounter|character")
-            : Response.Json(new { ok = true, kind, entries });
+            : Response.Json(new { kind, entries });
     }
 }

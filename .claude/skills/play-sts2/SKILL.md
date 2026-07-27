@@ -191,7 +191,12 @@ Fault-event prefixes: `engine_error:`, `async_fault:`, `engine_note:`.
    continuation has completed;
    `next_decision` means an effect parked on a picker/dialogue that now
    needs one verb; `timeout` means the verb was accepted but has not
-   resolved — do not fire another verb, rescry and inspect `health`.
+   resolved — do not fire another verb, rescry and inspect `health`;
+   `owner_changed` means the run named by `acceptedRunId` stopped being
+   the live run before the verb settled (someone else abandoned it or
+   started another), so the response's `obs` is that other owner's board
+   and this verb's own result was never observed — rescry before deciding
+   anything.
    Then inspect `errors`: it lists engine exceptions logged between
    acceptance and settlement (the first two fault-event prefixes above). The
    engine logs-and-swallows faults inside its own task chains, so a verb
@@ -360,15 +365,15 @@ it.
 | `main_menu` | — | `new-run <CHARACTER>` (bad names are rejected with the valid list) |
 | `map` | `next`: reachable nodes (col/row/type) | `map-move <col> <row>` |
 | `combat` | `you`, `hand`, `enemies`, `potions`, `piles`, `turn` | `play <MODEL> [--target <id>]`, `end-turn`, `potion-use <slot> [--target <id>]` |
-| `event` | `options[]` (idx/title/description/locked) | `option <idx>` — some options only mark `chosen`: rescry after each, and when nothing new is pickable, `proceed`. `proceed` also pages dialogue and leaves once `finished`. |
-| `rest_site` | `options[]` | `option <idx>` (upgrade opens a deck picker); `options` empty → `proceed` → map |
+| `event` | `options[]` (idx/title/description/locked), `proceedAvailable` | `option <idx>` — some options only mark `chosen`: rescry after each. `proceed` is offered only when the page owes nothing (`finished`, every option locked/chosen, or the page carries its own leave option); firing it early is rejected, so a page with a live choice must be answered, Neow's blessing included. |
+| `rest_site` | `options[]`, `proceedAvailable` | `option <idx>` (upgrade opens a deck picker); `proceed` → map only once the seat has spent its choice or `options` is empty — both boots reject it before that |
 | `shop` | goods with idx + prices | `buy <kind> --idx <n>` (kind: `card`/`colorless`/`relic`/`potion`/`card_removal`), `leave` |
 | `treasure` | `chestOpened`, `relics` | Closed chest (`chestOpened:false`, `relics:[]` — unopened, not empty): `pick-relic 0` **opens** it; rescry, then choose from the now-visible offer. Open chest: `pick-relic <idx>` takes, `skip` declines. `proceed` leaves — in headless even with the chest unopened, so don't read `legal:[…,proceed]` as "nothing here". `chestOpened:true` with `relics:[]` is a resolved offer. |
 | `relic_reward` | relics on offer | `pick-relic <idx>`, `skip` |
 | `rewards` | reward tiles | `pick-reward <idx>`; `proceed` leaves, skipping the rest |
 | `card_reward` | cards on offer | `pick-card <idx>`, `skip` |
-| `card_select` | picker cards with `cost` and `upgradedPreview` | `pick-card <idx>` (toggles), `confirm` when enough are selected, `skip` only when `cancelable` |
-| `hand_select` | cards currently selectable from hand | `pick-card <idx>`, `confirm` when enough are selected (no `skip`) |
+| `card_select` | picker cards with `cost`, `upgradedPreview` and `selected` (already picked) | `pick-card <idx>` (toggles — to add a pick, name a row whose `selected` is false), `confirm` when enough are selected, `skip` only when `cancelable` |
+| `hand_select` | cards currently selectable from hand, each with `selected` (already picked) | `pick-card <idx>` (toggles — to add a pick, name a row whose `selected` is false; duplicate models share a name, so go by `idx`), `confirm` when enough are selected (no `skip`) |
 | `bundle_select` | card packs (e.g. Neow) | `pick-card <idx>`; GUI may then expose `confirm` |
 | `crystal_sphere` | divination minigame | `map-move <col> <row>` picks a cell, `option 0`/`1` picks the tool, `proceed` leaves |
 | `game_over` | `outcome`, `seed`, where the run ended: `actNumber`/`actFloor` (1-based), `mapCoord`, `encounter` (model + title). Legacy pair: `act` is the zero-based act index, `floor` the run-cumulative floor — prefer the 1-based fields in reports. | `abandon` → main menu |

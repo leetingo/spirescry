@@ -23,7 +23,17 @@ public abstract class MainThreadPump
     public static MainThreadPump Bootstrap(SceneTree tree) => new GuiPump(tree);
     public static MainThreadPump BootstrapHeadless() => new HeadlessPump();
 
-    public abstract Task<T> Run<T>(Func<T> fn);
+    // Every job runs under its own async-work owner — the run-ownership
+    // stamp that rides the execution context into whatever asynchronous work
+    // the job starts, so an abandoned run's leftovers can be told apart from
+    // the live run's on both the task and the engine-log channel. The stamp
+    // must be applied where the job actually runs and before it runs: an
+    // await captures the context when the work begins, not when Signals gets
+    // around to tracking the task it returned.
+    public Task<T> Run<T>(Func<T> fn) =>
+        RunOnMainThread(() => State.AsyncWorkOwner.Stamp(fn));
+
+    protected abstract Task<T> RunOnMainThread<T>(Func<T> fn);
 
     private sealed class GuiPump : MainThreadPump
     {
@@ -45,7 +55,7 @@ public abstract class MainThreadPump
             catch (Exception ex) { SafeLog.Error("signals tick", ex); }
         }
 
-        public override Task<T> Run<T>(Func<T> fn)
+        protected override Task<T> RunOnMainThread<T>(Func<T> fn)
         {
             // RunContinuationsAsynchronously: awaiting code must not resume
             // synchronously on the main thread and block frame processing.
@@ -66,7 +76,7 @@ public abstract class MainThreadPump
         // the pump itself is the mutual exclusion.
         private readonly object _gate = new();
 
-        public override Task<T> Run<T>(Func<T> fn)
+        protected override Task<T> RunOnMainThread<T>(Func<T> fn)
         {
             lock (_gate)
             {
