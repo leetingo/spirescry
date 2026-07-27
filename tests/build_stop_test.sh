@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Public-behaviour regression tests for `./build.sh stop`.
+# Public-behaviour regression tests for the `./build.sh` launchers and
+# `./build.sh stop`.
 
 set -euo pipefail
 
@@ -8,6 +9,7 @@ scratch="$(mktemp -d "${TMPDIR:-/tmp}/spirescry-stop-test.XXXXXX")"
 fakebin="$scratch/bin"
 mkdir -p "$fakebin"
 real_ps="$(command -v ps)"
+real_curl="$(command -v curl)"
 host_dll="$repo/headless/Host/bin/Release/spirescry_host.dll"
 created_host_dll=0
 
@@ -32,16 +34,18 @@ timeout_port="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1
 
 # A stand-in for `dotnet <host.dll>` that owns the requested port but never
 # serves /health. This exercises the public launch/stop contract without a
-# game install or a real bridge.
+# game install or a real bridge. It records its PID before touching the port,
+# so "the launcher never started me" stays distinguishable from "I started and
+# could not bind".
 printf '%s\n' \
     '#!/usr/bin/env python3' \
     'import os, socket' \
+    'with open(os.environ["SPIRESCRY_TEST_HOST_PIDFILE"], "w") as pidfile:' \
+    '    pidfile.write(str(os.getpid()))' \
     'sock = socket.socket()' \
     'sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)' \
     'sock.bind(("127.0.0.1", int(os.environ["STS2_AGENT_PORT"])))' \
     'sock.listen()' \
-    'with open(os.environ["SPIRESCRY_TEST_HOST_PIDFILE"], "w") as pidfile:' \
-    '    pidfile.write(str(os.getpid()))' \
     'while True:' \
     '    connection, _ = sock.accept()' \
     '    connection.close()' \
@@ -54,9 +58,15 @@ chmod +x "$fakebin/seq"
 
 # Keep these tests isolated from real hosts, games and bridge ports. `kill` is
 # intentionally not stubbed: the observable contract includes process safety.
-for command in pgrep pkill curl; do
+for command in pgrep pkill; do
     ln -s /usr/bin/false "$fakebin/$command"
 done
+# curl must fail the way an unheld port fails — exit 7, connection refused. A
+# stub that exits 1 instead reads as "something is on the port that does not
+# speak HTTP", which is exactly what the launcher's port guard refuses; every
+# launch case below would abort before starting anything.
+printf '%s\n' '#!/bin/sh' 'exit 7' > "$fakebin/curl"
+chmod +x "$fakebin/curl"
 ln -s "$real_ps" "$fakebin/ps"
 
 run_stop() {
@@ -76,6 +86,16 @@ run_host_timeout() {
         SPIRESCRY_TEST_REAL_PS="$real_ps" \
         SPIRESCRY_TEST_START_COUNT="$scratch/start-count" \
         "$repo/build.sh" host
+}
+
+# A bare `grep -q` under `set -e` fails the suite with no output at all, leaving
+# the gate to report only an exit code. The message the launcher actually
+# printed is the first thing anyone debugging that needs.
+assert_says() {
+    grep -q "$1" <<<"$2" || {
+        printf 'expected output matching: %s\ngot:\n%s\n' "$1" "$2" >&2
+        exit 1
+    }
 }
 
 assert_alive() {
@@ -101,7 +121,7 @@ if output="$(run_host_timeout 2>&1)"; then
     echo "bridge-less host unexpectedly reported success: $output" >&2
     exit 1
 fi
-grep -q 'bridge not up after 30s' <<<"$output"
+assert_says 'bridge not up after 30s' "$output"
 [ -s "$timeout_host_pidfile" ] || {
     echo "bridge-less host did not expose its test PID" >&2
     exit 1
@@ -117,7 +137,7 @@ if ! python3 -c 'import socket, sys; s=socket.socket(); s.bind(("127.0.0.1", int
     timeout_failure=1
 fi
 stop_output="$(run_stop 2>&1)"
-grep -q 'nothing running' <<<"$stop_output"
+assert_says 'nothing running' "$stop_output"
 if kill -0 "$timeout_host_pid" 2>/dev/null; then
     kill -KILL "$timeout_host_pid" 2>/dev/null || true
     timeout_failure=1
@@ -173,7 +193,7 @@ if output="$(run_stop 2>&1)"; then
     echo "corrupt pidfile unexpectedly reported success: $output" >&2
     exit 1
 fi
-grep -q 'invalid host pidfile' <<<"$output"
+assert_says 'invalid host pidfile' "$output"
 
 sleep 60 &
 unrelated_pid=$!
@@ -183,7 +203,7 @@ if output="$(run_stop 2>&1)"; then
     exit 1
 fi
 assert_alive "$unrelated_pid"
-grep -q 'does not belong to this host' <<<"$output"
+assert_says 'does not belong to this host' "$output"
 
 # An environment that cannot inspect a live PID must fail honestly: it may
 # neither discard the launch record nor guess that the process has exited.
@@ -195,7 +215,7 @@ if output="$(run_stop 2>&1)"; then
 fi
 assert_alive "$unrelated_pid"
 [ -e "$pidfile" ]
-grep -q 'cannot inspect PID' <<<"$output"
+assert_says 'cannot inspect PID' "$output"
 ln -sf "$real_ps" "$fakebin/ps"
 
 kill "$unrelated_pid"
@@ -213,7 +233,7 @@ if output="$(run_stop 2>&1)"; then
     exit 1
 fi
 assert_alive "$reused_host_pid"
-grep -q 'was reused or restarted' <<<"$output"
+assert_says 'was reused or restarted' "$output"
 kill "$reused_host_pid"
 wait "$reused_host_pid" 2>/dev/null || true
 
@@ -230,20 +250,394 @@ if output="$(run_stop 2>&1)"; then
     exit 1
 fi
 assert_alive "$host_pid"
-grep -q 'has no saved process snapshot' <<<"$output"
+assert_says 'has no saved process snapshot' "$output"
 
 host_snapshot="$(ps -p "$host_pid" -o lstart= -o command= 2>/dev/null \
     | sed -E 's/^[[:space:]]+//')"
 printf '%s\n%s\n' "$host_pid" "$host_snapshot" > "$pidfile"
 output="$(run_stop 2>&1)"
 assert_dead "$host_pid"
-grep -q 'stopped' <<<"$output"
+assert_says 'stopped' "$output"
 [ ! -e "$pidfile" ]
 
 ln -sf /usr/bin/false "$fakebin/pgrep"
 printf '99999999\n' > "$pidfile"
 output="$(run_stop 2>&1)"
-grep -q 'nothing running' <<<"$output"
+assert_says 'nothing running' "$output"
 [ ! -e "$pidfile" ]
 
-echo "build stop tests passed"
+# ---------- `./build.sh headless`: owning the child, verifying the bridge ----
+
+# The engine launcher talks to a real bridge over a real port, so this section
+# needs the real curl back. pgrep stays stubbed out: `stop` must reclaim the
+# launched child from its own launch record, not by rediscovering it.
+ln -sf "$real_curl" "$fakebin/curl"
+
+game_dir="$scratch/game"
+headless_tmp="$scratch/headless"
+game_child_pidfile="$scratch/game-child.pid"
+game_pidfile="$headless_tmp/spirescry-game.pid"
+mkdir -p "$game_dir" "$headless_tmp"
+headless_port="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')"
+
+# A stand-in for the game binary: it records its PID, then serves the /health
+# body it was handed — or, with none, never brings a bridge up at all.
+printf '%s\n' \
+    '#!/usr/bin/env python3' \
+    'import os, time' \
+    'from http.server import BaseHTTPRequestHandler, HTTPServer' \
+    'with open(os.environ["SPIRESCRY_TEST_GAME_PIDFILE"], "w") as handle:' \
+    '    handle.write(str(os.getpid()))' \
+    'health = os.environ.get("SPIRESCRY_TEST_HEALTH", "").encode()' \
+    'if not health:' \
+    '    while True:' \
+    '        time.sleep(1)' \
+    'class Health(BaseHTTPRequestHandler):' \
+    '    def do_GET(self):' \
+    '        self.send_response(200)' \
+    '        self.send_header("Content-Type", "application/json")' \
+    '        self.send_header("Content-Length", str(len(health)))' \
+    '        self.end_headers()' \
+    '        self.wfile.write(health)' \
+    '    def log_message(self, *args):' \
+    '        pass' \
+    'HTTPServer(("127.0.0.1", int(os.environ["STS2_AGENT_PORT"])), Health).serve_forever()' \
+    > "$scratch/bridge-stub.py"
+chmod +x "$scratch/bridge-stub.py"
+cp "$scratch/bridge-stub.py" "$game_dir/SlayTheSpire2"
+
+# A port can be held by something that never completes an HTTP exchange at all.
+# This one accepts and answers with bytes that are not a response, which is what
+# a wrong-protocol server or a half-open proxy looks like from the launcher.
+printf '%s\n' \
+    '#!/usr/bin/env python3' \
+    'import os, socket' \
+    'sock = socket.socket()' \
+    'sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)' \
+    'sock.bind(("127.0.0.1", int(os.environ["STS2_AGENT_PORT"])))' \
+    'sock.listen()' \
+    'while True:' \
+    '    connection, _ = sock.accept()' \
+    '    try:' \
+    '        connection.recv(4096)' \
+    '        connection.sendall(b"GARBAGE NOT HTTP\\r\\n")' \
+    '    except OSError:' \
+    '        pass' \
+    '    connection.close()' \
+    > "$scratch/raw-squatter.py"
+
+# One polling interval is too tight for a bridge that has to start a process
+# first; five keeps the deadline cases quick without racing the success case.
+printf '%s\n' '#!/bin/sh' 'printf "1\\n2\\n3\\n4\\n5\\n"' > "$fakebin/seq"
+chmod +x "$fakebin/seq"
+
+checkout_stamp="$("$repo/build.sh" stamp)"
+
+health_json() {
+    printf '{"ok":true,"mod":"%s","version":"0.1.0","buildHash":"%s","protocolVersion":1}' \
+        "$1" "$2"
+}
+
+run_headless() {
+    PATH="$fakebin:$PATH" \
+        TMPDIR="$headless_tmp" \
+        STS2_GAME_DIR="$game_dir" \
+        STS2_AGENT_PORT="$headless_port" \
+        SPIRESCRY_TEST_GAME_PIDFILE="$game_child_pidfile" \
+        SPIRESCRY_TEST_HEALTH="${health_body:-}" \
+        "$repo/build.sh" headless
+}
+
+run_game_stop() {
+    PATH="$fakebin:$PATH" \
+        TMPDIR="$headless_tmp" \
+        STS2_GAME_DIR="$game_dir" \
+        STS2_AGENT_PORT="$headless_port" \
+        "$repo/build.sh" stop
+}
+
+# Both launchers share the port guard, so it is exercised through both. The
+# host's stand-in child is the fake dotnet above, which records its PID before
+# it reaches for the port — an absent record therefore means the guard stopped
+# the launch, not that a spawned child failed to bind.
+host_child_pidfile="$scratch/host-child.pid"
+
+run_host_on_headless_port() {
+    PATH="$fakebin:$PATH" \
+        TMPDIR="$headless_tmp" \
+        STS2_GAME_DIR="$scratch/no-game-here" \
+        STS2_AGENT_PORT="$headless_port" \
+        SPIRESCRY_TEST_HOST_PIDFILE="$host_child_pidfile" \
+        "$repo/build.sh" host
+}
+
+# start_squatter <health-body>: hold the bridge port from outside the launcher.
+start_squatter() {
+    SPIRESCRY_TEST_GAME_PIDFILE="$scratch/squatter.pid" \
+        SPIRESCRY_TEST_HEALTH="$1" \
+        STS2_AGENT_PORT="$headless_port" \
+        python3 "$scratch/bridge-stub.py" &
+    squatter_pid=$!
+    for _ in $(seq 1 50); do
+        if curl -sf "http://127.0.0.1:$headless_port/health" >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 0.1
+    done
+    echo "squatter bridge never came up on port $headless_port" >&2
+    exit 1
+}
+
+# start_raw_squatter: hold the bridge port with a listener that answers with
+# bytes that are not an HTTP response.
+start_raw_squatter() {
+    STS2_AGENT_PORT="$headless_port" python3 "$scratch/raw-squatter.py" &
+    squatter_pid=$!
+    for _ in $(seq 1 50); do
+        if python3 -c 'import socket, sys
+probe = socket.socket()
+sys.exit(probe.connect_ex(("127.0.0.1", int(sys.argv[1]))) != 0)' "$headless_port"; then
+            return 0
+        fi
+        sleep 0.1
+    done
+    echo "raw squatter never bound port $headless_port" >&2
+    exit 1
+}
+
+stop_squatter() {
+    kill -KILL "$squatter_pid" 2>/dev/null || true
+    wait "$squatter_pid" 2>/dev/null || true
+}
+
+assert_no_game_child() {
+    [ ! -e "$game_child_pidfile" ] || {
+        echo "$1" >&2
+        exit 1
+    }
+}
+
+# assert_game_child_reclaimed: the launcher must not return while the child it
+# started still runs, and a launch that never reached a bridge must not leave a
+# launch record claiming otherwise. Callers clear both paths beforehand, so what
+# is under test is that the failure path wrote neither — `stop` would go on to
+# trust that record.
+assert_game_child_reclaimed() {
+    [ -s "$game_child_pidfile" ] || {
+        echo "the game stand-in never recorded its PID" >&2
+        exit 1
+    }
+    reclaimed_pid="$(cat "$game_child_pidfile")"
+    if kill -0 "$reclaimed_pid" 2>/dev/null; then
+        kill -KILL "$reclaimed_pid" 2>/dev/null || true
+        echo "$1 left game PID $reclaimed_pid running" >&2
+        exit 1
+    fi
+    [ ! -e "$game_pidfile" ] || {
+        echo "$1 left a launch record at $game_pidfile" >&2
+        exit 1
+    }
+}
+
+# A bridge already on the port is never this launch's child, whoever built it.
+rm -f "$game_child_pidfile"
+start_squatter "$(health_json spirescry "$checkout_stamp")"
+if output="$(run_headless 2>&1)"; then
+    stop_squatter
+    echo "headless launch onto an occupied port reported success: $output" >&2
+    exit 1
+fi
+stop_squatter
+assert_says 'already answers on port' "$output"
+assert_no_game_child "headless launch started the game despite a live bridge"
+
+# Same port, something that is not a bridge at all.
+start_squatter '{"ok":true,"service":"something else"}'
+if output="$(run_headless 2>&1)"; then
+    stop_squatter
+    echo "headless launch onto a foreign server reported success: $output" >&2
+    exit 1
+fi
+stop_squatter
+assert_says 'is not a spirescry bridge' "$output"
+assert_no_game_child "headless launch started the game despite a foreign server"
+
+# An occupant that never completes an HTTP exchange is an occupant all the same.
+# curl reports it as a transport failure rather than a reply, and a guard that
+# recognised only clean replies would wave the launch through onto a port its
+# child cannot bind — then blame the health deadline for the silence.
+rm -f "$game_child_pidfile"
+start_raw_squatter
+if output="$(run_headless 2>&1)"; then
+    stop_squatter
+    echo "headless launch onto a non-HTTP occupant reported success: $output" >&2
+    exit 1
+fi
+stop_squatter
+assert_says 'does not answer /health' "$output"
+assert_no_game_child "headless launch started the game despite an occupied port"
+
+# The host launcher runs the same guard, and must reject the same occupants.
+rm -f "$host_child_pidfile"
+start_squatter "$(health_json spirescry "$checkout_stamp")"
+if output="$(run_host_on_headless_port 2>&1)"; then
+    stop_squatter
+    echo "host launch onto an occupied port reported success: $output" >&2
+    exit 1
+fi
+stop_squatter
+assert_says 'already answers on port' "$output"
+[ ! -e "$host_child_pidfile" ] || {
+    echo "host launch started its child despite a live bridge" >&2
+    exit 1
+}
+
+# A launch that reaches its bridge deadline owns the cleanup of its own child.
+rm -f "$game_child_pidfile" "$game_pidfile"
+health_body=""
+if output="$(run_headless 2>&1)"; then
+    echo "bridge-less headless launch reported success: $output" >&2
+    exit 1
+fi
+assert_says 'bridge not up after 60s' "$output"
+assert_game_child_reclaimed "the headless bridge deadline"
+
+# An HTTP 2xx is not identity: a bridge from another build answers /health
+# exactly like this checkout's would.
+rm -f "$game_child_pidfile" "$game_pidfile"
+health_body="$(health_json spirescry 0000000.000000000000)"
+if output="$(run_headless 2>&1)"; then
+    echo "headless launch accepted a foreign build: $output" >&2
+    exit 1
+fi
+assert_says "this checkout is $checkout_stamp" "$output"
+assert_game_child_reclaimed "the foreign-build launch"
+
+# The successful path: this checkout's bridge answers, and the launch records
+# the exact child that serves it — enough for `stop` to reclaim it with no
+# process enumeration at all.
+rm -f "$game_child_pidfile" "$game_pidfile"
+health_body="$(health_json spirescry "$checkout_stamp")"
+output="$(run_headless 2>&1)"
+assert_says 'bridge up' "$output"
+[ -s "$game_child_pidfile" ] || {
+    echo "the game stand-in never recorded its PID" >&2
+    exit 1
+}
+launched_game_pid="$(cat "$game_child_pidfile")"
+[ -s "$game_pidfile" ] || {
+    kill -KILL "$launched_game_pid" 2>/dev/null || true
+    echo "a successful headless launch wrote no launch record at $game_pidfile" >&2
+    exit 1
+}
+IFS= read -r recorded_game_pid < "$game_pidfile"
+[ "$recorded_game_pid" = "$launched_game_pid" ] || {
+    kill -KILL "$launched_game_pid" 2>/dev/null || true
+    echo "launch recorded PID $recorded_game_pid, but the game runs as $launched_game_pid" >&2
+    exit 1
+}
+recorded_game_snapshot="$(sed -n '2p' "$game_pidfile")"
+live_game_snapshot="$(ps -p "$launched_game_pid" -o lstart= -o command= 2>/dev/null \
+    | sed -E 's/^[[:space:]]+//')"
+[ "$recorded_game_snapshot" = "$live_game_snapshot" ] || {
+    kill -KILL "$launched_game_pid" 2>/dev/null || true
+    echo "launch record snapshot does not match the running game" >&2
+    exit 1
+}
+
+# An unrelated PID in the launch record is still just a claim.
+sleep 60 &
+unrelated_game_pid=$!
+printf '%s\n%s\n' "$unrelated_game_pid" 'a snapshot of something else' > "$game_pidfile"
+if output="$(run_game_stop 2>&1)"; then
+    kill -KILL "$launched_game_pid" 2>/dev/null || true
+    echo "a foreign PID in the game launch record was accepted: $output" >&2
+    exit 1
+fi
+assert_alive "$unrelated_game_pid"
+assert_says 'does not belong to this game' "$output"
+kill "$unrelated_game_pid"
+wait "$unrelated_game_pid" 2>/dev/null || true
+
+printf '%s\n%s\n' "$launched_game_pid" "$recorded_game_snapshot" > "$game_pidfile"
+output="$(run_game_stop 2>&1)"
+assert_says 'stopped' "$output"
+assert_dead "$launched_game_pid"
+[ ! -e "$game_pidfile" ]
+
+# ---------- a child that has not exec'd yet is not an unidentifiable child ----
+
+# `nohup "$game_bin" --headless &` hands back a PID that is still a forked copy
+# of the launcher until the kernel finishes the exec. A ps sample taken inside
+# that window reports the launcher's own command line, which matches no game.
+# Treating that first sample as final both fails launches that were fine and —
+# worse — strands the child, which execs and binds the port moments later.
+#
+# fake_command_reads <n|all>: make the next <n> `command=` reads (or all of
+# them) report a command that belongs to no game.
+fake_command_reads() {
+    rm -f "$fakebin/ps" "$scratch/command-count"
+    printf '%s\n' \
+        '#!/bin/sh' \
+        "count_file=\"$scratch/command-count\"" \
+        "lies=\"$1\"" \
+        'case "$*" in' \
+        '    *command=*)' \
+        '        count=0' \
+        '        [ ! -f "$count_file" ] || read -r count < "$count_file"' \
+        '        count=$((count + 1))' \
+        '        printf "%s\\n" "$count" > "$count_file"' \
+        '        if [ "$lies" = all ] || [ "$count" -le "$lies" ]; then' \
+        '            printf "Mon Jan  1 00:00:00 2099 /bin/sh /not/the/game\\n"' \
+        '            exit 0' \
+        '        fi' \
+        '        ;;' \
+        'esac' \
+        "exec \"$real_ps\" \"\$@\"" \
+        > "$fakebin/ps"
+    chmod +x "$fakebin/ps"
+}
+
+# One late exec must not fail the launch: the child is identified as soon as it
+# becomes identifiable.
+rm -f "$game_child_pidfile" "$game_pidfile"
+health_body="$(health_json spirescry "$checkout_stamp")"
+fake_command_reads 1
+launch_status=0
+output="$(run_headless 2>&1)" || launch_status=$?
+rm -f "$fakebin/ps"
+ln -s "$real_ps" "$fakebin/ps"
+[ "$launch_status" = 0 ] || {
+    [ ! -s "$game_child_pidfile" ] || kill -KILL "$(cat "$game_child_pidfile")" 2>/dev/null || true
+    echo "a child that exec'd one ps sample late failed to launch: $output" >&2
+    exit 1
+}
+assert_says 'bridge up' "$output"
+[ -s "$game_child_pidfile" ] || {
+    echo "the slow-exec game stand-in never recorded its PID" >&2
+    exit 1
+}
+slow_exec_game_pid="$(cat "$game_child_pidfile")"
+assert_alive "$slow_exec_game_pid"
+output="$(run_game_stop 2>&1)"
+assert_says 'stopped' "$output"
+assert_dead "$slow_exec_game_pid"
+
+# A child that never becomes identifiable is still this launcher's child: it
+# must be reclaimed, not left holding the port while the launcher tells the
+# user to go check on it.
+rm -f "$game_child_pidfile" "$game_pidfile"
+health_body=""
+fake_command_reads all
+if output="$(run_headless 2>&1)"; then
+    rm -f "$fakebin/ps"
+    ln -s "$real_ps" "$fakebin/ps"
+    echo "an unidentifiable child reported launch success: $output" >&2
+    exit 1
+fi
+rm -f "$fakebin/ps"
+ln -s "$real_ps" "$fakebin/ps"
+assert_says 'could not be identified' "$output"
+assert_game_child_reclaimed "the unidentifiable-child launch"
+
+echo "build launch and stop tests passed"
