@@ -133,11 +133,16 @@ public static class Signals
     // had not yet enqueued an engine action or changed phase. The task is
     // bound to the run that is active right now: a completion that arrives
     // once another run owns the board publishes nothing.
-    public static void TrackAsync(Task task, string label) =>
-        TrackAsync(task, label, TrackedKind.FireAndForget);
+    //
+    // `endsRun` is for the one verb whose work is the run's own teardown:
+    // binding `abandon` to the run it is about to clear would let the
+    // rotation it causes retire its failure. See FireAndForgetTracker.
+    public static void TrackAsync(
+        Task task, string label, bool endsRun = false) =>
+        TrackAsync(task, label, TrackedKind.FireAndForget, endsRun);
 
     private static void TrackAsync(
-        Task task, string label, TrackedKind kind)
+        Task task, string label, TrackedKind kind, bool endsRun = false)
     {
         var isEventOption = kind == TrackedKind.EventOption;
         var eventGeneration = 0L;
@@ -151,7 +156,7 @@ public static class Signals
                 if (!EventOptions.TryTrack(task, out eventGeneration)) return;
             }
             else
-                FireAndForget.Track(task, stamp);
+                FireAndForget.Track(task, stamp, endsRun);
         }
         _ = task.ContinueWith(completed =>
         {

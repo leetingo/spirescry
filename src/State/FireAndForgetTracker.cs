@@ -36,6 +36,20 @@ internal sealed class FireAndForgetTracker
         _run = runState;
         foreach (var (task, owner) in _pending.ToArray())
         {
+            // The dual of the adoption below: `abandon` tracks the very task
+            // that clears RunState, so its owner is the run this rotation is
+            // leaving. Retiring it here would hide the failure of the verb
+            // doing the tearing down — and would withhold every engine Error
+            // line the teardown writes after the run went away. Release it to
+            // no run instead: menu work reports unconditionally. The flag is
+            // spent on this one rotation, so the next run adopts it like any
+            // other ownerless work and nothing here is immortal.
+            if (owner.EndsRun && runState is null)
+            {
+                owner.EndsRun = false;
+                owner.Run = null;
+                continue;
+            }
             // Work tracked with no run active is adopted by the first run
             // that appears rather than retired: `new-run` tracks the very
             // task that mints the next RunState, and retiring it would hide
@@ -55,10 +69,15 @@ internal sealed class FireAndForgetTracker
     // than at the stamp is deliberate: a job is stamped before it calls
     // RefreshRunIdentity, so the owning run is only settled once the verb is
     // actually dispatching.
-    public void Track(Task task, AsyncWorkOwner? owner)
+    // `endsRun` marks work that tears down the run it is being bound to, so
+    // the rotation it causes releases it instead of retiring it. It is OR'd
+    // in: one pump job's stamp can cover several tracked tasks, and the
+    // exemption belongs to the job, not to whichever task was tracked last.
+    public void Track(Task task, AsyncWorkOwner? owner, bool endsRun = false)
     {
         var record = owner ?? new AsyncWorkOwner();
         record.Run = _run;
+        record.EndsRun |= endsRun;
         _pending[task] = record;
     }
 

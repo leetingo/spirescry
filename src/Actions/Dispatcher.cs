@@ -126,6 +126,7 @@ public static class Dispatcher
             "energy" => SetCombatResource("Energy", args),
             "async-fault" => CheatAsyncFault(),
             "async-orphan" => CheatAsyncOrphan(),
+            "async-orphan-ends-run" => CheatAsyncOrphan(endsRun: true),
             "async-orphan-fault" =>
                 CheatAsyncOrphanRelease(OrphanAsyncRelease.Fault),
             "async-orphan-log" =>
@@ -157,7 +158,11 @@ public static class Dispatcher
     // the ordinary-work twin of the event-orphan cheats. Requires a run —
     // menu work is adopted by the run it brings up, so a parked menu task
     // would be reported as that run's, which is not what this tests.
-    private static DispatchResult CheatAsyncOrphan()
+    //
+    // `endsRun` parks it the way `abandon` tracks its teardown instead:
+    // owned by the run, but exempt from the rotation that run's own
+    // departure causes, so its failure stays reportable at the menu.
+    private static DispatchResult CheatAsyncOrphan(bool endsRun = false)
     {
         if (LocalRunContext.StateOnly is null)
             return DispatchResult.Reject(RejectionCodes.BadState,
@@ -168,7 +173,7 @@ public static class Dispatcher
         _orphanAsync = new TaskCompletionSource<OrphanAsyncRelease>(
             TaskCreationOptions.RunContinuationsAsynchronously);
         DecisionSurfaceActions.Track(
-            ParkedOrphanAsync(_orphanAsync.Task), OrphanAsyncLabel);
+            ParkedOrphanAsync(_orphanAsync.Task), OrphanAsyncLabel, endsRun);
         return DispatchResult.Success();
     }
 

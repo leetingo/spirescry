@@ -866,6 +866,24 @@ def orphan_async_channel(release, marker, seed):
                    for event in window.get("events") or []), window
     status, health = http("GET", "/health")
     assert status == 200 and health["pendingAsync"] == 0, health
+
+    # (c) the dual: work the run-ending verb itself started. `abandon` tracks
+    # the very task that clears RunState, so ownership binds it to the run it
+    # is tearing down — retiring it at that rotation would report a clean
+    # settle for a teardown that actually failed. Its failure must still
+    # reach the error journal once the board is back at the menu.
+    run("cheat", "async-orphan-ends-run")
+    teardown_rev = obs()["rev"]
+    # No --follow here: run-ending work is deliberately still pending across
+    # its own rotation, so the probe would sit out its whole budget waiting
+    # for a task this fixture only releases below.
+    run("abandon")
+    bridge.wait_phase(PHASE.MAIN_MENU, timeout=15)
+    run("cheat", release)
+    time.sleep(0.6)
+    reported = run("obs", "--since", str(teardown_rev), "--wait", "500")
+    assert any(marker in event["type"]
+               for event in reported.get("events") or []), reported
     to_menu()
 
 

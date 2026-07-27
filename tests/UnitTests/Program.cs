@@ -1374,6 +1374,54 @@ internal static class Tests
         True(tracker.WrittenByRetiredWork(owner));
     }
 
+    public static void FireAndForgetTrackerReportsWorkThatEndsItsOwnRun()
+    {
+        // #145's third criterion, for the one verb whose work IS the
+        // rotation: `abandon` tracks the task that clears RunState while that
+        // run is still active, so the retirement rule would silently
+        // downgrade the teardown's own fault and withhold every engine Error
+        // line it writes afterwards — `abandon --follow` would report a clean
+        // settle for a teardown that failed. The exemption is spent on that
+        // one rotation, so a task that never completes cannot pin the ledger.
+        var tracker = new FireAndForgetTracker();
+        var leaving = new object();
+        var teardown = new TaskCompletionSource().Task;
+        var owner = new AsyncWorkOwner();
+
+        tracker.ChangeRun(leaving);
+        tracker.Track(teardown, owner, endsRun: true);
+        tracker.ChangeRun(null);                 // the teardown's own rotation
+
+        Equal(1, tracker.PendingCount);
+        True(tracker.Complete(teardown));
+        False(tracker.WrittenByRetiredWork(owner));
+
+        // Ordinary work the same run parked is still retired by that
+        // rotation — the exemption is scoped to the teardown's own task.
+        var parked = new TaskCompletionSource().Task;
+        var parkedOwner = new AsyncWorkOwner();
+        tracker.ChangeRun(leaving);
+        tracker.Track(parked, parkedOwner);
+        tracker.ChangeRun(null);
+        Equal(0, tracker.PendingCount);
+        False(tracker.Complete(parked));
+        True(tracker.WrittenByRetiredWork(parkedOwner));
+
+        // And the flag does not make the teardown immortal: released to the
+        // menu it is adopted by the next run, then retired like anything else.
+        var lingering = new TaskCompletionSource().Task;
+        var lingeringOwner = new AsyncWorkOwner();
+        tracker.ChangeRun(leaving);
+        tracker.Track(lingering, lingeringOwner, endsRun: true);
+        tracker.ChangeRun(null);
+        tracker.ChangeRun(new object());
+        Equal(1, tracker.PendingCount);
+        tracker.ChangeRun(null);
+        Equal(0, tracker.PendingCount);
+        False(tracker.Complete(lingering));
+        True(tracker.WrittenByRetiredWork(lingeringOwner));
+    }
+
     public static void FireAndForgetTrackerSuppressesEngineLogsFromRetiredWork()
     {
         // #145: the engine catches exceptions from fire-and-forget chains and

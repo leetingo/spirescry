@@ -30,6 +30,12 @@ internal sealed class AsyncWorkOwner
     // work, and jobs that never tracked anything at all.
     public object? Run { get; set; }
 
+    // Set for work whose own job is to end the run that owns it — `abandon`
+    // tears down the very RunState its task was bound to. Without this the
+    // teardown's failure would be retired by the rotation the teardown
+    // itself causes. FireAndForgetTracker spends the flag on that rotation.
+    public bool EndsRun { get; set; }
+
     // The owner stamped on the caller's flow, or null when the caller is not
     // running inside a pump job — the engine's own threads and the boot path.
     public static AsyncWorkOwner? Current => Ambient.Value;

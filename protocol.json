@@ -175,6 +175,10 @@
       "arguments": []
     },
     {
+      "name": "async-orphan-ends-run",
+      "arguments": []
+    },
+    {
       "name": "async-orphan-fault",
       "arguments": []
     },

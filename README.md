@@ -313,6 +313,7 @@ picks), and text comes from tables extracted out of your local install's
   | `energy` | `value:integer` |
   | `async-fault` | — |
   | `async-orphan` | — |
+  | `async-orphan-ends-run` | — |
   | `async-orphan-fault` | — |
   | `async-orphan-log` | — |
   | `engine-error` | — |

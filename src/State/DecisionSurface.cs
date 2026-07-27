@@ -181,8 +181,11 @@ internal static class DecisionSurfaceActions
     // knows whether the completion still belongs to the current run, and a
     // separate Error line here would put a retired run's fault back into the
     // live error journal through the engine log callback.
-    public static void Track(Task task, string context) =>
-        Signals.TrackAsync(task, context);
+    //
+    // `endsRun` marks work that tears down the run that owns it, so the
+    // rotation it causes keeps it reportable instead of retiring it.
+    public static void Track(Task task, string context, bool endsRun = false) =>
+        Signals.TrackAsync(task, context, endsRun);
 
     public static DecisionSurfaceResult ResolveAlternativeIndex(
         int? requestedIdx, int count, out int idx)
@@ -894,8 +897,11 @@ internal sealed class GuiDecisionSurface : IDecisionSurface
             return NotReady("game shell not mounted — retry");
         if (!run.Manager.IsAbandoned && !run.Manager.IsGameOver)
             run.Manager.Abandon();
+        // This task's own execution is what clears RunState, so it is bound
+        // to the run it is tearing down: mark it run-ending or the rotation
+        // it causes would retire the teardown's own failure.
         DecisionSurfaceActions.Track(
-            game.ReturnToMainMenuAfterRun(), "abandon");
+            game.ReturnToMainMenuAfterRun(), "abandon", endsRun: true);
         return DecisionSurfaceResult.Success();
     }
 

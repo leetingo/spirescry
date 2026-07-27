@@ -253,6 +253,7 @@ public static class ProtocolVocabulary
                 Shape("energy", new ProtocolArgument("value", ProtocolArgumentType.Integer)),
                 Shape("async-fault"),
                 Shape("async-orphan"),
+                Shape("async-orphan-ends-run"),
                 Shape("async-orphan-fault"),
                 Shape("async-orphan-log"),
                 Shape("engine-error"),
