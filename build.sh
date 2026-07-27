@@ -604,7 +604,7 @@ gate() {
     for t in protocol_contract_test projection_schema_drift_test \
              world_walker_test parity_settlement_test e2e_settlement_test \
              build_identity_test play_skill_fault_protocol_test \
-             gate_coverage_test; do
+             gate_coverage_test sweep_quarantine_test; do
         python3 "tests/$t.py"
     done
 
@@ -619,6 +619,8 @@ gate() {
     # encounter, card, potion, relic) only ever run here, so skipping them
     # leaves that surface unguarded. --quick is the local iteration loop.
     # tests/gate_coverage_test.py fails if this line drops back to it.
+    # Faults already filed as open issues are listed in sweeps.QUARANTINE so
+    # they don't redden an unrelated PR's gate; anything else still fails.
     step "gate: end-to-end (exhaustive, self-booted on port $gate_port)"
     STS2_AGENT_PORT="$gate_port" python3 tests/e2e.py --boot
 

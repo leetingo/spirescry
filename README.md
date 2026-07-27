@@ -353,7 +353,12 @@ python3 tests/host_exit.py  # force clean/signal/unhandled host exits and
 `--quick` is a fast inner loop, never a merge criterion: the M1–M4 sweeps
 (every encounter, card, potion and relic) run nowhere else, so the gate runs
 them in full. `tests/gate_coverage_test.py` — a pure unit test, so CI runs it
-too — fails if `gate()` ever drops back to quick-only coverage.
+too — fails if `gate()` ever drops back to quick-only coverage. Content
+faults already filed as open issues are listed in `sweeps.QUARANTINE`: still
+swept, still printed as `SWEEP KNOWN FAILURE (#nnn)`, but not gate-reddening,
+so no one is tempted to reach for `--quick` over someone else's bug. Any
+other fault still fails, and a quarantined entry that starts passing fails
+too — the list only shrinks (`tests/sweep_quarantine_test.py`).
 
 CI runs only the pure unit tests (`unit-tests.yml`, GitHub-hosted): the
 host is built from the game's non-distributable dlls, so the end-to-end

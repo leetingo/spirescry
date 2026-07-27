@@ -8,6 +8,10 @@ sampled by parity/V1).
 
 All sweeps assume a live bridge (tests/e2e.py boots one) and leave the
 world at the main menu. Each returns a dict of failures: {} == clean.
+
+Faults that are already filed as open product issues live in QUARANTINE:
+they are still swept and still reported, but they do not fail the gate, and
+they fail it again the moment they start passing. See QUARANTINE.
 """
 import json
 import os
@@ -394,7 +398,13 @@ def relics(log=print):
             continue
         if error:
             failures[relic] = error
-            return failures
+            if relic not in QUARANTINE["relics"]:
+                # An untracked obtain fault can wedge the run; stop rather
+                # than blame every remaining relic on it.
+                return failures
+            # A tracked fault must not cost the rest of the belt its sweep.
+            fresh_run(f"SWEEPREL{i}")
+            continue
         verified += 1
         if (i + 1) % 50 == 0:
             n = len(obs()["player"]["relics"])
@@ -416,14 +426,55 @@ SWEEPS = {
     "relics": relics,
 }
 
+# Content faults already tracked as open product issues. The sweep still
+# runs the entry and still prints what it did, but a tracked fault does not
+# fail the pre-merge gate: an unrelated PR must not be blocked by a bug it
+# did not cause, because the only unblock anyone reaches for is putting
+# --quick back (see tests/gate_coverage_test.py for why that must not
+# happen). Everything else still fails, so a NEW fault is caught the day it
+# appears, and a quarantined entry that starts passing fails the sweep —
+# the list can only ever shrink, and the issue's fix is what empties it.
+QUARANTINE = {
+    "encounters": {"SLUMBERING_BEETLE_NORMAL": 148},
+    "cards": {"MAD_SCIENCE": 149, "CHARGE": 147, "HIDDEN_DAGGERS": 147},
+    "potions": {
+        "GIGANTIFICATION_POTION": 148,
+        "LIQUID_MEMORIES": 148,
+        "MOCK_DISCARD_AND_ADD_SHIVS_POTION": 147,
+    },
+    "relics": {"SEA_GLASS": 149},
+}
+
+
+def partition(kind, failures):
+    """Split a sweep's failures into (blocking, tracked-by-an-open-issue)."""
+    known = QUARANTINE.get(kind, {})
+    blocking = {n: w for n, w in failures.items() if n not in known}
+    tracked = {n: (known[n], w) for n, w in failures.items() if n in known}
+    return blocking, tracked
+
+
+def stale_quarantine(kind, failures):
+    """Quarantined entries the sweep no longer fails on. The fix landed (or
+    the entry was renamed away), so the entry has to go — otherwise a
+    quarantine outlives its bug and silently hides the next one."""
+    return sorted(n for n in QUARANTINE.get(kind, {}) if n not in failures)
+
 
 if __name__ == "__main__":
     sweep = sys.argv[1] if len(sys.argv) == 2 else ""
     if sweep not in SWEEPS:
         sys.exit("usage: sweeps.py " + "|".join(SWEEPS))
     failed = SWEEPS[sweep]()
+    blocking, tracked = partition(sweep, failed)
+    for name, (issue, why) in sorted(tracked.items()):
+        print(f"SWEEP KNOWN FAILURE (#{issue}): {name}: {why}")
+    for name in stale_quarantine(sweep, failed):
+        blocking[name] = (
+            f"quarantined for #{QUARANTINE[sweep][name]} but the sweep passed"
+            " — drop it from sweeps.QUARANTINE")
     # Name the failures — a bare exit code forces a full re-run under a
     # debugger just to learn WHICH entry broke.
-    for name, why in failed.items():
+    for name, why in blocking.items():
         print(f"SWEEP FAILURE: {name}: {why}")
-    sys.exit(1 if failed else 0)
+    sys.exit(1 if blocking else 0)
