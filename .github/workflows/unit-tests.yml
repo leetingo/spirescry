@@ -42,6 +42,7 @@ jobs:
           python3 tests/play_skill_fault_protocol_test.py
           python3 tests/gate_coverage_test.py
           python3 tests/sweep_quarantine_test.py
+          python3 tests/sweep_reporting_test.py
 
       - name: Run CLI unit tests
         run: cargo test --manifest-path cli/Cargo.toml
