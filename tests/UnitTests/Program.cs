@@ -141,15 +141,60 @@ internal static class Tests
             artifact["cheatArgumentShapes"]!.AsArray().Count);
     }
 
+    public static void ProtocolVersionCoversTheMandatoryOkEnvelope()
+    {
+        // v6 makes `ok` mandatory on every body, snapshots included. Every
+        // earlier host answered /obs without it, and a v6 CLI calls a body
+        // with no boolean `ok` malformed, so the pairing has to be rejected
+        // as an incompatible host before any route is read.
+        Equal(6, ProtocolVocabulary.ProtocolVersion);
+    }
+
+    public static void ResponseEnvelopeStampsOkFromTheHttpStatus()
+    {
+        // The rule every route now answers through: 2xx is a result, any
+        // other status is a rejection, and the flag says which.
+        Equal(true, ResponseEnvelope.OkFor(200));
+        Equal(false, ResponseEnvelope.OkFor(400));
+        Equal(false, ResponseEnvelope.OkFor(404));
+        Equal(false, ResponseEnvelope.OkFor(500));
+
+        var accepted = ResponseEnvelope.Stamp(
+            new JsonObject { ["enqueued"] = "play" }, 200);
+        var rejected = ResponseEnvelope.Stamp(
+            new JsonObject { ["err"] = "bad_state" }, 400);
+
+        Equal(true, accepted[ResponseEnvelope.OkField]!.GetValue<bool>());
+        Equal("play", accepted["enqueued"]!.GetValue<string>());
+        Equal(false, rejected[ResponseEnvelope.OkField]!.GetValue<bool>());
+    }
+
+    public static void ResponseEnvelopeOverwritesAnOkTheBodyCarriedItself()
+    {
+        // A body that disagrees with its own status is exactly what the CLI
+        // rejects as malformed, so the status wins here rather than being
+        // passed on to be discovered downstream.
+        var claimsSuccess = ResponseEnvelope.Stamp(
+            new JsonObject { ["ok"] = true, ["err"] = "internal" }, 500);
+        var claimsFailure = ResponseEnvelope.Stamp(
+            new JsonObject { ["ok"] = false, ["phase"] = "combat" }, 200);
+
+        Equal(false, claimsSuccess[ResponseEnvelope.OkField]!.GetValue<bool>());
+        Equal(true, claimsFailure[ResponseEnvelope.OkField]!.GetValue<bool>());
+    }
+
     public static void ProtocolVersionCoversTheOwnerChangeOutcome()
     {
-        // v5 adds owner_changed. A v4 CLI cannot decode it: the outcome would
+        // v5 added owner_changed. A v4 CLI cannot decode it: the outcome would
         // read as absent, so an unowned follow would look like a response
         // with no verdict rather than "your run is gone". v4 itself made
         // expanded semanticState opt-in while replay kept hashing it — a v3
-        // CLI would calculate a narrower fingerprint. Both skews must be
-        // rejected at /health before a verb is fired.
-        Equal(5, ProtocolVocabulary.ProtocolVersion);
+        // CLI would calculate a narrower fingerprint. Every such skew must be
+        // rejected at /health before a verb is fired, so the outcome has to
+        // stay in the published vocabulary and the constant has to stay ahead
+        // of the version that introduced it (now 6, see above).
+        Equal(true, ProtocolVocabulary.SettlementOutcomes.All.Contains("owner_changed"));
+        Equal(true, ProtocolVocabulary.ProtocolVersion >= 5);
     }
 
     public static void ProtocolArtifactPublishesConsumerProjectionSchema()

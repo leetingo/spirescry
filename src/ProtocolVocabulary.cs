@@ -103,7 +103,15 @@ public static class ProtocolVocabulary
         Converters = { new JsonStringEnumConverter(JsonNamingPolicy.CamelCase) },
     };
 
-    // v5 adds the owner_changed settlement outcome. A v4 consumer cannot
+    // v6 makes the `ok` envelope flag mandatory on every body, snapshots
+    // included; a v6 CLI rejects a body without it as malformed. Every
+    // earlier host answered /obs with no flag at all, so pairing one with a
+    // v6 CLI must fail as an incompatible host rather than as a malformed
+    // response on whichever route the caller happened to reach first.
+    //
+    // v5 adds the owner_changed settlement outcome: a follow whose run
+    // stopped owning the accepted action reports the ownership change rather
+    // than settling against whatever run replaced it. A v4 consumer cannot
     // decode it, so it would read an unowned follow as an outcome-less
     // response rather than as the explicit "your run is gone" signal —
     // compatibility must fail first.
@@ -111,8 +119,8 @@ public static class ProtocolVocabulary
     // v4 kept the typed semanticState projection internal by default and
     // required replay/diagnostic callers to request its expanded wire form.
     // A v3 CLI would hash the bounded response without those tokens and
-    // report a false divergence.
-    public const int ProtocolVersion = 5;
+    // report a false divergence, so compatibility must fail first.
+    public const int ProtocolVersion = 6;
 
     public static string CreateArtifactJson() =>
         JsonSerializer.Serialize(new ArtifactDocument(

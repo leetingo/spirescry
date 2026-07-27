@@ -386,6 +386,46 @@ def p4():
             f"{method} {path} -> {status} {d}"
 
 
+@case("P19 every route answers a boolean-ok envelope")
+def p19():
+    # The CLI validates the envelope strictly — a body without a boolean
+    # `ok`, or one whose `ok` disagrees with the status, is malformed and
+    # exits 1. Snapshot bodies are assembled as raw JSON nodes, so they are
+    # the ones that can silently drop the stamp.
+    def envelope(method, path, body, want_ok):
+        status, d = http(method, path, body)
+        where = f"{method} {path}"
+        assert isinstance(d, dict), f"{where} is not an object envelope: {d}"
+        assert d.get("ok") is want_ok, f"{where} -> {status} ok={d.get('ok')!r}"
+        assert (status < 400) is want_ok, \
+            f"{where} status {status} contradicts ok={d.get('ok')!r}"
+        assert ("err" in d) is not want_ok, f"{where} -> {status} {sorted(d)[:8]}"
+
+    to_menu()
+    for path, want_ok in (
+            ("/health", True),
+            ("/obs", True),
+            ("/obs?since=0", True),
+            ("/runlog", True),
+            ("/models?kind=relic", True),
+            ("/models?kind=bogus", False),
+            ("/nope", False),
+    ):
+        envelope("GET", path, None, want_ok)
+
+    # /step answers in four shapes — plain accept, accept with a note,
+    # follow success, follow fault — all stamped by the one rule; these are
+    # the two an e2e can steer to directly, plus a rejection.
+    envelope("POST", "/step", {"action": "warp", "args": {}}, False)
+    envelope("POST", "/step",
+             {"action": "new-run",
+              "args": {"character": "IRONCLAD", "seed": "CIP4B"}}, True)
+    bridge.wait_phase(PHASE.EVENT, timeout=30)
+    envelope("POST", "/step", {"action": "abandon", "args": {}, "follow": 8000},
+             True)
+    to_menu()
+
+
 @case("P4b malformed obs query parameters are rejected")
 def p4b():
     to_menu()

@@ -120,7 +120,6 @@ public static class RunLog
                 .ToArray();
             return new
             {
-                ok = true,
                 kind = "diagnostic_reconstruction_recipe",
                 runId = _runId,
                 liveRunId,

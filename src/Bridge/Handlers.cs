@@ -42,7 +42,6 @@ public static class Handlers
         });
         return Response.Json(new
         {
-            ok = true,
             mod = Mod.Id,
             version = Mod.Version,
             buildHash = Mod.BuildHash,
@@ -98,7 +97,7 @@ public static class Handlers
                 node["events"] = JsonSerializer.SerializeToNode(
                     Signals.EventsSince(query.Since));
             }
-            return new Response { Body = node.ToJsonString() };
+            return Response.Json(node);
         });
     }
 
@@ -245,9 +244,9 @@ public static class Handlers
         // A success Msg is a note (e.g. "settled with victory cleanup").
         return result.dispatch.Msg is null
             ? Response.Json(new
-                { ok = true, enqueued = action, rev = result.rev, runId = result.runId })
+                { enqueued = action, rev = result.rev, runId = result.runId })
             : Response.Json(new
-                { ok = true, enqueued = action, rev = result.rev,
+                { enqueued = action, rev = result.rev,
                     runId = result.runId, note = result.dispatch.Msg });
     }
 
@@ -300,7 +299,6 @@ public static class Handlers
                 RunLog.RecordOutcome(id, outcome, probe.Observation, errors);
             var node = new JsonObject
             {
-                ["ok"] = true,
                 ["action"] = action,
                 ["enqueued"] = action,
                 ["startedRev"] = startedRev,
@@ -315,7 +313,7 @@ public static class Handlers
                 ["events"] = JsonSerializer.SerializeToNode(events),
                 ["obs"] = observation,
             };
-            return new Response { Body = node.ToJsonString() };
+            return Response.Json(node);
         }
         catch (Exception exception)
         {
@@ -340,7 +338,6 @@ public static class Handlers
             }
             return Response.Json(new
             {
-                ok = true,
                 action,
                 enqueued = action,
                 startedRev,
@@ -403,6 +400,6 @@ public static class Handlers
         return entries is null
             ? Response.Error(RejectionCodes.BadRequest,
                 "kind must be card|relic|potion|event|encounter|character")
-            : Response.Json(new { ok = true, kind, entries });
+            : Response.Json(new { kind, entries });
     }
 }

@@ -27,9 +27,12 @@ def record(d):
     if not phase or d.get("available") is False:
         return
     slot = KEYS.setdefault(phase, {})
-    # changed/events are the long-poll envelope (only present on
-    # obs --since responses), not part of the phase snapshot shape.
-    slot.setdefault("top", sorted(d.keys() - {"changed", "events"}))
+    # ok/changed/events are response-envelope keys — ok stamps every bridge
+    # body, changed/events only obs --since responses — and none of them are
+    # part of the phase snapshot shape. A followed action reports the same
+    # snapshot nested under "obs" without them, so including them here would
+    # split one phase's shape in two depending on how it was read.
+    slot.setdefault("top", sorted(d.keys() - {"ok", "changed", "events"}))
     for k, v in d.items():
         if isinstance(v, list) and v and isinstance(v[0], dict):
             slot.setdefault(k + "[]", sorted(v[0].keys()))

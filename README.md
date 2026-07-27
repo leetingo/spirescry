@@ -149,6 +149,8 @@ Verbs: `new-run`,
 `abandon`, `option`, `proceed`, `map-move`, `pick-reward`, `pick-card`,
 `pick-relic`, `confirm`, `skip`, `buy`, `leave`, `play`, `end-turn`,
 `potion-use`, `potion-discard`, `cheat` — each valid in its own phase.
+Every response body — snapshots included — is a JSON object whose boolean
+`ok` agrees with the HTTP status: `true` on 2xx, `false` on 4xx/5xx.
 Errors ride on 4xx/5xx as `{"ok": false, "err": "<code>", "msg": "..."}`
 with a stable machine-readable vocabulary:
 
@@ -175,9 +177,17 @@ with a stable machine-readable vocabulary:
 <!-- protocol:rejection-codes:end -->
 
 The CLI prints failures on stderr and exits `75` (`EX_TEMPFAIL`) only for
-`not_ready`; every other bridge rejection, local validation error, transport
-failure, or malformed response exits `1`. Success exits `0`. Callers should
-branch on the exit status, not parse the rendered error text.
+`not_ready`; every other bridge rejection, local validation error (including a
+rejected argument, where clap's own `2` is normalized away), transport failure,
+or malformed response exits `1`. Success exits `0`, as do `--help` and
+`--version`. Callers should branch on the exit status, not parse the rendered
+error text. The CLI validates the envelope before printing anything: a body
+that is not an object, carries no boolean `ok`, or contradicts its HTTP status
+is malformed and never reaches stdout. `fault-bundle` is the one deliberate
+exception to the failure codes: it captures rather than requests, so an
+unreachable or faulting bridge is its subject, not its failure — it still
+prints a bundle and exits `0`, with `complete: false` marking the sections it
+could not reach.
 
 **Combat targets.** `play <model> --target <id>` and
 `potion-use <slot> --target <id>` take the combat ID shown on an enemy in the
@@ -233,7 +243,9 @@ ambiguous followed verb. One invocation captures health, observation, run
 log, recent events/errors, build/protocol identity, run ID/seed, and the last
 accepted verb without advancing or abandoning the run. Each section marks
 partial-capture failures explicitly, so the bundle remains useful when the
-observation endpoint itself is what failed.
+observation endpoint itself is what failed — including when nothing answered
+at all, which prints an all-unavailable bundle with `complete: false` and
+still exits `0`.
 
 The pure host also records why it exits: clean process shutdowns,
 SIGINT/SIGTERM/SIGHUP/SIGQUIT, boot failures, and unhandled managed
