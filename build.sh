@@ -9,7 +9,8 @@
 #   deploy-mod   cp spirescry.dll + manifest → "$STS2_GAME_DIR/mods/"
 #   deploy-cli   cp spirescry → "$SPIRESCRY_CLI_BIN/" (default: ~/.local/bin)
 #   deploy       deploy-mod + deploy-cli
-#   headless     launch the game with no window; waits until the bridge is up
+#   headless     launch the game with no window; waits until this checkout's
+#                bridge answers, and owns the child it started
 #   headless-setup  one-time: copy deps, IL-patch sts2.dll, extract loc, build host
 #   host         run the pure .NET host — no game binary, no Steam
 #                (--foreground: exec in this process; for sandboxed
@@ -42,6 +43,11 @@ fi
 : "${STS2_AGENT_PORT:=7777}"
 
 HOST_DLL="$REPO/headless/Host/bin/Release/spirescry_host.dll"
+
+# How long a launcher waits (in 0.1s polls) for the child it forked to exec its
+# real binary and become identifiable. Generous: the cost of a slow exec is a
+# fraction of a second here, while giving up early strands the child.
+LAUNCH_IDENTIFY_TRIES=20
 
 # Stamped into both builds; /health reports it as buildHash so a running
 # host can be matched to its build inputs. A git ref alone cannot do
@@ -98,10 +104,80 @@ die()  { printf '\033[1;31m✗\033[0m %s\n' "$*" >&2; exit 1; }
 
 need_game_dir() { [ -n "${STS2_GAME_DIR:-}" ] || die "STS2_GAME_DIR not set and game install not auto-detected"; }
 
-# wait_bridge <timeout_s> <log>: poll /health until the bridge answers.
+# /health reports mod and buildHash as flat string fields, so one sed per
+# field reads them without a JSON parser.
+health_string_field() {
+    printf '%s' "$1" \
+        | sed -n 's/.*"'"$2"'"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p'
+}
+
+# An HTTP 2xx proves only that *something* listens on the port: a bridge left
+# over from another checkout — or from a build made before the last edit —
+# answers /health exactly like the one we just launched, and reporting it as
+# success hands the agent a host that does not run this code. buildHash is the
+# stamp over every source and dll input (see current_stamp), so comparing it to
+# the checkout's own stamp settles the question by value.
+#
+# bridge_identity_fault <health-body> <fix-hint>: prints why the answering
+# bridge is not this checkout's and returns 1; silent and 0 when it is.
+bridge_identity_fault() {
+    local body="$1" hint="$2" mod hash expected
+    mod="$(health_string_field "$body" mod)"
+    hash="$(health_string_field "$body" buildHash)"
+    if [ "$mod" != spirescry ]; then
+        printf 'port %s answers /health but not as a spirescry bridge (mod "%s")\n' \
+            "$STS2_AGENT_PORT" "$mod"
+        return 1
+    fi
+    if [[ ! "$hash" =~ ^[0-9a-f]{7,40}(-dirty)?\.[0-9a-f]{12}$ ]]; then
+        printf 'bridge on port %s reports build "%s", not a build.sh stamp — %s\n' \
+            "$STS2_AGENT_PORT" "$hash" "$hint"
+        return 1
+    fi
+    expected="$(current_stamp)"
+    if [ "$hash" != "$expected" ]; then
+        printf 'bridge on port %s is build %s, this checkout is %s — %s\n' \
+            "$STS2_AGENT_PORT" "$hash" "$expected" "$hint"
+        return 1
+    fi
+    return 0
+}
+
+# Nothing may hold the bridge port when a launch starts: the child would fail
+# to bind, and the health wait would then greet the squatter as the bridge it
+# asked for. Only a refused connection (curl exit 7) proves the port is free;
+# absence is the special case here, not the default. Everything else means
+# something is there — it answered (0), sent non-HTTP bytes (1), hung up or
+# truncated the reply (18, 52, 56), or stalled (28) — and enumerating just the
+# ones we happen to have seen would let the rest through as "free", spawning a
+# child that cannot bind and then blaming the health deadline for it.
+require_free_bridge_port() {
+    local body status=0 mod hash
+    command -v curl >/dev/null 2>&1 \
+        || die "curl not found — cannot check whether port $STS2_AGENT_PORT is free"
+    body="$(curl -s --max-time 5 "http://127.0.0.1:$STS2_AGENT_PORT/health" 2>/dev/null)" \
+        || status=$?
+    case "$status" in
+        0) ;;
+        7) return 0 ;;
+        *)
+            die "port $STS2_AGENT_PORT is held by something that does not answer /health (curl exit $status) — stop it, or launch on another STS2_AGENT_PORT" ;;
+    esac
+    mod="$(health_string_field "$body" mod)"
+    hash="$(health_string_field "$body" buildHash)"
+    [ "$mod" = spirescry ] && \
+        die "a spirescry bridge (build ${hash:-unknown}) already answers on port $STS2_AGENT_PORT — ./build.sh stop first, or launch on another STS2_AGENT_PORT"
+    die "port $STS2_AGENT_PORT is already served by something that is not a spirescry bridge — free it, or launch on another STS2_AGENT_PORT"
+}
+
+# wait_bridge <timeout_s> <log> <fix-hint>: poll /health until *this
+# checkout's* bridge answers. A foreign or stale bridge is a hard failure, not
+# something to keep waiting on.
 wait_bridge() {
+    local body fault
     for _ in $(seq 1 "$1"); do
-        if curl -sf "http://127.0.0.1:$STS2_AGENT_PORT/health" > /dev/null; then
+        if body="$(curl -sf "http://127.0.0.1:$STS2_AGENT_PORT/health" 2>/dev/null)"; then
+            fault="$(bridge_identity_fault "$body" "$3")" || die "$fault"
             ok "bridge up — try: spirescry obs"
             return
         fi
@@ -302,6 +378,118 @@ stop_exact_process() {
     return 0
 }
 
+# sample_child_identity <pid>: read the identity of a child a launcher started.
+# Sets CHILD_START_IDENTITY (start time — the one field that cannot change in
+# place) and CHILD_SNAPSHOT (start time + command). The start time is read on
+# both sides of the command read, so a PID recycled mid-sample surfaces here
+# instead of passing as our child. Returns:
+#   0 live and consistently sampled     1 gone
+#   2 cannot be inspected safely        3 live, but the start time moved
+sample_child_identity() {
+    local pid="$1" before after before_status=0 after_status=0 snapshot_status=0
+    CHILD_START_IDENTITY=""
+    CHILD_SNAPSHOT=""
+    before="$(process_start_identity "$pid")" || before_status=$?
+    CHILD_SNAPSHOT="$(process_snapshot "$pid")" || snapshot_status=$?
+    after="$(process_start_identity "$pid")" || after_status=$?
+    case "$(process_state "$pid")" in
+        unknown) return 2 ;;
+        dead)    return 1 ;;
+    esac
+    [ "$before_status" = 0 ] && [ "$after_status" = 0 ] && [ "$snapshot_status" = 0 ] \
+        || return 2
+    [ "$before" = "$after" ] || return 3
+    CHILD_START_IDENTITY="$before"
+    return 0
+}
+
+# supervise_launch <pid> <label> <snapshot-predicate> <timeout_s> <log>
+#                  <pidfile> <fix-hint>
+#
+# Own the child a launcher just started: identify it, wait for this checkout's
+# bridge, and — when that bridge never arrives — reclaim exactly that child
+# instead of leaving it holding the port. On success, the PID and its stable
+# post-boot snapshot land in <pidfile> so `stop` signals the same process
+# without rediscovering it. Returns 1 when the bridge never came up; the child
+# is already reclaimed by then.
+#
+# Ownership reaches exactly one process: the child this launcher forked. Both
+# launch targets are the bridge-hosting process itself — `dotnet <host.dll>`,
+# and the game's Mach-O/ELF binary, which Godot runs in-process — so that child
+# is the thing holding the port. A launcher that forked a grandchild and exited
+# would leave nothing safe to signal: the direct child is gone by the first ps
+# sample, and its grandchild is not identifiable as ours. That case fails loudly
+# ("could not be identified") rather than guessing at a PID to kill — but a
+# child that is still live under the start identity we forked is reclaimed
+# first, identified or not.
+supervise_launch() {
+    local pid="$1" label="$2" predicate="$3" deadline="$4" log="$5" pidfile="$6" hint="$7"
+    local launch_identity="" sample_status=0 pidtmp attempt=0 identified=0
+
+    # The child we just forked is still this shell until it execs, so its first
+    # ps command line is the launcher's own — a race, not an answer. Poll until
+    # the exec lands (LAUNCH_IDENTIFY_TRIES × 0.1s) before ruling on identity.
+    while :; do
+        sample_status=0
+        sample_child_identity "$pid" || sample_status=$?
+        [ "$sample_status" = 0 ] || break
+        [ -n "$launch_identity" ] || launch_identity="$CHILD_START_IDENTITY"
+        # A start time that moved means this PID is no longer the child we
+        # forked; nothing here is ours to wait on or to signal.
+        [ "$CHILD_START_IDENTITY" = "$launch_identity" ] || break
+        if "$predicate" "$CHILD_SNAPSHOT"; then
+            identified=1
+            break
+        fi
+        attempt=$((attempt + 1))
+        [ "$attempt" -lt "$LAUNCH_IDENTIFY_TRIES" ] || break
+        sleep 0.1
+    done
+    if [ "$identified" = 0 ]; then
+        # We forked this PID ourselves and its start time never moved, so it is
+        # still ours to reclaim. Dying with it alive would leave it to exec and
+        # take the port — the leak this launcher exists to prevent.
+        if [ "$sample_status" = 0 ] && [ "$CHILD_START_IDENTITY" = "$launch_identity" ]; then
+            stop_exact_process "$pid" "$CHILD_SNAPSHOT" "unidentified $label"
+        fi
+        die "launched $label PID $pid could not be identified — see $log, and check port $STS2_AGENT_PORT is free before relaunching"
+    fi
+
+    # wait_bridge calls die on deadline. Run it in a subshell so the launcher
+    # can still reclaim the exact child it started before returning failure.
+    if ! (wait_bridge "$deadline" "$log" "$hint"); then
+        sample_status=0
+        sample_child_identity "$pid" || sample_status=$?
+        case "$sample_status" in
+            1) ;;  # already exited — nothing of ours is left to reclaim
+            2) die "bridge did not come up and $label PID $pid cannot be inspected safely" ;;
+            3) die "bridge did not come up and $label PID $pid start identity changed — refusing to signal it" ;;
+            *)
+                [ "$CHILD_START_IDENTITY" = "$launch_identity" ] || \
+                    die "bridge did not come up and $label PID $pid start identity changed — refusing to signal it"
+                "$predicate" "$CHILD_SNAPSHOT" || \
+                    die "bridge did not come up and PID $pid no longer belongs to this $label"
+                stop_exact_process "$pid" "$CHILD_SNAPSHOT" "abandoned $label"
+                ;;
+        esac
+        return 1
+    fi
+
+    # The child may still be the forked shell at the first ps sample and exec
+    # its real binary a moment later without changing PID or start time.
+    # Persist the stable, post-boot command so stop does not mistake that exec
+    # for PID reuse.
+    sample_status=0
+    sample_child_identity "$pid" || sample_status=$?
+    [ "$sample_status" = 0 ] \
+        && [ "$CHILD_START_IDENTITY" = "$launch_identity" ] \
+        && "$predicate" "$CHILD_SNAPSHOT" || \
+        die "booted $label PID $pid could not be identified"
+    pidtmp="$(mktemp "${pidfile}.XXXXXX")"
+    printf '%s\n%s\n' "$pid" "$CHILD_SNAPSHOT" > "$pidtmp"
+    mv -f "$pidtmp" "$pidfile"
+}
+
 # Run the host: game logic from the IL-patched sts2.dll inside a plain
 # .NET process — no game binary, no Godot engine, no Steam.
 #
@@ -313,6 +501,7 @@ stop_exact_process() {
 launch_host() {
     [ -f "$HOST_DLL" ] || die "host not built — run: ./build.sh headless-setup"
     ! pgrep -qf spirescry_host || die "host already running — ./build.sh stop first"
+    require_free_bridge_port
     log="${TMPDIR:-/tmp}/spirescry-host.log"
     rotate_log "$log"
     # Through the dotnet CLI, not the apphost — the CLI resolves its own
@@ -326,67 +515,8 @@ launch_host() {
     step "launch host (bridge port $STS2_AGENT_PORT, log $log)"
     nohup dotnet "$HOST_DLL" > "$log" 2>&1 &
     host_pid=$!
-    host_start_status=0
-    host_start_identity="$(process_start_identity "$host_pid")" || host_start_status=$?
-    host_snapshot_status=0
-    host_snapshot="$(process_snapshot "$host_pid")" || host_snapshot_status=$?
-    host_start_confirm_status=0
-    host_start_confirm="$(process_start_identity "$host_pid")" || host_start_confirm_status=$?
-    [ "$(process_state "$host_pid")" = live ] \
-        && [ "$host_start_status" = 0 ] \
-        && [ "$host_start_confirm_status" = 0 ] \
-        && [ "$host_start_identity" = "$host_start_confirm" ] \
-        && [ "$host_snapshot_status" = 0 ] \
-        && is_this_host_snapshot "$host_snapshot" || \
-        die "launched host PID $host_pid could not be identified"
-    # wait_bridge calls die on deadline. Run it in a subshell so launch_host
-    # can still reclaim the exact child it started before returning failure.
-    if ! (wait_bridge 30 "$log"); then
-        timeout_start_before_status=0
-        timeout_start_before="$(process_start_identity "$host_pid")" || timeout_start_before_status=$?
-        timeout_snapshot_status=0
-        timeout_snapshot="$(process_snapshot "$host_pid")" || timeout_snapshot_status=$?
-        timeout_start_after_status=0
-        timeout_start_after="$(process_start_identity "$host_pid")" || timeout_start_after_status=$?
-        timeout_state="$(process_state "$host_pid")"
-        if [ "$timeout_state" = unknown ] \
-            || { [ "$timeout_state" = live ] \
-                && { [ "$timeout_start_before_status" != 0 ] \
-                    || [ "$timeout_snapshot_status" != 0 ] \
-                    || [ "$timeout_start_after_status" != 0 ]; }; }; then
-            die "bridge timed out and host PID $host_pid cannot be inspected safely"
-        elif [ "$timeout_state" = live ]; then
-            [ "$timeout_start_before" = "$host_start_identity" ] \
-                && [ "$timeout_start_after" = "$host_start_identity" ] || \
-                die "bridge timed out and host PID $host_pid start identity changed — refusing to signal it"
-            is_this_host_snapshot "$timeout_snapshot" || \
-                die "bridge timed out and PID $host_pid no longer belongs to this host"
-            stop_exact_process "$host_pid" "$timeout_snapshot" "timed-out host"
-        fi
-        return 1
-    fi
-
-    # The child may still be the forked shell at the first ps sample and
-    # exec dotnet a moment later without changing PID/start time. Persist
-    # the stable, post-boot command so stop does not mistake that exec for
-    # PID reuse.
-    booted_start_before_status=0
-    booted_start_before="$(process_start_identity "$host_pid")" || booted_start_before_status=$?
-    host_snapshot_status=0
-    host_snapshot="$(process_snapshot "$host_pid")" || host_snapshot_status=$?
-    booted_start_after_status=0
-    booted_start_after="$(process_start_identity "$host_pid")" || booted_start_after_status=$?
-    [ "$(process_state "$host_pid")" = live ] \
-        && [ "$booted_start_before_status" = 0 ] \
-        && [ "$booted_start_after_status" = 0 ] \
-        && [ "$booted_start_before" = "$host_start_identity" ] \
-        && [ "$booted_start_after" = "$host_start_identity" ] \
-        && [ "$host_snapshot_status" = 0 ] \
-        && is_this_host_snapshot "$host_snapshot" || \
-        die "booted host PID $host_pid could not be identified"
-    pidtmp="$(mktemp "${pidfile}.XXXXXX")"
-    printf '%s\n%s\n' "$host_pid" "$host_snapshot" > "$pidtmp"
-    mv -f "$pidtmp" "$pidfile"
+    supervise_launch "$host_pid" host is_this_host_snapshot 30 "$log" "$pidfile" \
+        "rebuild this checkout's host with ./build.sh headless-setup"
 }
 
 build_mod() {
@@ -437,15 +567,64 @@ deploy_cli() {
 # it does with a window. Steam must be running (the game requires it).
 launch_headless() {
     need_game_dir
-    game_bin="$(find "$STS2_GAME_DIR" -maxdepth 1 -type f -perm +111 | head -n 1)"
+    # -perm -u+x, not +111: BSD-only mode syntax made this find fail outright
+    # on GNU findutils, where "no game binary" is a lie about the install.
+    game_bin="$(find "$STS2_GAME_DIR" -maxdepth 1 -type f -perm -u+x | head -n 1)"
     [ -n "$game_bin" ] || die "no game binary found in $STS2_GAME_DIR"
     ! pgrep -qf "$STS2_GAME_DIR" || die "game already running — ./build.sh stop first"
+    require_free_bridge_port
 
     log="${TMPDIR:-/tmp}/spirescry-headless.log"
+    pidfile="${TMPDIR:-/tmp}/spirescry-game.pid"
     rotate_log "$log"
     step "launch headless (bridge port $STS2_AGENT_PORT, log $log)"
     nohup "$game_bin" --headless > "$log" 2>&1 &
-    wait_bridge 60 "$log"
+    game_pid=$!
+    # The bridge here is the deployed mod, not this checkout's build tree, so
+    # a stale deploy is the identity mismatch to expect.
+    supervise_launch "$game_pid" game is_this_game_snapshot 60 "$log" "$pidfile" \
+        "redeploy this checkout's mod with ./build.sh mod deploy-mod"
+}
+
+# stop_recorded_process <pidfile> <label> <snapshot-predicate>
+#
+# Stop the process a launch recorded, or refuse and say why. A launch record is
+# a claim about a PID, not proof: the PID may have been recycled, or the file
+# may predate a restart, so both the live command and the saved snapshot must
+# still agree before anything is signalled. Returns 0 when the recorded process
+# was stopped, 1 when there was nothing to stop.
+stop_recorded_process() {
+    local pidfile="$1" label="$2" predicate="$3"
+    local recorded_pid saved_snapshot current_snapshot current_state
+    local current_snapshot_status=0
+
+    [ -f "$pidfile" ] || return 1
+    IFS= read -r recorded_pid < "$pidfile" || recorded_pid=""
+    if [[ ! "$recorded_pid" =~ ^[0-9]+$ ]] || [ "${#recorded_pid}" -gt 10 ] || [ "$recorded_pid" -le 1 ]; then
+        die "invalid $label pidfile $pidfile — refusing to signal anything"
+    fi
+
+    saved_snapshot="$(sed -n '2p' "$pidfile")"
+    current_snapshot="$(process_snapshot "$recorded_pid")" || current_snapshot_status=$?
+    current_state="$(process_state "$recorded_pid")"
+    if [ "$current_state" = unknown ]; then
+        die "cannot inspect PID $recorded_pid in $pidfile — refusing to signal or discard it"
+    elif [ "$current_state" = dead ]; then
+        # A dead PID is an ordinary stale file and is safe to clean up.
+        rm -f "$pidfile"
+        return 1
+    elif [ "$current_snapshot_status" != 0 ]; then
+        die "cannot read identity for live PID $recorded_pid in $pidfile — refusing to signal it"
+    elif ! "$predicate" "$current_snapshot"; then
+        die "PID $recorded_pid in $pidfile does not belong to this $label — refusing to signal it"
+    elif [ -z "$saved_snapshot" ]; then
+        die "$label pidfile $pidfile has no saved process snapshot — refusing to signal PID $recorded_pid"
+    elif [ "$saved_snapshot" != "$current_snapshot" ]; then
+        die "PID $recorded_pid in $pidfile was reused or restarted — refusing to signal it"
+    fi
+    stop_exact_process "$recorded_pid" "$current_snapshot" "$label"
+    rm -f "$pidfile"
+    return 0
 }
 
 # Kill by PID file first (works where sandboxes hide other processes from
@@ -454,41 +633,18 @@ launch_headless() {
 # established honestly.
 stop_game() {
     need_game_dir
-    pidfile="${TMPDIR:-/tmp}/spirescry-host.pid"
     stopped=0
     enumeration_failed=0
-    if [ -f "$pidfile" ]; then
-        IFS= read -r host_pid < "$pidfile" || host_pid=""
-        if [[ ! "$host_pid" =~ ^[0-9]+$ ]] || [ "${#host_pid}" -gt 10 ] || [ "$host_pid" -le 1 ]; then
-            die "invalid host pidfile $pidfile — refusing to signal anything"
-        fi
-
-        saved_snapshot="$(sed -n '2p' "$pidfile")"
-        current_snapshot_status=0
-        current_snapshot="$(process_snapshot "$host_pid")" || current_snapshot_status=$?
-        current_state="$(process_state "$host_pid")"
-        if [ "$current_state" = unknown ]; then
-            die "cannot inspect PID $host_pid in $pidfile — refusing to signal or discard it"
-        elif [ "$current_state" = dead ]; then
-            # A dead PID is an ordinary stale file and is safe to clean up.
-            rm -f "$pidfile"
-        elif [ "$current_snapshot_status" != 0 ]; then
-            die "cannot read identity for live PID $host_pid in $pidfile — refusing to signal it"
-        elif ! is_this_host_snapshot "$current_snapshot"; then
-            die "PID $host_pid in $pidfile does not belong to this host — refusing to signal it"
-        elif [ -z "$saved_snapshot" ]; then
-            die "host pidfile $pidfile has no saved process snapshot — refusing to signal PID $host_pid"
-        elif [ "$saved_snapshot" != "$current_snapshot" ]; then
-            die "PID $host_pid in $pidfile was reused or restarted — refusing to signal it"
-        else
-            stop_exact_process "$host_pid" "$current_snapshot" "host"
-            rm -f "$pidfile"
-            stopped=1
-        fi
+    if stop_recorded_process "${TMPDIR:-/tmp}/spirescry-host.pid" host is_this_host_snapshot; then
+        stopped=1
+    fi
+    if stop_recorded_process "${TMPDIR:-/tmp}/spirescry-game.pid" game is_this_game_snapshot; then
+        stopped=1
     fi
 
-    # Foreground hosts and the engine boot have no PID file. pgrep is only a
-    # discovery aid: broad pkill patterns never receive a signal directly.
+    # Foreground hosts, and anything started outside these launchers, leave no
+    # launch record. pgrep is only a discovery aid: broad pkill patterns never
+    # receive a signal directly.
     if command -v pgrep >/dev/null 2>&1; then
         host_pgrep_status=0
         host_pids="$(pgrep -f spirescry_host 2>/dev/null)" || host_pgrep_status=$?
@@ -534,7 +690,7 @@ stop_game() {
         die "a bridge still answers on port $STS2_AGENT_PORT — kill it manually (permissions?)"
     fi
     if [ "$stopped" = 0 ] && [ "$enumeration_failed" = 1 ]; then
-        die "could not enumerate processes and no valid host pidfile was available"
+        die "could not enumerate processes and no valid launch record was available"
     fi
     if [ "$stopped" = 1 ]; then ok "stopped"; else ok "nothing running"; fi
 }
