@@ -1,3 +1,4 @@
+using System.Collections;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 
@@ -11,7 +12,13 @@ public static class RunLog
 {
     private static readonly object Gate = new();
     private static readonly List<RunLogEntry> Verbs = new();
-    private static string _runId = "none";
+    // Both recipe decisions are value rules; they are stated in RunLogRules so
+    // CI can verify them without the game's dlls. The entries are projected
+    // through a live view rather than copied, so a rule's cheap identity
+    // guards still settle the common case without walking the history.
+    private static readonly IReadOnlyList<RunLogVerbFacts> Facts =
+        new VerbFactsView(Verbs);
+    private static string _runId = RunLogRules.NoRun;
     private static string? _seed;
     private static string? _character;
     private static int? _ascension;
@@ -28,7 +35,7 @@ public static class RunLog
     {
         lock (Gate)
         {
-            if (action == "new-run")
+            if (action == RunLogRules.OpeningAction)
             {
                 Verbs.Clear();
                 _runId = runId;
@@ -80,8 +87,8 @@ public static class RunLog
             var ownsObservation = outcome.OwnsObservation();
             var observedRunId = observation.RunId;
             if (ownsObservation
-                && entry.Action == "new-run"
-                && observedRunId is not (null or "none")
+                && entry.Action == RunLogRules.OpeningAction
+                && observedRunId is not (null or RunLogRules.NoRun)
                 && CanAdopt(observedRunId))
                 AdoptRun(observedRunId, captureMetadata: false);
             entry.Outcome = outcome;
@@ -104,19 +111,13 @@ public static class RunLog
         lock (Gate)
         {
             if (CanAdopt(liveRunId)) AdoptRun(liveRunId, captureMetadata: true);
-            if (_runId == liveRunId && liveRunId != "none" && _seed is null)
+            if (_runId == liveRunId
+                && liveRunId != RunLogRules.NoRun
+                && _seed is null)
                 CaptureMetadata();
             var verbs = Verbs
                 .Select(verb => verb.ToJson())
                 .ToArray();
-            var coherent = _runId != "none"
-                && verbs.Length > 0
-                && Verbs[0].Action == "new-run"
-                && Verbs.All(verb => verb.RunId == _runId);
-            var verified = Verbs.All(verb =>
-                verb.Outcome is { } outcome
-                && outcome.IsReplayable()
-                && !string.IsNullOrWhiteSpace(verb.Fingerprint));
             return new
             {
                 ok = true,
@@ -126,11 +127,7 @@ public static class RunLog
                 seed = _seed,
                 character = _character,
                 ascension = _ascension,
-                // A recipe is replayable only when every accepted verb was
-                // followed to a verified boundary. Merely sharing one RunId
-                // is not enough: otherwise replay could report success after
-                // checking zero (or only a prefix of) fingerprints.
-                complete = coherent && verified,
+                complete = RunLogRules.IsComplete(_runId, Facts),
                 verbs,
             };
         }
@@ -147,17 +144,28 @@ public static class RunLog
     }
 
     private static bool CanAdopt(string runId) =>
-        runId != "none"
-        && _runId == "none"
-        && Verbs.Count > 0
-        && Verbs[0].Action == "new-run"
-        && Verbs.All(verb => verb.RunId == "none");
+        RunLogRules.CanAdopt(_runId, runId, Facts);
 
     private static void AdoptRun(string runId, bool captureMetadata)
     {
         _runId = runId;
         foreach (var verb in Verbs) verb.RunId = runId;
         if (captureMetadata) CaptureMetadata();
+    }
+
+    // The entries read as the plain values RunLogRules judges. Reads through
+    // to the live list, so it stays true as verbs are appended, settled and
+    // relabelled — and costs nothing until a rule actually walks it.
+    private sealed class VerbFactsView(List<RunLogEntry> verbs)
+        : IReadOnlyList<RunLogVerbFacts>
+    {
+        public int Count => verbs.Count;
+        public RunLogVerbFacts this[int index] => verbs[index].Facts;
+
+        public IEnumerator<RunLogVerbFacts> GetEnumerator() =>
+            verbs.Select(verb => verb.Facts).GetEnumerator();
+
+        IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
     }
 
     private sealed class RunLogEntry(
@@ -180,6 +188,9 @@ public static class RunLog
         public string? PhaseAfter { get; set; }
         public string[]? Errors { get; set; }
         public string? Fingerprint { get; set; }
+
+        public RunLogVerbFacts Facts =>
+            new(RunId, Action, Outcome, Fingerprint);
 
         public JsonObject ToJson()
         {

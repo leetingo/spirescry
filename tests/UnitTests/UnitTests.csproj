@@ -31,6 +31,7 @@
     <Compile Include="../../src/State/AsyncWorkOwner.cs" Link="AsyncWorkOwner.cs" />
     <Compile Include="../../src/State/FireAndForgetTracker.cs" Link="FireAndForgetTracker.cs" />
     <Compile Include="../../src/State/RunOutcomeRules.cs" Link="RunOutcomeRules.cs" />
+    <Compile Include="../../src/State/RunLogRules.cs" Link="RunLogRules.cs" />
     <Compile Include="../../src/State/SelectionProjection.cs" Link="SelectionProjection.cs" />
     <Compile Include="../../src/State/RunOwnershipRules.cs" Link="RunOwnershipRules.cs" />
     <Compile Include="../../src/State/RevisionJournal.cs" Link="RevisionJournal.cs" />

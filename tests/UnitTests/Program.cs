@@ -788,6 +788,113 @@ internal static class Tests
             isAbandoned: true, endedInVictoryRoom: false, winTime: 0));
     }
 
+    public static void RunLogIsCompleteOnlyForAFullyFollowedSingleRunHistory()
+    {
+        // The recipe replay trusts: opened by new-run, one RunId throughout,
+        // and every verb followed to a fingerprinted replayable boundary.
+        True(RunLogRules.IsComplete("run-7",
+        [
+            Verb("run-7", "new-run", SettlementOutcome.Settled, "a1b2c3d4e5f60718"),
+            Verb("run-7", "proceed", SettlementOutcome.NextDecision, "18f6e5d4c3b2a100"),
+        ]));
+    }
+
+    public static void RunLogIsIncompleteWhenAnyVerbWasNotFollowed()
+    {
+        // A partial follow history: the accepted verbs are still diagnostic
+        // truth, but replay would report success after checking only a prefix
+        // of the fingerprints, so the recipe is not complete.
+        False(RunLogRules.IsComplete("run-7",
+        [
+            Verb("run-7", "new-run", SettlementOutcome.Settled, "a1b2c3d4e5f60718"),
+            Verb("run-7", "proceed", outcome: null, fingerprint: null),
+        ]));
+
+        // Not even the opening verb was followed — the P11 shape where a
+        // new-run without --follow must never read as replayable.
+        False(RunLogRules.IsComplete("run-7",
+            [Verb("run-7", "new-run", outcome: null, fingerprint: null)]));
+    }
+
+    public static void RunLogIsIncompleteWhenAFingerprintIsMissing()
+    {
+        // Settled but unfingerprinted: replay has nothing to compare against,
+        // so it could not stop at the first divergence.
+        False(RunLogRules.IsComplete("run-7",
+        [
+            Verb("run-7", "new-run", SettlementOutcome.Settled, fingerprint: null),
+        ]));
+        False(RunLogRules.IsComplete("run-7",
+        [
+            Verb("run-7", "new-run", SettlementOutcome.Settled, "   "),
+        ]));
+    }
+
+    public static void RunLogIsIncompleteForNonReplayableOutcomes()
+    {
+        // Fault and timeout leave the engine somewhere replay cannot check.
+        foreach (var outcome in new[]
+                 { SettlementOutcome.Fault, SettlementOutcome.Timeout })
+            False(RunLogRules.IsComplete("run-7",
+            [
+                Verb("run-7", "new-run", SettlementOutcome.Settled, "a1b2c3d4e5f60718"),
+                Verb("run-7", "play", outcome, "18f6e5d4c3b2a100"),
+            ]));
+    }
+
+    public static void RunLogIsIncompleteForCrossRunOrHeadlessHistories()
+    {
+        var followed = new[]
+        {
+            Verb("run-7", "new-run", SettlementOutcome.Settled, "a1b2c3d4e5f60718"),
+            Verb("run-8", "proceed", SettlementOutcome.Settled, "18f6e5d4c3b2a100"),
+        };
+
+        // Entries from two runs: replaying them would compound divergence.
+        False(RunLogRules.IsComplete("run-7", followed));
+        // A history that never opened its run cannot be replayed from a menu.
+        False(RunLogRules.IsComplete("run-7",
+            [Verb("run-7", "proceed", SettlementOutcome.Settled, "a1b2c3d4e5f60718")]));
+        // No run identity at all, and no history at all.
+        False(RunLogRules.IsComplete("none",
+            [Verb("none", "new-run", SettlementOutcome.Settled, "a1b2c3d4e5f60718")]));
+        False(RunLogRules.IsComplete("run-7", []));
+    }
+
+    public static void RunLogAdoptsAnUnassignedHistoryOnceTheEngineNamesTheRun()
+    {
+        // new-run is accepted before the engine has assigned a RunId, so the
+        // opening verbs are recorded as "none" and relabelled afterwards.
+        True(RunLogRules.CanAdopt("none", "run-7",
+        [
+            Verb("none", "new-run", SettlementOutcome.Settled, "a1b2c3d4e5f60718"),
+            Verb("none", "proceed", SettlementOutcome.Settled, "18f6e5d4c3b2a100"),
+        ]));
+    }
+
+    public static void RunLogRefusesToAdoptMixedMissingOrOwnedHistories()
+    {
+        var unassigned = new[]
+        {
+            Verb("none", "new-run", SettlementOutcome.Settled, "a1b2c3d4e5f60718"),
+        };
+
+        // Missing: there is no run to adopt, and nothing to attribute.
+        False(RunLogRules.CanAdopt("none", "none", unassigned));
+        False(RunLogRules.CanAdopt("none", "run-7", []));
+        // Already owned: relabelling a bound log would forge attribution.
+        False(RunLogRules.CanAdopt("run-7", "run-8", unassigned));
+        // Mixed: a verb already names a run, so the log is not wholly unassigned.
+        False(RunLogRules.CanAdopt("none", "run-8",
+        [
+            Verb("none", "new-run", SettlementOutcome.Settled, "a1b2c3d4e5f60718"),
+            Verb("run-7", "proceed", SettlementOutcome.Settled, "18f6e5d4c3b2a100"),
+        ]));
+        // Truncated: the history does not open the run it would claim.
+        False(RunLogRules.CanAdopt("none", "run-7",
+            [Verb("none", "proceed", SettlementOutcome.Settled, "a1b2c3d4e5f60718")]));
+    }
+
     public static void SelectionProjectionMarksOnlyThePickedInstance()
     {
         // The #147 regression: a hand routinely holds several copies of one
@@ -3030,6 +3137,13 @@ internal static class Tests
             combatIsEnding,
             queuesEmpty,
             allEnemiesDead);
+
+    private static RunLogVerbFacts Verb(
+        string runId,
+        string action,
+        SettlementOutcome? outcome = null,
+        string? fingerprint = null) =>
+        new(runId, action, outcome, fingerprint);
 
     // A value-equal stand-in for CardModel: two copies of one model compare
     // equal, so a projection that leaned on Equals instead of identity would

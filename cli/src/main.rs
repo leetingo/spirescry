@@ -689,7 +689,10 @@ fn replay_value(client: &impl ReplayTransport, log: &Value) -> CliResult<Value> 
             || verb
                 .get("fingerprint")
                 .and_then(Value::as_str)
-                .filter(|value| !value.is_empty())
+                // Blank, not merely absent: the host calls the same recipe
+                // incomplete (RunLogRules.IsVerified), so refusing anything
+                // less than a real fingerprint keeps both ends in step.
+                .filter(|value| !value.trim().is_empty())
                 .is_none()
     }) {
         return Err(format!(
@@ -2281,6 +2284,26 @@ mod tests {
 
         assert!(error.contains("incompatible host protocol"), "{error}");
         assert_eq!(*spy.gets.borrow(), ["/health"]);
+        assert_eq!(spy.posts.get(), 0);
+    }
+
+    #[test]
+    fn replay_rejects_a_blank_fingerprint_like_the_host_does() {
+        // The host judges a whitespace-only fingerprint unverified and reports
+        // the recipe incomplete; a recipe hand-edited past that check is no
+        // more comparable here, so both ends must refuse the same one.
+        let spy = ReplaySpy::new(health(PROTOCOL_VERSION, &["new-run"], &[]));
+        let mut verb = followed_verb("new-run", json!({}));
+        verb["fingerprint"] = json!("   ");
+        let recipe = replay_recipe(vec![verb]);
+
+        let error = replay_value(&spy, &recipe).unwrap_err();
+
+        assert!(
+            error.contains("no verifiable settled fingerprint"),
+            "{error}"
+        );
+        assert!(spy.gets.borrow().is_empty());
         assert_eq!(spy.posts.get(), 0);
     }
 
