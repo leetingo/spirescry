@@ -367,8 +367,8 @@ def p4():
             f"{method} {path} -> {status} {d}"
 
 
-@case("P4b every route answers a boolean-ok envelope")
-def p4b():
+@case("P19 every route answers a boolean-ok envelope")
+def p19():
     # The CLI validates the envelope strictly — a body without a boolean
     # `ok`, or one whose `ok` disagrees with the status, is malformed and
     # exits 1. Snapshot bodies are assembled as raw JSON nodes, so they are
