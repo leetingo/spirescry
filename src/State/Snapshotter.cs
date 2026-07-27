@@ -708,6 +708,8 @@ internal static class Snapshotter
             entry.Purchasable = e.IsStocked && e.EnoughGold && potionHasRoom;
             return entry;
         }
+        // The stall sells one removal, so it carries the one idx `buy
+        // card_removal` accepts — the dispatcher rejects every other.
         var removal = inv.CardRemovalEntry is { } cr
             ? Item(new
             {
@@ -715,7 +717,7 @@ internal static class Snapshotter
                 price = cr.Cost,
                 used = cr.Used,
                 affordable = cr.EnoughGold,
-            }, semanticState:
+            }, MerchantRules.CardRemovalIndex, semanticState:
             [
                 SemanticToken(
                     "cardRemoval",
@@ -729,7 +731,7 @@ internal static class Snapshotter
                 && inv.CardRemovalEntry.EnoughGold;
         var snapshot = new SnapshotContract(phase)
         {
-            Player = FooterView(),
+            Player = MerchantFooterView(player),
             Cards = inv.CharacterCardEntries.Select(CardEntry).ToArray(),
             Colorless = inv.ColorlessCardEntries.Select(CardEntry).ToArray(),
             Relics = inv.RelicEntries
@@ -740,6 +742,25 @@ internal static class Snapshotter
             Gold = player?.Gold ?? 0,
         };
         return snapshot;
+    }
+
+    // The shop's own top-level `potions` is merchant stock, so the belt is
+    // only visible through the footer. Mark on it which potion the merchant
+    // will actually take: `playable` here, obs.legal's potion-use, and the
+    // dispatcher's redemption gate are one statement (MerchantPotionGate).
+    private static SnapshotPlayerContract? MerchantFooterView(Player? player)
+    {
+        var footer = FooterView();
+        if (footer is null || player is null) return footer;
+        var slots = player.PotionSlots;
+        var belt = footer.Potions;
+        foreach (var item in belt)
+            item.Playable =
+                item.Slot is { } slot && slot >= 0 && slot < slots.Count
+                && slots[slot] is { } held
+                && MerchantPotionGate.Redeemable(held, player);
+        footer.Potions = belt;
+        return footer;
     }
 
     private static SnapshotContract RestSiteSnapshot(Phase phase)
@@ -1159,6 +1180,14 @@ internal static class Snapshotter
                 return option;
             }).ToArray(),
         };
+        // The Fake Merchant is a shop wearing an event: it stocks relics the
+        // buy verb purchases by idx. Read the shelf once, then publish it in
+        // the ordinary top-level shape — which carries the ordinary
+        // `purchasable` gate obs.legal derives buy from — and again inside
+        // the `fakeMerchant` view clients already read.
+        var stall = ev as FakeMerchant;
+        var shelf = stall is null ? [] : FakeMerchantShelf(stall);
+        if (stall is not null) snapshot.Relics = FakeMerchantRelics(shelf);
         snapshot.AddExtensions(new
         {
             title = SafeText(ev.Title),
@@ -1170,10 +1199,55 @@ internal static class Snapshotter
                 ev.DynamicVars.AddTo(local);
             }),
             finished = ev.IsFinished,
-            fakeMerchant = ev is FakeMerchant fake ? FakeMerchantView(fake) : null,
+            fakeMerchant = stall is null ? null : FakeMerchantView(stall, shelf),
         });
         return snapshot;
     }
+
+    // One reading of the stall's shelf. Both published shapes are derived
+    // from it, so a relic cannot be stocked in one and sold out in the other.
+    private readonly record struct FakeMerchantRelicView(
+        int Idx,
+        string? Model,
+        string? Title,
+        string? Description,
+        int Cost,
+        bool Stocked,
+        bool Affordable)
+    {
+        internal bool Purchasable => Stocked && Affordable;
+    }
+
+    private static FakeMerchantRelicView[] FakeMerchantShelf(FakeMerchant fake) =>
+        (fake.Inventory?.RelicEntries ?? [])
+            .Select((entry, i) => new FakeMerchantRelicView(
+                i,
+                entry.Model?.Id.Entry,
+                entry.Model is { } relic ? SafeText(relic.Title) : null,
+                entry.Model is { } described
+                    ? SafeText(described.DynamicDescription)
+                    : null,
+                entry.Cost,
+                entry.IsStocked,
+                entry.EnoughGold))
+            .ToArray();
+
+    private static SnapshotItemContract[] FakeMerchantRelics(
+        FakeMerchantRelicView[] shelf) =>
+        shelf.Select(relic =>
+        {
+            var item = Item(new
+            {
+                title = relic.Title,
+                description = relic.Description,
+                cost = relic.Cost,
+                price = relic.Cost,
+                stocked = relic.Stocked,
+                affordable = relic.Affordable,
+            }, relic.Idx, model: relic.Model);
+            item.Purchasable = relic.Purchasable;
+            return item;
+        }).ToArray();
 
     private static string[] FakeMerchantState(FakeMerchant fake)
     {
@@ -1196,30 +1270,27 @@ internal static class Snapshotter
         ];
     }
 
-    private static object FakeMerchantView(FakeMerchant fake)
+    private static object FakeMerchantView(
+        FakeMerchant fake, FakeMerchantRelicView[] shelf)
     {
         var owner = fake.Owner;
-        var inventory = fake.Inventory;
         return new
         {
-            available = inventory is not null,
+            available = fake.Inventory is not null,
             canFight = owner?.PotionSlots.Any(p => p?.Id.Entry == "FOUL_POTION") == true,
-            relics = (inventory?.RelicEntries ?? [])
-                .Select((entry, i) => new
-                {
-                    idx = i,
-                    model = entry.Model?.Id.Entry,
-                    title = entry.Model is { } relic ? SafeText(relic.Title) : null,
-                    description = entry.Model is { } described
-                        ? SafeText(described.DynamicDescription)
-                        : null,
-                    price = entry.Cost,
-                    // Keep `cost` as an alias for clients that already
-                    // consume the ordinary shop's legacy gold-price field.
-                    cost = entry.Cost,
-                    stocked = entry.IsStocked,
-                    affordable = entry.EnoughGold,
-                }).ToArray(),
+            relics = shelf.Select(relic => new
+            {
+                idx = relic.Idx,
+                model = relic.Model,
+                title = relic.Title,
+                description = relic.Description,
+                price = relic.Cost,
+                // Keep `cost` as an alias for clients that already
+                // consume the ordinary shop's legacy gold-price field.
+                cost = relic.Cost,
+                stocked = relic.Stocked,
+                affordable = relic.Affordable,
+            }).ToArray(),
         };
     }
 
@@ -1521,6 +1592,7 @@ internal static class Snapshotter
     {
         var decision = DecisionSurface.Current.CardSelect;
         if (decision is null) return new SnapshotContract(phase) { Available = false };
+        var picked = SelectionProjection.Picked(decision.Selected);
         var snapshot = new SnapshotContract(phase)
         {
             Player = FooterView(),
@@ -1531,7 +1603,7 @@ internal static class Snapshotter
                 model: card.Id.Entry,
                 selector: CardSpecifier.From(card),
                 semanticState: [CardStateToken(card)],
-                selected: decision.Selected.Contains(card))).ToArray(),
+                selected: SelectionProjection.IsSelected(card, picked))).ToArray(),
             Selected = decision.Selected.Select(CardSpecifier.From).ToArray(),
             SemanticState =
             [
@@ -1550,10 +1622,15 @@ internal static class Snapshotter
     // Hand select runs inside the combat room — the hand flips into a
     // selection mode instead of pushing an overlay. Picked cards leave
     // ActiveHolders (into the selected row), so idx tracks what's on screen.
+    // The host's stand-in picker has no such row and keeps every candidate
+    // listed, so each row carries its own selected flag: without it a
+    // caller facing duplicate models cannot tell which row it already
+    // picked, and re-picking the first row only toggles it back off.
     private static SnapshotContract HandSelectSnapshot(Phase phase)
     {
         var decision = DecisionSurface.Current.HandSelect;
         if (decision is null) return new SnapshotContract(phase) { Available = false };
+        var picked = SelectionProjection.Picked(decision.Selected);
         var snapshot = new SnapshotContract(phase)
         {
             Confirmable = decision.Confirmable,
@@ -1562,7 +1639,8 @@ internal static class Snapshotter
                 model: card?.Id.Entry,
                 selector: card is null ? null : CardSpecifier.From(card),
                 semanticState: card is null ? [SemanticToken("card", (object?)null)]
-                    : [CardStateToken(card, liveCost: true)])).ToArray(),
+                    : [CardStateToken(card, liveCost: true)],
+                selected: SelectionProjection.IsSelected(card, picked))).ToArray(),
             Selected = decision.Selected.Select(CardSpecifier.From).ToArray(),
             SemanticState =
             [

@@ -114,10 +114,22 @@ upgrade candidates keep the string `upgradedPreview` and add
 the engine queues and tracked async work settle, or until a new decision
 surface appears. The response carries one of the typed settlement outcomes:
 <!-- protocol:settlement-outcomes:start -->
-`settled`, `next_decision`, `fault`, `timeout`.
+`settled`, `next_decision`, `fault`, `timeout`, `owner_changed`.
 <!-- protocol:settlement-outcomes:end -->
 It includes resolution events plus a fresh decision `obs`; `fault` also keeps
-the engine error tokens in `errors`. If an accepted mutation is followed by an
+the engine error tokens in `errors`. A follow window stays scoped to the run
+that accepted the verb: if another client abandons that run or starts a new
+one before the window closes, the response is `owner_changed` with
+`settled: false` — never a `settled` verdict read off the new run or the main
+menu — and the run-log entry keeps no phase or fingerprint from that foreign
+board. Ownership is the run's board, not just its id: the engine can keep a
+retired run's state loaded behind a visible main menu, so a verb that was
+acting inside a run is unowned there even when the id has not changed yet.
+Only the two lifecycle verbs move their own run: `new-run` adopts the run it
+mints, `abandon` settles on the menu it asked for. `new-run` never settles on
+the menu it started from — a launch that never puts its board on screen
+reports `timeout`, not a replayable main-menu boundary under `run:none`. If an accepted mutation is
+followed by an
 observation or response-construction failure, the bridge still returns this
 typed envelope with `action`, `acceptedRev`, `runId`,
 `observationAvailable: false`, and `obs: null`; the matching run-log entry is
@@ -332,6 +344,10 @@ picks), and text comes from tables extracted out of your local install's
   | `stars` | `value:integer` |
   | `energy` | `value:integer` |
   | `async-fault` | — |
+  | `async-orphan` | — |
+  | `async-orphan-ends-run` | — |
+  | `async-orphan-fault` | — |
+  | `async-orphan-log` | — |
   | `engine-error` | — |
   | `engine-error-delayed` | — |
   | `observation-fault` | — |
@@ -346,8 +362,9 @@ picks), and text comes from tables extracted out of your local install's
 
   They jump anywhere on the act map, end fights fast, force any event or
   encounter by model id, graft content into the run, or deliberately fault
-  tracked/logged async work and event-option ownership transitions to verify
-  the failure event stream. `models
+  tracked/logged async work and run-ownership transitions (both the
+  fire-and-forget and the event-option channel) to verify the failure event
+  stream. `models
   card|relic|potion|event|encounter|character` enumerates the current
   game build instead of baking ids into tests.
 
