@@ -27,9 +27,9 @@ def fresh_run(seed=None):
             bridge.PHASE.MAIN_MENU, after_rev=d["rev"])
     bridge.launch_run(
         seed=seed, timeout=30)
-    run("proceed")
-    if bridge.wait_phase(
-            bridge.PHASE.MAP, timeout=20, raise_on_timeout=False) is None:
+    # Neow owes the seat a decision; proceed only opens once it is taken.
+    if bridge.walk_world(
+            bridge.PHASE.MAP).get("phase") != bridge.PHASE.MAP:
         sys.exit("could not reach map for a fresh run")
     bridge.follow("cheat", "gold", "500")
 

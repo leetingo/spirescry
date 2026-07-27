@@ -39,7 +39,10 @@ internal static class DecisionProjection
                 // relics the buy verb purchases. Only its entries carry
                 // `purchasable`, so an ordinary event never advertises buy.
                 if (ShopHasPurchase(snapshot)) Add("buy");
-                Add("proceed");
+                // Leaving is a decision the event has to offer: a page with
+                // a pickable, non-leave option is a required choice, and
+                // proceed there walked past the whole event body.
+                if (snapshot.ProceedAvailable == true) Add("proceed");
                 break;
             case Phase.RestSite:
                 if (snapshot.Options.Any(option => option.Enabled == true))

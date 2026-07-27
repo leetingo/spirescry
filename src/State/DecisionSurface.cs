@@ -405,10 +405,12 @@ internal sealed class GuiDecisionSurface : IDecisionSurface
         ? Screens.CrystalEntity(screen)
         : null;
 
+    // The button's Visible never changes — NProceedButton animates between
+    // an off-screen and an on-screen position and only flips IsEnabled — so
+    // IsEnabled is what the readiness helper reads here, exactly as the
+    // engine's own room does.
     public RestSiteDecision? RestSite => Screens.RestOptions() is { } options
-        ? new RestSiteDecision(
-            options,
-            NRestSiteRoom.Instance?.ProceedButton is { Visible: true })
+        ? new RestSiteDecision(options, Screens.RestSiteProceedReady())
         : null;
 
     public TreasureDecision Treasure
@@ -613,6 +615,8 @@ internal sealed class GuiDecisionSurface : IDecisionSurface
     {
         if (NEventRoom.Instance is null)
             return NotReady("event room not mounted");
+        if (!Screens.EventProceedReady(Screens.CurrentEvent()))
+            return BadState(ProceedReadiness.EventNotReadyMessage);
         DecisionSurfaceActions.Track(NEventRoom.Proceed(), "proceed");
         return DecisionSurfaceResult.Success();
     }
@@ -633,8 +637,13 @@ internal sealed class GuiDecisionSurface : IDecisionSurface
     {
         if (NRestSiteRoom.Instance is not { } room)
             return NotReady("rest site not mounted");
-        if (room.ProceedButton is not { Visible: true } button)
-            return BadState("proceed button not visible — choose an option first");
+        // Readiness here *is* the button's IsEnabled, so the click below can
+        // never land on a disabled button — ForceClick would emit Released
+        // anyway and open a map screen the engine never enabled travel on.
+        if (!Screens.RestSiteProceedReady())
+            return BadState(ProceedReadiness.RestSiteNotReadyMessage);
+        if (room.ProceedButton is not { } button)
+            return NotReady("proceed button not wired yet — retry");
         button.ForceClick();
         return DecisionSurfaceResult.Success();
     }
@@ -1064,7 +1073,7 @@ internal sealed class HeadlessDecisionSurface : IDecisionSurface
     public CrystalMinigame? Crystal => HeadlessCrystal.Entity;
 
     public RestSiteDecision? RestSite => Screens.RestOptions() is { } options
-        ? new RestSiteDecision(options, ProceedAvailable: true)
+        ? new RestSiteDecision(options, Screens.RestSiteProceedReady())
         : null;
 
     public TreasureDecision Treasure
@@ -1159,12 +1168,16 @@ internal sealed class HeadlessDecisionSurface : IDecisionSurface
             return NotReady("rest site not mounted");
         if (idx < 0 || idx >= options.Count)
             return BadIndex($"option idx {idx} out of range [0,{options.Count - 1}]");
-        Task? choice = null;
+        Task<bool>? choice = null;
         HeadlessPicker.Around(() =>
             choice = run.Manager.RestSiteSynchronizer.ChooseLocalOption(idx));
         if (choice is null)
             return DecisionSurfaceResult.Reject(
                 DecisionSurfaceError.Internal, "rest option did not start");
+        // The task's own result is the only honest record that this seat
+        // spent its rest — the synchronizer stamps its chosen index even for
+        // an option that backs out of its sub-picker.
+        RestSiteSeat.RecordWhenSucceeded(choice, run.State.CurrentRoom);
         DecisionSurfaceActions.Track(choice, "rest-option");
         return DecisionSurfaceResult.Success();
     }
@@ -1183,6 +1196,8 @@ internal sealed class HeadlessDecisionSurface : IDecisionSurface
     {
         if (LocalRunContext.Current is not { } run)
             return BadState("run state not available");
+        if (!Screens.EventProceedReady(Screens.CurrentEvent()))
+            return BadState(ProceedReadiness.EventNotReadyMessage);
         // Events can finish on a dialogue page without flipping IsFinished;
         // headless exits the room model. The finale room advances the run.
         return run.State.CurrentRoom is { IsVictoryRoom: true }
@@ -1211,6 +1226,8 @@ internal sealed class HeadlessDecisionSurface : IDecisionSurface
     {
         if (LocalRunContext.Current is not { } run)
             return BadState("run state not available");
+        if (!Screens.RestSiteProceedReady())
+            return BadState(ProceedReadiness.RestSiteNotReadyMessage);
         return ExitRoomToMap(run.Manager, run.State, "rest-site proceed");
     }
 

@@ -2166,6 +2166,113 @@ internal static class Tests
             DecisionProjection.LegalVerbs(resolved, runActive: true)));
     }
 
+    public static void EventProceedIsWithheldUntilThePageOffersAWayOut()
+    {
+        static ProceedReadiness.EventOptionGate Option(
+            bool proceed = false, bool locked = false, bool chosen = false) =>
+            new(proceed, locked, chosen);
+
+        // Neow: three live boons, no leave option, event unfinished. The GUI
+        // renders no way past them, so neither may the bridge.
+        var required = new[] { Option(), Option(), Option() };
+        False(ProceedReadiness.EventReady(finished: false, required));
+
+        // The engine's own two exits: a finished event (NEventRoom swaps the
+        // page for a synthetic PROCEED) and a page carrying its own leave.
+        True(ProceedReadiness.EventReady(finished: true, required));
+        True(ProceedReadiness.EventReady(
+            finished: false, [Option(), Option(proceed: true)]));
+
+        // A locked leave is not an exit, and a spent or locked choice is not
+        // a required decision — proceed and option stay complementary, so a
+        // page whose options are all used up is never a dead end.
+        False(ProceedReadiness.EventReady(
+            finished: false, [Option(), Option(proceed: true, locked: true)]));
+        True(ProceedReadiness.EventReady(
+            finished: false, [Option(locked: true), Option(chosen: true)]));
+        True(ProceedReadiness.EventReady(finished: false, []));
+    }
+
+    public static void DecisionEventProceedFollowsTheEventPageGate()
+    {
+        var pending = new SnapshotContract(Phase.Event)
+        {
+            Options =
+            [
+                new SnapshotItemContract { Index = 0 },
+                new SnapshotItemContract { Index = 1 },
+            ],
+            ProceedAvailable = false,
+            Player = new SnapshotPlayerContract { Potions = [] },
+        };
+
+        Equal("option,abandon", string.Join(',',
+            DecisionProjection.LegalVerbs(pending, runActive: true)));
+
+        var resolved = new SnapshotContract(Phase.Event)
+        {
+            Options = [],
+            ProceedAvailable = true,
+            Player = new SnapshotPlayerContract { Potions = [] },
+        };
+
+        Equal("proceed,abandon", string.Join(',',
+            DecisionProjection.LegalVerbs(resolved, runActive: true)));
+    }
+
+    public static void RestSiteProceedWaitsForTheSeatToSpendItsChoice()
+    {
+        False(ProceedReadiness.RestSiteReady(
+            optionCount: 2, optionSpent: false));
+        True(ProceedReadiness.RestSiteReady(
+            optionCount: 0, optionSpent: false));
+        // A hook can leave the untaken options standing after one is taken;
+        // the GUI enables its proceed button all the same.
+        True(ProceedReadiness.RestSiteReady(
+            optionCount: 1, optionSpent: true));
+
+        var unchosen = new SnapshotContract(Phase.RestSite)
+        {
+            Options =
+            [
+                new SnapshotItemContract { Index = 0, Enabled = true },
+                new SnapshotItemContract { Index = 1, Enabled = true },
+            ],
+            ProceedAvailable = false,
+            Player = new SnapshotPlayerContract { Potions = [] },
+        };
+
+        Equal("option,abandon", string.Join(',',
+            DecisionProjection.LegalVerbs(unchosen, runActive: true)));
+    }
+
+    public static void RestSiteSeatOnlyCountsSelectionsThatConsumedSomething()
+    {
+        var room = new object();
+        False(RestSiteSeat.HasSpentItsChoice(room));
+
+        // SMITH, then cancelling its card grid: the synchronizer still
+        // stamps a chosen index, but its own success flag says false and
+        // nothing left the board — the seat still owes a decision.
+        RestSiteSeat.RecordWhenSucceeded(Task.FromResult(false), room);
+        False(RestSiteSeat.HasSpentItsChoice(room));
+
+        // A selection that threw did not spend the rest either.
+        var faulted = Task.FromException<bool>(
+            new InvalidOperationException("boom"));
+        RestSiteSeat.RecordWhenSucceeded(faulted, room);
+        False(RestSiteSeat.HasSpentItsChoice(room));
+        _ = faulted.Exception;  // observed for real by the dispatcher's Track
+
+        RestSiteSeat.RecordWhenSucceeded(Task.FromResult(true), room);
+        True(RestSiteSeat.HasSpentItsChoice(room));
+
+        // Keyed to the room it happened in, so the next rest site starts
+        // unspent without a room-entry hook.
+        False(RestSiteSeat.HasSpentItsChoice(new object()));
+        False(RestSiteSeat.HasSpentItsChoice(null));
+    }
+
     public static void DecisionUnavailableTransitionsDoNotAdvertiseActions()
     {
         foreach (var phase in new[] { Phase.Event, Phase.Rewards })
@@ -2280,6 +2387,10 @@ internal static class Tests
             new(Phase.Event)
             {
                 Options = [],
+                // A stall page offering no unspent option is a page the
+                // event itself lets the seat leave, so the readiness gate
+                // (#146) publishes proceed here.
+                ProceedAvailable = true,
                 Relics = purchasable
                     .Select((flag, i) => new SnapshotItemContract
                     {
@@ -2298,6 +2409,14 @@ internal static class Tests
         // An ordinary event stocks nothing and never advertises buy.
         Equal("proceed,abandon", string.Join(',',
             DecisionProjection.LegalVerbs(Stall(), runActive: true)));
+
+        // The two event gates compose: a stall page that still owes the
+        // seat a decision sells its stock but withholds the way out.
+        var owing = Stall(true);
+        owing.Options = [new SnapshotItemContract { Index = 0 }];
+        owing.ProceedAvailable = false;
+        Equal("option,buy,abandon", string.Join(',',
+            DecisionProjection.LegalVerbs(owing, runActive: true)));
     }
 
     public static void MerchantBuyRejectsEveryIndexButThePublishedRemoval()

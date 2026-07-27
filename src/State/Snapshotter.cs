@@ -1130,6 +1130,10 @@ internal static class Snapshotter
         {
             Id = ev.Id.Entry,
             Player = FooterView(),
+            // Whether this page can be left at all — the same gate the
+            // proceed verb enforces, so legal verbs never advertise a move
+            // the dispatcher will refuse.
+            ProceedAvailable = Screens.EventProceedReady(ev),
             SemanticState =
             [
                 SemanticToken("event", ev.GetType().FullName, ev.IsFinished),

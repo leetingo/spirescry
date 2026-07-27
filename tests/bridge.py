@@ -325,6 +325,17 @@ def resolve_transient_phase(d, *, claim_reward_tiles=False,
         return _follow_before(deadline, "skip")
     elif phase == PHASE.SHOP:
         return _follow_before(deadline, "leave")
+    elif phase == PHASE.REST_SITE and not d.get("proceedAvailable"):
+        # A rest site owes the seat a decision before it can be left; proceed
+        # is rejected until one option has actually been spent. An option can
+        # decline without consuming anything, so work down the list instead
+        # of retrying the first one until the deadline.
+        for option in [o for o in d.get("options", []) if o.get("enabled")]:
+            d = _follow_before(deadline, "option", str(option["idx"]))
+            if d.get("phase") != PHASE.REST_SITE or d.get("proceedAvailable"):
+                return d
+        raise AssertionError(
+            "rest site advertises neither a spendable option nor a way out")
     else:
         return _follow_before(deadline, "proceed")
 
@@ -335,6 +346,40 @@ _TRANSIENT_PHASES = {
     PHASE.RELIC_REWARD,
 }
 _TERMINAL_PHASES = {PHASE.MAIN_MENU, PHASE.GAME_OVER}
+# Sub-decisions an event option can raise. Deliberately not _TRANSIENT_PHASES:
+# rewards and the crystal sphere are resolved with `proceed`, which would walk
+# out of the very room resolve_event_choices is trying to stay in.
+_EVENT_CHOICE_PICKERS = {
+    PHASE.BUNDLE_SELECT, PHASE.CARD_SELECT, PHASE.HAND_SELECT,
+    PHASE.CARD_REWARD, PHASE.RELIC_REWARD,
+}
+
+
+def resolve_event_choices(timeout=60):
+    """Take event options until the page owes the seat nothing, and stop.
+
+    `proceed` is only legal once an event has no required unresolved option,
+    so every run's opening Neow blessing — and any picker a boon opens — has
+    to be answered before the room can be left. Unlike walk_world this stays
+    in the event: callers that want to test leaving it need the page still
+    mounted.
+    """
+    deadline = time.monotonic() + timeout
+    d = obs()
+    for _ in range(40):
+        phase = d.get("phase")
+        if phase != PHASE.EVENT:
+            if phase not in _EVENT_CHOICE_PICKERS:
+                return d
+            d = resolve_transient_phase(
+                d, timeout=_remaining(deadline, "event choice to settle"))
+            continue
+        pending = [option for option in d.get("options", [])
+                   if not option.get("locked") and not option.get("chosen")]
+        if not pending:
+            return d
+        d = _follow_before(deadline, "option", str(pending[0]["idx"]))
+    raise AssertionError("event never ran out of required options")
 
 
 def walk_world(*wanted_phases, claim_reward_tiles=False,

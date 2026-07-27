@@ -85,6 +85,39 @@ internal static class Screens
     public static EventModel? CurrentEvent() =>
         (LocalRunContext.Current?.State.CurrentRoom as EventRoom)?.LocalMutableEvent;
 
+    // The two proceed gates, adapted from live engine state to the shared
+    // value rules. Observation and dispatch read the same helper in both
+    // boots, so what /obs advertises and what /step accepts cannot drift.
+    public static bool EventProceedReady(EventModel? ev) =>
+        ev is null
+        || ProceedReadiness.EventReady(
+            ev.IsFinished,
+            (ev.CurrentOptions ?? [])
+                .Select(option => new ProceedReadiness.EventOptionGate(
+                    option.IsProceed, option.IsLocked, option.WasChosen))
+                .ToArray());
+
+    // Where the engine already keeps the answer, read it: NRestSiteRoom
+    // disables its proceed button as it builds the room and enables it only
+    // from ShowProceedButton — reached once the option list empties while
+    // the room is the active screen, or after a selection that succeeded.
+    // Gating on that flag rather than re-deriving it also keeps the GUI's
+    // proceed verb off a disabled button: ForceClick emits Released
+    // regardless of IsEnabled, and the engine only unlocks map travel from
+    // inside ShowProceedButton, so clicking early opens a map that cannot
+    // be travelled.
+    //
+    // Headless has no such node, so the same two edges are decided over
+    // plain values instead.
+    public static bool RestSiteProceedReady() =>
+        NRestSiteRoom.Instance is { } node
+            ? node.ProceedButton is { IsEnabled: true }
+            : RestOptions() is { } options
+                && ProceedReadiness.RestSiteReady(
+                    options.Count,
+                    RestSiteSeat.HasSpentItsChoice(
+                        LocalRunContext.Current?.State.CurrentRoom));
+
     public static MerchantInventory? ShopInventory(RunState? rs) =>
         (rs?.CurrentRoom as MerchantRoom)?.GetLocalInventory();
 

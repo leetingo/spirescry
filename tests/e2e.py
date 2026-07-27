@@ -211,10 +211,20 @@ def configure_cli_for_boot():
     return selected
 
 
+def leave_opening_event():
+    """Answer Neow's blessing and return the whole map board.
+
+    `proceed` is only legal once an event page owes nothing, so the opening
+    boon has to be taken rather than stepped over. walk_world hands back the
+    followed (compact) observation; callers here want the full snapshot.
+    """
+    bridge.walk_world(PHASE.MAP)
+    return bridge.wait_phase(PHASE.MAP)
+
+
 def to_map(seed=None, character="IRONCLAD"):
     launch(character=character, seed=seed)
-    run("proceed")
-    return bridge.wait_phase(PHASE.MAP)
+    return leave_opening_event()
 
 
 def into_combat(seed=None, character="IRONCLAD"):
@@ -489,12 +499,16 @@ def p8():
         assert status == 400 and d.get("err") == REJECTION.BAD_REQUEST, (bad, d)
         assert d.get("runId") == run_id, d
 
+    # The guards above are checked before the verb reaches the board, which
+    # is why a gated proceed still reports them. The accepted call needs a
+    # verb the decision genuinely offers: Neow owes the seat a choice, so
+    # `option` is the move and proceed is withheld until it is taken.
     status, d = http("POST", "/step", {
-        "action": "proceed", "args": {}, "ifRun": run_id, "ifRev": rev,
+        "action": "option", "args": {"idx": 0},
+        "ifRun": run_id, "ifRev": rev,
     })
     assert status == 200 and d.get("ok") is True, d
     assert d.get("runId") == run_id, d
-    bridge.wait_phase(PHASE.MAP)
     to_menu()
 
 
@@ -560,8 +574,7 @@ def p10():
         assert status == 400 and d.get("err") == REJECTION.BAD_REQUEST, (bad_follow, d)
         assert d.get("runId") == launched["runId"], d
 
-    run("proceed", "--follow", "5000")
-    d = bridge.wait_phase(PHASE.MAP)
+    d = leave_opening_event()
     rest = next(point for point in d["graph"] if point["type"] == "restsite")
     entered = run(
         "cheat", "goto", str(rest["col"]), str(rest["row"]), "--follow", "5000")
@@ -594,8 +607,7 @@ def p11():
     to_menu()
 
     run("new-run", "IRONCLAD", "--seed", "CIRUNLOG", "--follow", "5000")
-    run("proceed", "--follow", "5000")
-    bridge.wait_phase(PHASE.MAP)
+    leave_opening_event()
     log = run("runlog")
     assert log["complete"] is True, log
     assert log["kind"] == "diagnostic_reconstruction_recipe", log
@@ -1095,8 +1107,7 @@ def r1():
     def fingerprint():
         launch(seed="CIDETERM")
         neow = [o.get("title") for o in obs().get("options", [])]
-        run("proceed")
-        d = bridge.wait_phase(PHASE.MAP)
+        d = leave_opening_event()
         return (d.get("seed"), neow,
                 json.dumps(d.get("graph"), sort_keys=True))
     a, b = fingerprint(), fingerprint()
@@ -1113,8 +1124,7 @@ def r2():
         p = obs().get("player") or {}
         missing = [k for k in ("hp", "gold", "deck", "relics") if k not in p]
         assert not missing, f"{c}: player footer missing {missing}"
-        run("proceed")
-        d = bridge.wait_phase(PHASE.MAP)
+        d = leave_opening_event()
         node = next(x for x in d["next"] if x["type"] == "monster")
         before_rev = d["rev"]
         run("map-move", str(node["col"]), str(node["row"]))
@@ -1682,6 +1692,9 @@ def w6():
                 run("proceed")
             elif phase == PHASE.SHOP:
                 run("leave")
+            elif phase == PHASE.REST_SITE:
+                # A rest site owes the seat a decision before it can be left.
+                bridge.walk_world(PHASE.MAP)
             else:
                 run("proceed")
             d = bridge.wait_phase(PHASE.MAP)
@@ -2396,8 +2409,7 @@ def c9():
 @case("C10 power descriptions track their live amounts")
 def c10():
     launch(character="REGENT", seed="CIPOWERDESC")
-    run("proceed")
-    d = bridge.wait_phase(PHASE.MAP)
+    d = leave_opening_event()
     node = next(p for p in d["next"] if p["type"] == "monster")
     run("map-move", str(node["col"]), str(node["row"]))
     bridge.wait_phase(PHASE.COMBAT)
@@ -2630,8 +2642,7 @@ def c14():
 @case("V1 cheat-driven full clear reaches a victory game_over")
 def v1():
     launch(seed="CIVICT")
-    run("proceed")
-    bridge.wait_phase(PHASE.MAP)
+    leave_opening_event()
     for _ in range(8):  # acts; the loop exits on game_over
         d = obs()
         if d["phase"] != PHASE.MAP:
@@ -2961,6 +2972,91 @@ def i5():
     assert d["relics"][0]["purchasable"] is False, d["relics"][0]
     assert d["player"]["gold"] < before_gold, d["player"]
     assert first["model"] in d["player"]["relics"], d["player"]["relics"]
+    to_menu()
+
+
+@case("I6 proceed waits for the room's own decision")
+def i6():
+    # Neow offers three boons and no way out — the GUI renders no exit from
+    # that page, so neither the decision projection nor the dispatcher may
+    # invent one. `proceed` used to walk straight out of any event.
+    launch(seed="CIPROCEEDGATE")
+    opening = obs()
+    assert opening["phase"] == PHASE.EVENT, opening
+    assert opening.get("proceedAvailable") is False, opening
+    assert opening["options"], opening
+    assert "proceed" not in run("obs", "--decision")["legal"], \
+        run("obs", "--decision")["legal"]
+
+    reject(["proceed"], REJECTION.BAD_STATE)
+    still_here = obs()
+    assert still_here["phase"] == PHASE.EVENT, still_here
+    assert still_here["id"] == opening["id"], (opening["id"], still_here["id"])
+    assert still_here["options"] == opening["options"], still_here["options"]
+
+    # Answering the page finishes the event; the way out then appears and
+    # actually leaves.
+    resolved = bridge.resolve_event_choices()
+    assert resolved["phase"] == PHASE.EVENT, resolved
+    assert resolved.get("proceedAvailable") is True, resolved
+    assert "proceed" in run("obs", "--decision")["legal"], \
+        run("obs", "--decision")["legal"]
+    d = bridge.walk_world(PHASE.MAP, initial=bridge.follow("proceed"))
+    assert d["phase"] == PHASE.MAP, d
+
+    # Same gate at a rest site: an unspent option is a decision the room is
+    # still owed, and headless used to advertise proceed unconditionally.
+    rest = next(point for point in obs()["graph"]
+                if point["type"] == "restsite")
+    entered = bridge.follow(
+        "cheat", "goto", str(rest["col"]), str(rest["row"]))
+    assert entered["phase"] == PHASE.REST_SITE, entered
+    assert entered.get("proceedAvailable") is False, entered
+    assert "proceed" not in run("obs", "--decision")["legal"], \
+        run("obs", "--decision")["legal"]
+
+    reject(["proceed"], REJECTION.BAD_STATE)
+    unmoved = obs()
+    assert unmoved["phase"] == PHASE.REST_SITE, unmoved
+    assert [option["id"] for option in unmoved["options"]] == \
+        [option["id"] for option in entered["options"]], unmoved["options"]
+
+    # Backing out of an option's own picker consumes nothing: the seat still
+    # owes the room a decision even though the synchronizer has already
+    # stamped its chosen index. Reading that stamp as "spent" let proceed
+    # leave a rest site with both options and full hp intact.
+    smith = next(option for option in entered["options"]
+                 if option["id"] == "SMITH" and option["enabled"])
+    cancelling = bridge.follow("option", str(smith["idx"]))
+    assert cancelling["phase"] == PHASE.CARD_SELECT, cancelling
+    backed_out = bridge.follow("skip")
+    if backed_out["phase"] != PHASE.REST_SITE:
+        backed_out = bridge.wait_phase(PHASE.REST_SITE)
+    assert backed_out.get("proceedAvailable") is False, backed_out
+    assert "proceed" not in run("obs", "--decision")["legal"], \
+        run("obs", "--decision")["legal"]
+    assert [option["id"] for option in backed_out["options"]] == \
+        [option["id"] for option in entered["options"]], backed_out["options"]
+    assert backed_out["player"]["hp"] == entered["player"]["hp"], \
+        (entered["player"]["hp"], backed_out["player"]["hp"])
+
+    reject(["proceed"], REJECTION.BAD_STATE)
+    intact = obs()
+    assert intact["phase"] == PHASE.REST_SITE, intact
+    assert [option["id"] for option in intact["options"]] == \
+        [option["id"] for option in entered["options"]], intact["options"]
+
+    # The same option, carried through: now the room is spent and lets go.
+    picking = bridge.follow("option", str(smith["idx"]))
+    assert picking["phase"] == PHASE.CARD_SELECT, picking
+    settled = bridge.follow("pick-card", "0")
+    if settled["phase"] != PHASE.REST_SITE:
+        settled = bridge.wait_phase(PHASE.REST_SITE)
+    assert settled.get("proceedAvailable") is True, settled
+    assert "proceed" in run("obs", "--decision")["legal"], \
+        run("obs", "--decision")["legal"]
+    left = bridge.walk_world(PHASE.MAP, initial=bridge.follow("proceed"))
+    assert left["phase"] == PHASE.MAP, left
     to_menu()
 
 
