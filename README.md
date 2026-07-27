@@ -79,6 +79,17 @@ the piles. Settlement and replay still consume the full typed projection
 inside the host; `obs --semantic-state` (HTTP `?semanticState=1`) exposes it
 explicitly for diagnostics.
 
+Every `/obs` query parameter is optional, but a supplied one must be well
+formed or the request is a `bad_request`: `since` is a non-negative integer,
+`wait` an integer in `[0,60000]`, and the boolean flags (`compact`,
+`decision`, `semanticState`) take `1`/`true` or `0`/`false`, case-insensitive.
+A malformed value is never silently replaced by its default — `?wait=1s`
+quietly becoming a no-wait poll reads exactly like a long-poll that timed out.
+A parameter with no value at all (`?compact`, `?compact=`) is supplied, not
+omitted, and is rejected the same way, as is one supplied twice with
+different spellings (`?compact=1&compact=0`). `known` is the exception: it
+is the one parameter meant to repeat.
+
 Combat card `playable` values use the same final hook-aware gate as dispatch.
 When a hook blocks a card, `unplayableReason` and, when available,
 `unplayablePreventer` name the machine-readable reason and model. `legal`
@@ -186,11 +197,12 @@ stream as `run:<id>` / `run:none`.
 bump it from the engine's own C# events (action executor, combat manager,
 overlay stack) plus a per-tick phase diff as the safety net; a `/step`
 accepted without either (in-phase inline mutations — reward claims, shop
-buys) bumps it itself. `obs?since=` responses name the events behind the
-bump (`phase:map->combat`, `action:PlayCardAction`, `enqueued:...`,
-`step:buy`, `wedge:...`). The server clamps `wait` to `0..60000` ms. Omitting
-`--wait` (or passing `0`) is a no-wait poll; pass a positive value explicitly
-when the caller should park for a change.
+buys) bumps it itself. `obs?since=<rev>` responses name the events behind
+the bump (`phase:map->combat`, `action:PlayCardAction`, `enqueued:...`,
+`step:buy`, `wedge:...`). `wait` is bounded to `0..60000` ms — a larger one
+is a `bad_request`, not a silent clamp. Omitting `--wait` (or passing `0`)
+is a no-wait poll; pass a positive value explicitly when the caller should
+park for a change.
 
 The event log retains the latest 64 revision events. After a burst larger
 than that, an old `--since` still returns immediately with `changed: true`

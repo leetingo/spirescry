@@ -3,6 +3,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
 using Spirescry;
+using Spirescry.Bridge;
 using Spirescry.Host;
 using Spirescry.State;
 // Only the one stub type is pulled in by name: a blanket `using Godot` would
@@ -2740,6 +2741,136 @@ internal static class Tests
 
         Equal(Build("ornate").ConsumerFingerprint(),
             Build("plain").ConsumerFingerprint());
+    }
+
+    public static void OmittedObservationParametersKeepTheirDefaults()
+    {
+        foreach (var empty in new[] { "", "?" })
+        {
+            var query = ParsedQuery(empty);
+
+            Equal(ObservationQuery.NoSince, query.Since);
+            Equal(0, query.Wait);
+            False(query.Compact);
+            False(query.Decision);
+            False(query.SemanticState);
+            False(query.WantsChangeFeed);
+            False(query.ShouldPark);
+        }
+
+        // Parameters this rule does not own — `known` above all, which the
+        // server reads itself because it is repeatable — pass through
+        // untouched instead of counting as malformed.
+        False(ParsedQuery("?known=STRIKE_IRONCLAD%2B0&known=BASH%2B1").Compact);
+    }
+
+    public static void ValidObservationLongPollParametersSurviveParsing()
+    {
+        var query = ParsedQuery("?since=0&wait=1500");
+
+        Equal(0L, query.Since);
+        Equal(1500, query.Wait);
+        True(query.WantsChangeFeed);
+        True(query.ShouldPark);
+
+        // since without wait still reports the change feed, it just does
+        // not park; wait=0 is the same request spelled out.
+        True(ParsedQuery("?since=42").WantsChangeFeed);
+        False(ParsedQuery("?since=42").ShouldPark);
+        False(ParsedQuery("?since=42&wait=0").ShouldPark);
+        Equal(ObservationQuery.MaxWaitMs, ParsedQuery("?since=1&wait=60000").Wait);
+        // The leading '?' is the server's to keep or drop.
+        Equal(7L, ParsedQuery("since=7").Since);
+    }
+
+    public static void MalformedObservationSinceIsRejected()
+    {
+        foreach (var since in new[]
+                 {
+                     "", "abc", "-1", " 1", "%201", "1.0", "1e3", "0x1",
+                     "9223372036854775808",
+                 })
+            Equal("'since' must be a non-negative integer",
+                RejectedQuery($"?since={since}"));
+        // Parameter names match the way the server's own parser matches
+        // them, so a shouted one is rejected under its canonical spelling.
+        Equal("'since' must be a non-negative integer", RejectedQuery("?SINCE=abc"));
+    }
+
+    public static void MalformedObservationWaitIsRejected()
+    {
+        // Out of range counts as malformed: silently clamping a 10-minute
+        // wait to a minute is the same lie as silently defaulting it.
+        foreach (var wait in new[] { "", "soon", "-1", "1500ms", "60001" })
+            Equal("'wait' must be an integer in [0,60000]",
+                RejectedQuery($"?since=0&wait={wait}"));
+    }
+
+    public static void ObservationFlagsAcceptOnlyTheDocumentedEncodings()
+    {
+        foreach (var yes in new[] { "1", "true", "TRUE" })
+        {
+            True(ParsedQuery($"?compact={yes}").Compact);
+            True(ParsedQuery($"?decision={yes}").Decision);
+            True(ParsedQuery($"?semanticState={yes}").SemanticState);
+        }
+        foreach (var no in new[] { "0", "false", "False" })
+        {
+            False(ParsedQuery($"?compact={no}").Compact);
+            False(ParsedQuery($"?decision={no}").Decision);
+            False(ParsedQuery($"?semanticState={no}").SemanticState);
+        }
+        foreach (var flag in new[] { "compact", "decision", "semanticState" })
+            foreach (var bad in new[] { "", "yes", "2", "on", "compact" })
+                Equal($"'{flag}' must be one of 1|true|0|false",
+                    RejectedQuery($"?{flag}={bad}"));
+    }
+
+    public static void ValuelessObservationParametersAreRejected()
+    {
+        // `?compact` with no '=' at all is supplied, not omitted — and it
+        // is the form the server's own parsed query collection cannot
+        // report: .NET files a valueless segment under the null key, so
+        // the indexer answers null exactly as it does for an omitted one.
+        Equal("'since' must be a non-negative integer", RejectedQuery("?since"));
+        Equal("'wait' must be an integer in [0,60000]", RejectedQuery("?wait"));
+        foreach (var flag in new[] { "compact", "decision", "semanticState" })
+            Equal($"'{flag}' must be one of 1|true|0|false",
+                RejectedQuery($"?{flag}"));
+        // Including mid-query, where it is easiest to overlook.
+        Equal("'decision' must be one of 1|true|0|false",
+            RejectedQuery("?since=0&decision&wait=10"));
+    }
+
+    public static void RepeatedObservationParametersAreRejected()
+    {
+        // Two spellings of one parameter: picking a winner silently is the
+        // same lie as defaulting a malformed one, whichever end wins.
+        Equal("'compact' was supplied more than once",
+            RejectedQuery("?compact=1&compact=0"));
+        Equal("'since' was supplied more than once",
+            RejectedQuery("?since=1&SINCE=2"));
+        Equal("'wait' was supplied more than once",
+            RejectedQuery("?since=0&wait=10&wait=10"));
+
+        // `known` is the one parameter that is meant to repeat, and this
+        // rule does not own it.
+        True(ParsedQuery("?known=A&known=B&compact=1").Compact);
+    }
+
+    private static ObservationQuery ParsedQuery(string rawQuery)
+    {
+        True(ObservationQuery.TryParse(rawQuery, out var query, out var error));
+        Equal(null, error);
+        return query;
+    }
+
+    private static string RejectedQuery(string rawQuery)
+    {
+        False(ObservationQuery.TryParse(rawQuery, out var query, out var error));
+        Equal(default(ObservationQuery), query);
+        return error ?? throw new InvalidOperationException(
+            "a rejected query carried no message");
     }
 
     // The headless GodotSharp stub is loaded in place of the real one, so the

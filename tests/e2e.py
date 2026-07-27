@@ -376,6 +376,68 @@ def p4():
             f"{method} {path} -> {status} {d}"
 
 
+@case("P4b malformed obs query parameters are rejected")
+def p4b():
+    to_menu()
+
+    # Present but malformed: rejected, never silently defaulted or clamped.
+    # The valueless spellings (`?compact`, `?since`) matter most — .NET
+    # files them under its query collection's null key, so a server that
+    # reads QueryString["compact"] sees them as omitted.
+    for query in ("?since=abc", "?since=-1", "?since=", "?since=1.0",
+                  "?since", "?SINCE=abc",
+                  "?wait=soon", "?wait=-1", "?wait=60001", "?wait",
+                  "?compact=yes", "?compact=", "?compact",
+                  "?decision=maybe", "?decision", "?since=0&decision&wait=10",
+                  "?semanticState=2", "?semanticState",
+                  "?compact=1&compact=0", "?since=1&since=2"):
+        status, d = http("GET", "/obs" + query)
+        assert status == 400 and d.get("err") == REJECTION.BAD_REQUEST, \
+            f"/obs{query} -> {status} {d}"
+        assert d.get("runId") == "none", d
+
+    # Omitted: the existing defaults — no change feed, no legal projection.
+    status, omitted = http("GET", "/obs")
+    assert status == 200 and omitted["phase"] == PHASE.MAIN_MENU, omitted
+    assert "changed" not in omitted and "legal" not in omitted, omitted
+
+    # Both documented encodings of each boolean are accepted, and the false
+    # ones land on the same snapshot shape as omitting the parameter.
+    for form in ("1", "true"):
+        status, on = http("GET", f"/obs?decision={form}&compact={form}")
+        assert status == 200 and on.get("legal") == ["new-run"], (form, on)
+    for form in ("0", "false"):
+        status, off = http("GET", f"/obs?decision={form}&compact={form}")
+        assert status == 200 and "legal" not in off, (form, off)
+
+    # A valid since/wait pair still parks for the full window.
+    for _ in range(2):  # one retry in case a background bump beat the timer
+        cur = obs()["rev"]
+        t0 = time.monotonic()
+        status, parked = http("GET", f"/obs?since={cur}&wait=1200")
+        took = time.monotonic() - t0
+        assert status == 200, parked
+        if not parked.get("changed"):
+            break
+    assert parked.get("changed") is False, parked.get("events")
+    assert took >= 1.0, f"valid long poll returned early ({took:.2f}s)"
+
+    # An accepted flag has to reach the snapshot, not just the status line:
+    # at the menu a compact and a full snapshot are byte-identical, so the
+    # accepted encodings are checked inside a run, where they differ.
+    launch(seed="CIP4B")
+    status, full = http("GET", "/obs?compact=0")
+    assert status == 200, full
+    status, small = http("GET", "/obs?compact=true")
+    assert status == 200, small
+    assert full["player"]["relicStates"][0]["title"], full["player"]
+    assert small["player"]["relicStates"][0]["title"] is None, small["player"]
+    assert "semanticState" not in full, full
+    status, diagnostic = http("GET", "/obs?semanticState=1")
+    assert status == 200 and diagnostic.get("semanticState"), diagnostic
+    to_menu()
+
+
 @case("P5 bad character is rejected with the roster")
 def p5():
     print(f"    roster: {character_roster()}")

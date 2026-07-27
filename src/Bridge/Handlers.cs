@@ -63,36 +63,40 @@ public static class Handlers
     // (engine events / phase changes bump it) or the wait expires — the
     // event-driven replacement for sleep-polling. The response carries the
     // current revision and, when `since` was given, the events behind it.
+    // Every parameter is optional, but a supplied one must be well formed:
+    // see ObservationQuery for the encodings and why a malformed value is
+    // a bad_request instead of a silent default.
     public static async Task<Response> Obs(
-        string? sinceStr,
-        string? waitStr,
-        string? compactStr = null,
-        string? decisionStr = null,
-        string[]? knownCards = null,
-        string? semanticStateStr = null)
+        string? rawQuery,
+        string[]? knownCards = null)
     {
-        var since = long.TryParse(sinceStr, out var s) ? s : -1;
-        var wait = int.TryParse(waitStr, out var w) ? Math.Clamp(w, 0, 60_000) : 0;
-        var compact = compactStr is "1" or "true";
-        var decision = decisionStr is "1" or "true";
-        var includeSemanticState = semanticStateStr is "1" or "true";
-        if (since >= 0 && wait > 0)
-            await Signals.WaitForChange(since, wait);
+        if (!ObservationQuery.TryParse(rawQuery, out var query, out var queryError))
+            return await MainThreadPump.Instance!.Run(() =>
+            {
+                var runId = Signals.RefreshRunIdentity();
+                return Response.Error(
+                    RejectionCodes.BadRequest, queryError!, runId: runId);
+            });
+
+        if (query.ShouldPark)
+            await Signals.WaitForChange(query.Since, query.Wait);
 
         return await MainThreadPump.Instance!.Run(() =>
         {
             var runId = Signals.RefreshRunIdentity();
-            var snapshot = Snapshotter.ForCurrentPhase(compact, decision, knownCards ?? []);
+            var snapshot = Snapshotter.ForCurrentPhase(
+                query.Compact, query.Decision, knownCards ?? []);
             var revision = Signals.Revision;
             snapshot.Revision = revision;
             snapshot.RunId = runId;
-            if (decision)
+            if (query.Decision)
                 snapshot.Legal = DecisionProjection.LegalVerbs(snapshot, runId != "none");
-            var node = snapshot.ToAgentJsonObject(includeSemanticState);
-            if (since >= 0)
+            var node = snapshot.ToAgentJsonObject(query.SemanticState);
+            if (query.WantsChangeFeed)
             {
-                node["changed"] = revision > since;
-                node["events"] = JsonSerializer.SerializeToNode(Signals.EventsSince(since));
+                node["changed"] = revision > query.Since;
+                node["events"] = JsonSerializer.SerializeToNode(
+                    Signals.EventsSince(query.Since));
             }
             return new Response { Body = node.ToJsonString() };
         });
