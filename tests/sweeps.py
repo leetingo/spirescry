@@ -19,6 +19,10 @@ clean sweep.
 
 All sweeps assume a live bridge (tests/e2e.py boots one) and leave the
 world at the main menu. Each returns a dict of failures: {} == clean.
+
+Faults that are already filed as open product issues live in QUARANTINE:
+they are still swept and still reported, but they do not fail the gate, and
+they fail it again the moment they start passing. See QUARANTINE.
 """
 import json
 import os
@@ -433,7 +437,13 @@ def relics(log=print):
             continue
         if error:
             failures[relic] = error
-            return failures
+            if relic not in QUARANTINE["relics"]:
+                # An untracked obtain fault can wedge the run; stop rather
+                # than blame every remaining relic on it.
+                return failures
+            # A tracked fault must not cost the rest of the belt its sweep.
+            fresh_run(f"SWEEPREL{i}")
+            continue
         verified += 1
         exercised.add(relic)
         if (i + 1) % 50 == 0:
@@ -449,27 +459,79 @@ def relics(log=print):
     return failures
 
 
+# The sweep kinds this module offers, by the argument that selects one.
+# Module-level so tests/gate_coverage_test.py can check that the pre-merge
+# gate really runs an e2e case for every kind — a new sweep added here
+# without a case would otherwise never run.
+SWEEPS = {
+    "encounters": encounters,
+    "cards": cards,
+    "potions": potions,
+    "relics": relics,
+}
+
+# Content faults already tracked as open product issues. The sweep still
+# runs the entry and still prints what it did, but a tracked fault does not
+# fail the pre-merge gate: an unrelated PR must not be blocked by a bug it
+# did not cause, because the only unblock anyone reaches for is putting
+# --quick back (see tests/gate_coverage_test.py for why that must not
+# happen). Everything else still fails, so a NEW fault is caught the day it
+# appears, and a quarantined entry that starts passing fails the sweep —
+# the list can only ever shrink, and the issue's fix is what empties it.
+#
+# Empty is the healthy state, and it is where the map stands: the eight
+# entries it opened with (#147, #148, #149) all went stale once those fixes
+# merged, so the gate retired them. A kind stays listed with no entries so a
+# future regression has an obvious place to go — add {"CONTENT_ID": issue}.
+QUARANTINE = {
+    "encounters": {},
+    "cards": {},
+    "potions": {},
+    "relics": {},
+}
+
+
+def partition(kind, failures):
+    """Split a sweep's failures into (blocking, tracked-by-an-open-issue)."""
+    known = QUARANTINE.get(kind, {})
+    blocking = {n: w for n, w in failures.items() if n not in known}
+    tracked = {n: (known[n], w) for n, w in failures.items() if n in known}
+    return blocking, tracked
+
+
+def stale_quarantine(kind, failures):
+    """Quarantined entries the sweep no longer fails on. The fix landed (or
+    the entry was renamed away), so the entry has to go — otherwise a
+    quarantine outlives its bug and silently hides the next one."""
+    return sorted(n for n in QUARANTINE.get(kind, {}) if n not in failures)
+
+
 if __name__ == "__main__":
     sweep = sys.argv[1] if len(sys.argv) in (2, 3) else ""
-    choices = {
-        "encounters": encounters,
-        "cards": cards,
-        "potions": potions,
-        "relics": relics,
-    }
     # The per-entry sweeps take an id list, which re-verifies a single fix in
     # seconds instead of paying for the whole sweep. Filtered runs skip the
     # coverage floor and the batch-pollution retry, so they are a debugging
     # aid, not a substitute for the full sweep.
     filterable = {"cards", "potions"}
-    if sweep not in choices:
-        sys.exit("usage: sweeps.py encounters|cards|potions|relics [ID,ID,...]")
-    if len(sys.argv) == 3 and sweep not in filterable:
+    filtered = len(sys.argv) == 3
+    if sweep not in SWEEPS:
+        sys.exit("usage: sweeps.py " + "|".join(SWEEPS) + " [ID,ID,...]")
+    if filtered and sweep not in filterable:
         sys.exit(f"sweeps.py {sweep} cannot be filtered by id")
-    failed = (choices[sweep](only=set(sys.argv[2].split(",")))
-              if len(sys.argv) == 3 else choices[sweep]())
+    failed = (SWEEPS[sweep](only=set(sys.argv[2].split(",")))
+              if filtered else SWEEPS[sweep]())
+    blocking, tracked = partition(sweep, failed)
+    for name, (issue, why) in sorted(tracked.items()):
+        print(f"SWEEP KNOWN FAILURE (#{issue}): {name}: {why}")
+    # A filtered run never touches most of the map, so its silence says
+    # nothing about whether an entry still fails — only a full sweep can
+    # retire a quarantine entry.
+    for name in ([] if filtered else stale_quarantine(sweep, failed)):
+        blocking[name] = (
+            f"quarantined for #{QUARANTINE[sweep][name]} but the sweep passed"
+            " — drop it from sweeps.QUARANTINE")
     # Name the failures — a bare exit code forces a full re-run under a
     # debugger just to learn WHICH entry broke.
-    for name, why in failed.items():
+    for name, why in blocking.items():
         print(f"SWEEP FAILURE: {name}: {why}")
-    sys.exit(1 if failed else 0)
+    sys.exit(1 if blocking else 0)

@@ -384,19 +384,30 @@ picks), and text comes from tables extracted out of your local install's
 
 ```sh
 ./build.sh gate          # the pre-merge gate: everything CI runs, plus the
-                         # end-to-end suite it cannot (~1.5 min)
+                         # end-to-end suite it cannot — exhaustive content
+                         # sweeps included, never --quick (~3 min)
 ./build.sh verify        # drives one act-1 loop against BOTH boots, then
                          # diffs the recorded snapshot key sets — same
                          # phase must expose the same keys in each
 python3 tests/e2e.py --boot   # the pre-merge suite against a self-booted
                               # host with this checkout's release CLI
                               # (build it with ./build.sh cli first)
-python3 tests/e2e.py --boot --quick  # iteration loop: skip exhaustive M*,
-                                     # click the first option per event
+python3 tests/e2e.py --boot --quick  # LOCAL ITERATION ONLY: skip exhaustive
+                                     # M*, click the first option per event
 python3 tests/eventsweep.py --all-options  # event sweep alone (e2e E1)
 python3 tests/host_exit.py  # force clean/signal/unhandled host exits and
                             # assert the final log evidence
 ```
+
+`--quick` is a fast inner loop, never a merge criterion: the M1–M4 sweeps
+(every encounter, card, potion and relic) run nowhere else, so the gate runs
+them in full. `tests/gate_coverage_test.py` — a pure unit test, so CI runs it
+too — fails if `gate()` ever drops back to quick-only coverage. Content
+faults already filed as open issues are listed in `sweeps.QUARANTINE`: still
+swept, still printed as `SWEEP KNOWN FAILURE (#nnn)`, but not gate-reddening,
+so no one is tempted to reach for `--quick` over someone else's bug. Any
+other fault still fails, and a quarantined entry that starts passing fails
+too — the list only shrinks (`tests/sweep_quarantine_test.py`).
 
 CI runs only the pure unit tests (`unit-tests.yml`, GitHub-hosted): the
 host is built from the game's non-distributable dlls, so the end-to-end
