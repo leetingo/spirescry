@@ -478,15 +478,16 @@ SWEEPS = {
 # happen). Everything else still fails, so a NEW fault is caught the day it
 # appears, and a quarantined entry that starts passing fails the sweep —
 # the list can only ever shrink, and the issue's fix is what empties it.
+#
+# Empty is the healthy state, and it is where the map stands: the eight
+# entries it opened with (#147, #148, #149) all went stale once those fixes
+# merged, so the gate retired them. A kind stays listed with no entries so a
+# future regression has an obvious place to go — add {"CONTENT_ID": issue}.
 QUARANTINE = {
-    "encounters": {"SLUMBERING_BEETLE_NORMAL": 148},
-    "cards": {"MAD_SCIENCE": 149, "CHARGE": 147, "HIDDEN_DAGGERS": 147},
-    "potions": {
-        "GIGANTIFICATION_POTION": 148,
-        "LIQUID_MEMORIES": 148,
-        "MOCK_DISCARD_AND_ADD_SHIVS_POTION": 147,
-    },
-    "relics": {"SEA_GLASS": 149},
+    "encounters": {},
+    "cards": {},
+    "potions": {},
+    "relics": {},
 }
 
 
