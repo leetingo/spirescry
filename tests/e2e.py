@@ -3022,6 +3022,74 @@ def i5():
     to_menu()
 
 
+@case("I7 fake merchant takes the Foul Potion as a fight")
+def i7():
+    # The stall's `canFight` advertised a fight no verb could fire: the
+    # dispatcher took its merchant branch only in Phase.Shop, so the raw
+    # step came back bad_phase (#167). Now the whole chain agrees — the
+    # flag, the belt entry's `playable`, obs.legal and the dispatcher.
+    to_map(seed="CIFAKEFIGHT")
+    run("cheat", PHASE.EVENT, "FAKE_MERCHANT")
+    d = bridge.wait_phase(PHASE.EVENT)
+
+    # An empty belt buys nothing: no fight advertised, and the raw step is
+    # refused for want of a potion rather than for the phase.
+    for potion in list(d["player"]["potions"]):
+        d = bridge.follow("potion-discard", str(potion["slot"]))
+    assert d["player"]["potions"] == [], d["player"]["potions"]
+    assert d["fakeMerchant"]["canFight"] is False, d["fakeMerchant"]
+    assert "potion-use" not in legal(), legal()
+    status, result = http("POST", "/step", {
+        "action": "potion-use", "args": {"slot": 0},
+    })
+    assert status == 400 and result.get("err") == REJECTION.BAD_INDEX, \
+        f"potion-use on an empty belt got the wrong gate: {status} {result}"
+
+    # An ordinary potion is not what the stall trades for.
+    d = bridge.follow("cheat", "potion", "ENERGY_POTION")
+    ordinary = next(p for p in d["player"]["potions"]
+                    if p["model"] == "ENERGY_POTION")
+    assert ordinary["playable"] is False, ordinary
+    assert d["fakeMerchant"]["canFight"] is False, d["fakeMerchant"]
+    assert "potion-use" not in legal(), legal()
+    status, result = http("POST", "/step", {
+        "action": "potion-use", "args": {"slot": ordinary["slot"]},
+    })
+    assert status == 400 and result.get("err") == REJECTION.NOT_PLAYABLE, \
+        f"unadvertised stall potion-use was not rejected: {status} {result}"
+    assert any(p["slot"] == ordinary["slot"] for p in obs()["player"]["potions"]), \
+        "rejected ordinary potion left its belt slot"
+
+    # The Foul Potion is the one the stall takes, and it pays in a fight.
+    d = bridge.follow("cheat", "potion", "FOUL_POTION")
+    foul = next(p for p in d["player"]["potions"] if p["model"] == "FOUL_POTION")
+    assert foul["playable"] is True, foul
+    assert d["fakeMerchant"]["canFight"] is True, d["fakeMerchant"]
+    assert "potion-use" in legal(), legal()
+    stocked = [relic for relic in d["fakeMerchant"]["relics"] if relic["stocked"]]
+    rug = "The Merchant's Rug???"
+
+    status, result = http("POST", "/step", {
+        "action": "potion-use", "args": {"slot": foul["slot"]}, "follow": 5000,
+    })
+    d = followed_http_obs(status, result, "Foul Potion thrown at the stall")
+    d = bridge.wait_phase(PHASE.COMBAT)
+    # Spent exactly once: the slot cleared, so the same potion cannot also
+    # be redeemed for gold in a later shop. Combat has no player footer —
+    # the belt is the top-level `potions` there.
+    assert not any(p["slot"] == foul["slot"] for p in d["potions"]), \
+        f"thrown Foul Potion stayed in its belt slot: {d['potions']}"
+
+    # The stall's own relic is the fight's prize, queued together with every
+    # relic still on its shelf — the fight is how you rob the merchant.
+    bridge.kill_current_combat()
+    d = bridge.wait_phase(PHASE.REWARDS)
+    relics = [r["description"] for r in d["rewards"] if r["type"] == "relic"]
+    assert rug in relics, d["rewards"]
+    assert len(relics) == 1 + len(stocked), (relics, stocked)
+    to_menu()
+
+
 @case("I6 proceed waits for the room's own decision")
 def i6():
     # Neow offers three boons and no way out — the GUI renders no exit from

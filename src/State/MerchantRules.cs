@@ -57,6 +57,16 @@ internal static class MerchantRules
             && ownerAlive
             && canUseOrRemovePotions
             && interactionAvailable();
+
+    // The Fake Merchant takes the same Foul Potion, but pays in a fight
+    // rather than in gold — and it has exactly one fight to sell, so a stall
+    // that already started it never advertises a second. `canFight`, the
+    // belt entry's `playable`, obs.legal's potion-use and the dispatcher's
+    // reject are this one statement; before it, `canFight` scanned the belt
+    // for a FOUL_POTION id and advertised a fight the dispatcher refused.
+    internal static bool FightableAtStall(
+        bool startedFight, bool holdsRedeemablePotion) =>
+        !startedFight && holdsRedeemablePotion;
 }
 
 #if !CARD_GRAMMAR_ONLY

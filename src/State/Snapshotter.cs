@@ -1121,6 +1121,11 @@ internal static class Snapshotter
         var ev = Screens.CurrentEvent();
         if (ev is null) return new SnapshotContract(phase) { Available = false };
         var owner = ev.Owner;
+        // The Fake Merchant is a shop wearing an event, down to the belt: it
+        // redeems a Foul Potion, so its footer needs the merchant reading
+        // that carries `playable` — the same gate obs.legal and the
+        // dispatcher use. An ordinary event keeps the plain footer.
+        var stall = ev as FakeMerchant;
 
         // EventRoom already called CalculateVars exactly once when the
         // event began. Never call it while observing: several events roll
@@ -1129,7 +1134,7 @@ internal static class Snapshotter
         var snapshot = new SnapshotContract(phase)
         {
             Id = ev.Id.Entry,
-            Player = FooterView(),
+            Player = stall is null ? FooterView() : MerchantFooterView(owner),
             // Whether this page can be left at all — the same gate the
             // proceed verb enforces, so legal verbs never advertise a move
             // the dispatcher will refuse.
@@ -1138,9 +1143,7 @@ internal static class Snapshotter
             [
                 SemanticToken("event", ev.GetType().FullName, ev.IsFinished),
                 .. EventDynamicVarState(ev.DynamicVars),
-                .. (ev is FakeMerchant semanticMerchant
-                    ? FakeMerchantState(semanticMerchant)
-                    : []),
+                .. (stall is not null ? FakeMerchantState(stall) : []),
             ],
             Options = (ev.CurrentOptions ?? []).Select((o, i) =>
             {
@@ -1189,7 +1192,6 @@ internal static class Snapshotter
         // the ordinary top-level shape — which carries the ordinary
         // `purchasable` gate obs.legal derives buy from — and again inside
         // the `fakeMerchant` view clients already read.
-        var stall = ev as FakeMerchant;
         var shelf = stall is null ? [] : FakeMerchantShelf(stall);
         if (stall is not null) snapshot.Relics = FakeMerchantRelics(shelf);
         snapshot.AddExtensions(new
@@ -1253,6 +1255,16 @@ internal static class Snapshotter
             return item;
         }).ToArray();
 
+    // Whether throwing a Foul Potion at the stall would start the fight —
+    // MerchantRules states the rule, this reads the engine for it.
+    private static bool FakeMerchantFightable(FakeMerchant fake) =>
+        MerchantRules.FightableAtStall(
+            fake.StartedFight,
+            fake.Owner is { } owner
+                && owner.PotionSlots.Any(potion =>
+                    potion is not null
+                    && MerchantPotionGate.Redeemable(potion, owner)));
+
     private static string[] FakeMerchantState(FakeMerchant fake)
     {
         var inventory = fake.Inventory;
@@ -1261,8 +1273,7 @@ internal static class Snapshotter
             SemanticToken(
                 "fakeMerchant",
                 inventory is not null,
-                fake.Owner?.PotionSlots.Any(
-                    potion => potion?.Id.Entry == "FOUL_POTION") == true),
+                FakeMerchantFightable(fake)),
             .. (inventory?.RelicEntries ?? [])
                 .Select((entry, index) => SemanticToken(
                     "fakeMerchantRelic",
@@ -1275,13 +1286,11 @@ internal static class Snapshotter
     }
 
     private static object FakeMerchantView(
-        FakeMerchant fake, FakeMerchantRelicView[] shelf)
-    {
-        var owner = fake.Owner;
-        return new
+        FakeMerchant fake, FakeMerchantRelicView[] shelf) =>
+        new
         {
             available = fake.Inventory is not null,
-            canFight = owner?.PotionSlots.Any(p => p?.Id.Entry == "FOUL_POTION") == true,
+            canFight = FakeMerchantFightable(fake),
             relics = shelf.Select(relic => new
             {
                 idx = relic.Idx,
@@ -1296,7 +1305,6 @@ internal static class Snapshotter
                 affordable = relic.Affordable,
             }).ToArray(),
         };
-    }
 
     private static bool? OptionLethal(EventOption option, Player? owner)
     {
