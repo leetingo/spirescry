@@ -46,7 +46,9 @@ no Steam). Case groups:
                           clicks first options only. `./build.sh gate`
                           never passes it — the gate runs everything, and
                           tests/gate_coverage_test.py holds it to that.
-  e2e.py --only P1,M2     run a subset (case-name prefixes)
+  e2e.py --only P1,M2     run a subset: an exact case id selects that one
+                          case, anything else is a case-name prefix (--only M
+                          runs the M family)
   e2e.py --keys-out F     write the parity key sets to F
   e2e.py --log F          host stderr file (with --boot)
 
@@ -105,11 +107,41 @@ VICTORY_CLAIMS = {
 }
 
 
+def case_id(name):
+    """The leading token of a case name — its stable handle (`--only P14`,
+    the id cited in issues and commit messages)."""
+    return name.split(" ", 1)[0]
+
+
 def case(name, boot_only=False, deep=False):
+    """Register a case. Ids are unique: a repeat is a collision between two
+    independently added cases, and it silently makes both unaddressable by
+    `--only`, so it fails at import rather than at integration."""
     def deco(fn):
+        new = case_id(name)
+        for existing, _, _, _ in CASES:
+            if case_id(existing) == new:
+                raise ValueError(
+                    f"duplicate e2e case id {new!r}:\n"
+                    f"  already registered: {existing}\n"
+                    f"  newly registered:   {name}\n"
+                    "Case ids are handles (--only, issues, commits) and must "
+                    "be unique — give the new case a free id.")
         CASES.append((name, boot_only, deep, fn))
         return fn
     return deco
+
+
+def selects(name, only):
+    """Does a `--only` selection (a list of patterns, or None for all) pick
+    this case? A pattern that is exactly some case's id picks that one case
+    and nothing else, so every id addresses exactly one case; anything else
+    is a case-name prefix, which is how a family (`--only M`) is selected."""
+    if not only:
+        return True
+    ids = {case_id(existing) for existing, _, _, _ in CASES}
+    return any(case_id(name) == p if p in ids else name.startswith(p)
+               for p in only)
 
 
 # ---------- plumbing ----------
@@ -1145,8 +1177,8 @@ def p18():
     to_menu()
 
 
-@case("P14 event economics are part of the semantic fingerprint")
-def p14():
+@case("P20 event economics are part of the semantic fingerprint")
+def p20():
     to_map(seed="CIEVENTVARS")
     before = obs()["rev"]
     run("cheat", PHASE.EVENT, "DENSE_VEGETATION")
@@ -3210,7 +3242,8 @@ def build_parser():
     ap.add_argument("--quick", action="store_true",
                     help="LOCAL ITERATION ONLY — skip the exhaustive sweeps "
                          "(M*), first-option E1; never for the pre-merge gate")
-    ap.add_argument("--only", help="comma-separated case-name prefixes")
+    ap.add_argument("--only",
+                    help="comma-separated case ids or case-name prefixes")
     ap.add_argument("--keys-out")
     ap.add_argument("--log", default=os.path.join(
         os.environ.get("TMPDIR", "/tmp"), "spirescry-ci-host.log"))
@@ -3251,7 +3284,7 @@ def main():
     failures = []
     try:
         for name, boot_only, deep, fn in CASES:
-            if only and not any(name.startswith(p) for p in only):
+            if not selects(name, only):
                 continue
             skipped = skip_reason(boot_only, deep,
                                   boot=ARGS.boot, quick=ARGS.quick)
@@ -3285,7 +3318,7 @@ def main():
                 proc.kill()
 
     ran = sum(1 for name, b, deep, _ in CASES
-              if (not only or any(name.startswith(p) for p in only))
+              if selects(name, only)
               and skip_reason(b, deep, boot=ARGS.boot, quick=ARGS.quick) is None)
     print(f"\n{ran - len(failures)}/{ran} cases passed"
           + (f"; FAILED: {failures}" if failures else ""))
