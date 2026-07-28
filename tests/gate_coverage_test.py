@@ -68,10 +68,10 @@ class GateCoverageTests(unittest.TestCase):
         self.args = e2e.build_parser().parse_args(self.argv)
 
     def gate_runs(self, name, boot_only, deep):
+        only = self.args.only.split(",") if self.args.only else None
         return e2e.skip_reason(boot_only, deep,
                                boot=self.args.boot, quick=self.args.quick) is None \
-            and (not self.args.only
-                 or any(name.startswith(p) for p in self.args.only.split(",")))
+            and e2e.selects(name, only)
 
     def test_gate_does_not_pass_quick(self):
         self.assertNotIn("--quick", self.argv,

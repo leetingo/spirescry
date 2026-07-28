@@ -69,6 +69,39 @@ internal static class MerchantRules
         !startedFight && holdsRedeemablePotion;
 }
 
+// The bookkeeping the headless seat owes the merchant's card removal stall.
+//
+// In the GUI the engine keeps this itself: a removal that resolved reaches
+// `NRun.Instance?.MerchantRoom?.Inventory.OnCardRemovalUsed()`, and
+// NMerchantCardRemoval is the only caller of MerchantCardRemovalEntry.SetUsed.
+// That chain is null-conditional and the headless seat mounts no NRun, so it
+// walked straight past the marking: `IsStocked => !Used` stayed true forever
+// and one merchant sold removals without limit — every `buy card_removal`
+// debited gold and shrank the deck again (#166).
+//
+// The verb alone cannot stand in for the purchase. `buy card_removal` only
+// opens the card picker, and a cancelled picker resolves false having removed
+// nothing; marking used at dispatch time would sell out a stall the seat never
+// bought from. Only the completion the picker resolves knows.
+internal static class MerchantSeat
+{
+    // Follows the purchase the caller just started and marks the entry used
+    // only if the engine reports a card was really removed. The continuation
+    // is synchronous, like RestSiteSeat's: headless resolves a parked picker's
+    // whole awaiting chain inline, and the marking has to land before the verb
+    // is reported settled so the next observation already reads `used: true`.
+    public static void MarkUsedWhenPurchased(Task<bool> purchase, Action markUsed) =>
+        purchase.ContinueWith(
+            completed =>
+            {
+                if (completed.IsCompletedSuccessfully && completed.Result)
+                    markUsed();
+            },
+            CancellationToken.None,
+            TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
+}
+
 #if !CARD_GRAMMAR_ONLY
 // The engine-reading half of the redemption rule, kept beside the rule rather
 // than inside Snapshotter: the observation marks a belt entry `playable` with

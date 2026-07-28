@@ -19,6 +19,8 @@ clean sweep.
 
 All sweeps assume a live bridge (tests/e2e.py boots one) and leave the
 world at the main menu. Each returns a dict of failures: {} == clean.
+Every failure is also named on the log the moment it is recorded, so a
+sweep killed before its summary still says which content broke.
 
 Faults that are already filed as open product issues live in QUARANTINE:
 they are still swept and still reported, but they do not fail the gate, and
@@ -82,6 +84,20 @@ def context_bound(entries):
     return {e["model"] for e in entries if e.get("context")}
 
 
+def failure_recorder(failures, log):
+    """Record a failure and name it in the same breath.
+
+    A sweep can die long before its `SWEEP FAILURE:` summary — a bridge
+    timeout, a CI kill, a wedged host. Everything it already found has to
+    be readable in the output at that moment, so the running failure
+    counter can never advance with no name attached to it.
+    """
+    def fail(name, why):
+        failures[name] = why
+        log(f"  FAIL {name}: {why}")
+    return fail
+
+
 def unexercised(bound, exercised):
     """A named failure for every context-bound model that never ran."""
     return {model: "context-bound model was never exercised"
@@ -126,6 +142,7 @@ def encounters(log=print):
     """Force every encounter, watch it load (titled, intent-bearing
     enemies), kill it through the real pipeline, leave cleanly."""
     failures = {}
+    fail = failure_recorder(failures, log)
     ids = [e["model"] for e in model_entries("encounter")]
     log(f"{len(ids)} encounters to sweep")
     fresh_run()
@@ -137,7 +154,7 @@ def encounters(log=print):
             rev = obs()["rev"]
             r = run("cheat", bridge.PHASE.COMBAT, enc, allow_fail=True)
             if "_err" in r:
-                failures[enc] = f"force: {r['_err'][:90]}"
+                fail(enc, f"force: {r['_err'][:90]}")
                 continue
             d = bridge.wait_until(
                 lambda snapshot: snapshot.get("phase") == bridge.PHASE.COMBAT
@@ -148,22 +165,24 @@ def encounters(log=print):
             )
             bad = [e for e in d.get("enemies", []) if not e.get("title")]
             if not d.get("enemies") or bad:
-                failures[enc] = f"load: enemies={d.get('enemies')}"
+                fail(enc, f"load: enemies={d.get('enemies')}")
                 continue
             bridge.kill_current_combat()
             w = wedge_events(rev)
             if w:
-                failures[enc] = f"wedge after kill: {w}"
+                fail(enc, f"wedge after kill: {w}")
                 fresh_run()
                 continue
             settled = bridge.walk_world(bridge.PHASE.MAP, **MAP_CLAIMS)
             if settled["phase"] != bridge.PHASE.MAP:
                 fresh_run()
         except (AssertionError, SystemExit) as e:
-            failures[enc] = str(e)[:120]
+            fail(enc, str(e)[:120])
             fresh_run()
-        if (i + 1) % 10 == 0:
-            log(f"  ...{i + 1}/{len(ids)} ({len(failures)} failures)")
+        finally:
+            # in the tail so a failing entry still emits its progress line
+            if (i + 1) % 10 == 0:
+                log(f"  ...{i + 1}/{len(ids)} ({len(failures)} failures)")
     run("abandon", allow_fail=True)
     return failures
 
@@ -175,6 +194,7 @@ def cards(log=print, only=None):
     sandbag. Unplayable-by-design cards (curses/statuses) are verified
     to reject as unplayable rather than fault."""
     failures = {}
+    fail = failure_recorder(failures, log)
     skipped = []
     executed = set()
     playable_attempts = 0
@@ -218,21 +238,20 @@ def cards(log=print, only=None):
                     d = bridge.follow("cheat", "stars", "99")
             r = follow_result("cheat", "card", card)
             if "_err" in r:
-                failures[card] = f"graft: {r['_err'][:90]}"
+                fail(card, f"graft: {r['_err'][:90]}")
                 continue
             d = r["obs"]
             mine = next((c for c in d.get("hand", []) if c["model"] == card), None)
             if mine is None:
-                failures[card] = "grafted card never reached the hand"
+                fail(card, "grafted card never reached the hand")
                 continue
             if mine.get("unplayable"):
                 rejected = follow_result("play", card)
                 if "_err" not in rejected:
-                    failures[card] = "unplayable card was accepted"
+                    fail(card, "unplayable card was accepted")
                 elif f"not_playable: {card}:" not in rejected["_err"]:
-                    failures[card] = (
-                        "unplayable card rejected with wrong error: "
-                        f"{rejected['_err'][:100]}")
+                    fail(card, "unplayable card rejected with wrong error: "
+                               f"{rejected['_err'][:100]}")
                 else:
                     skipped.append(card)  # rejected cleanly — by design
                 continue
@@ -257,7 +276,7 @@ def cards(log=print, only=None):
                     # protocol behavior; internal/timeout/wedge still fail.
                     skipped.append(f"{card}: {err.split('not_playable:', 1)[1].strip()}")
                 else:
-                    failures[card] = f"play: {err[:110]}"
+                    fail(card, f"play: {err[:110]}")
                 continue
             plays_in_fight += 1
             playable_executed += 1
@@ -266,7 +285,7 @@ def cards(log=print, only=None):
                 initial=followed["obs"], **TRANSIENT_CLAIMS)["phase"]
             w = wedge_events(rev)
             if w:
-                failures[card] = f"wedge: {w}"
+                fail(card, f"wedge: {w}")
                 fresh_run(character=active_character)
                 d = enter_sandbag()
                 plays_in_fight = 0
@@ -275,22 +294,22 @@ def cards(log=print, only=None):
                 d = enter_sandbag()
                 plays_in_fight = 0
         except (AssertionError, SystemExit) as e:
-            failures[card] = str(e)[:120]
+            fail(card, str(e)[:120])
             fresh_run(character=active_character)
             d = enter_sandbag()
             plays_in_fight = 0
-        if card in failures:
-            log(f"  FAIL {card}: {failures[card]}")
-        if (i + 1) % 50 == 0:
-            log(f"  ...{i + 1}/{len(entries)} ({len(failures)} failures)")
+        finally:
+            # in the tail so a failing entry still emits its progress line
+            if (i + 1) % 50 == 0:
+                log(f"  ...{i + 1}/{len(entries)} ({len(failures)} failures)")
     log(f"  cleanly rejected by card legality: {len(skipped)}")
     if bound:
         log(f"  context-bound cards executed: "
             f"{len(bound & executed)}/{len(bound)} ({','.join(sorted(bound))})")
         # A model that already failed keeps its own, more specific reason.
-        failures.update({model: why for model, why
-                         in unexercised(bound, executed).items()
-                         if model not in failures})
+        for model, why in unexercised(bound, executed).items():
+            if model not in failures:
+                fail(model, why)
     # A named legality rejection is valid for cards that require a state the
     # generic sandbag cannot manufacture, but it must not let a broken play
     # path turn the whole sweep green. Require the large majority of cards
@@ -299,8 +318,8 @@ def cards(log=print, only=None):
         ratio = playable_executed / playable_attempts
         log(f"  playable cards executed: {playable_executed}/{playable_attempts} ({ratio:.1%})")
         if ratio < 0.90:
-            failures["__coverage__"] = (
-                f"only {playable_executed}/{playable_attempts} playable cards executed")
+            fail("__coverage__",
+                 f"only {playable_executed}/{playable_attempts} playable cards executed")
     run("abandon", allow_fail=True)
     if failures and only is None:
         first_pass = set(failures)
@@ -318,6 +337,7 @@ def potions(log=print, only=None):
     """Procure and drink every potion; combat-gated ones fire against
     the sandbag, the rest on the map."""
     failures = {}
+    fail = failure_recorder(failures, log)
     ids = [e["model"] for e in model_entries("potion")]
     if only is not None:
         ids = [p for p in ids if p in only]
@@ -334,13 +354,13 @@ def potions(log=print, only=None):
             bridge.follow("cheat", "heal")
             r = follow_result("cheat", "potion", pot)
             if "_err" in r:
-                failures[pot] = f"procure: {r['_err'][:90]}"
+                fail(pot, f"procure: {r['_err'][:90]}")
                 continue
             d = r["obs"]
             slot = next((p for p in d.get("potions", [])
                          if p["model"] == pot), None)
             if slot is None:
-                failures[pot] = "procured potion never reached the belt"
+                fail(pot, "procured potion never reached the belt")
                 continue
             rev = d["rev"]
             args = ["potion-use", str(slot["slot"])]
@@ -355,7 +375,7 @@ def potions(log=print, only=None):
                     fresh_run()
                 followed = follow_result(*args)
                 if "_err" in followed:
-                    failures[pot] = f"use: {followed['_err'][:110]}"
+                    fail(pot, f"use: {followed['_err'][:110]}")
                 enter_sandbag()
                 used_in_fight = 0
                 continue
@@ -364,7 +384,7 @@ def potions(log=print, only=None):
                 initial=followed["obs"], **TRANSIENT_CLAIMS)
             w = wedge_events(rev)
             if w:
-                failures[pot] = f"wedge: {w}"
+                fail(pot, f"wedge: {w}")
                 fresh_run()
                 enter_sandbag()
                 used_in_fight = 0
@@ -372,14 +392,16 @@ def potions(log=print, only=None):
             if d.get("phase") == bridge.PHASE.COMBAT and any(
                     p["slot"] == slot["slot"] and p["model"] == pot
                     for p in d.get("potions", [])):
-                failures[pot] = "drink did not clear the slot"
+                fail(pot, "drink did not clear the slot")
         except (AssertionError, SystemExit) as e:
-            failures[pot] = str(e)[:120]
+            fail(pot, str(e)[:120])
             fresh_run()
             enter_sandbag()
             used_in_fight = 0
-        if (i + 1) % 20 == 0:
-            log(f"  ...{i + 1}/{len(ids)} ({len(failures)} failures)")
+        finally:
+            # in the tail so a failing entry still emits its progress line
+            if (i + 1) % 20 == 0:
+                log(f"  ...{i + 1}/{len(ids)} ({len(failures)} failures)")
     run("abandon", allow_fail=True)
     return failures
 
@@ -394,6 +416,7 @@ def relics(log=print):
     this module's atomic, not combinatorial, coverage contract.
     """
     failures = {}
+    fail = failure_recorder(failures, log)
     entries = model_entries("relic")
     ids = [e["model"] for e in entries]
     bound = context_bound(entries)
@@ -421,40 +444,48 @@ def relics(log=print):
     verified = 0
     exercised = set()
     for i, relic in enumerate(ids):
-        error = grant_and_settle(relic)
-        if error == "LEGAL_REJECT":
-            legal_rejects += 1
-            continue
-        if error:
-            # A belt full of unrelated relics can create impossible hook
-            # combinations. Retry the causal relic alone before calling it
-            # a product failure, then continue from that clean run.
-            log(f"  retry {relic} in isolation: {error}")
-            fresh_run(f"SWEEPREL{i}")
+        abandoning = False
+        try:
             error = grant_and_settle(relic)
-        if error == "LEGAL_REJECT":
-            legal_rejects += 1
-            continue
-        if error:
-            failures[relic] = error
-            if relic not in QUARANTINE["relics"]:
-                # An untracked obtain fault can wedge the run; stop rather
-                # than blame every remaining relic on it.
-                return failures
-            # A tracked fault must not cost the rest of the belt its sweep.
-            fresh_run(f"SWEEPREL{i}")
-            continue
-        verified += 1
-        exercised.add(relic)
-        if (i + 1) % 50 == 0:
-            n = len(obs()["player"]["relics"])
-            log(f"  ...{i + 1}/{len(ids)} verified (current belt shows {n})")
+            if error == "LEGAL_REJECT":
+                legal_rejects += 1
+                continue
+            if error:
+                # A belt full of unrelated relics can create impossible hook
+                # combinations. Retry the causal relic alone before calling it
+                # a product failure, then continue from that clean run.
+                log(f"  retry {relic} in isolation: {error}")
+                fresh_run(f"SWEEPREL{i}")
+                error = grant_and_settle(relic)
+            if error == "LEGAL_REJECT":
+                legal_rejects += 1
+                continue
+            if error:
+                fail(relic, error)
+                if relic not in QUARANTINE["relics"]:
+                    # An untracked obtain fault can wedge the run; stop rather
+                    # than blame every remaining relic on it.
+                    abandoning = True
+                    return failures
+                # A tracked fault must not cost the rest of the belt its sweep.
+                fresh_run(f"SWEEPREL{i}")
+                continue
+            verified += 1
+            exercised.add(relic)
+        finally:
+            # in the tail so a rejected entry still emits its progress line —
+            # but never on the way out of an abandoned sweep, whose host may
+            # be the very thing that just broke.
+            if (i + 1) % 50 == 0 and not abandoning:
+                n = len(obs()["player"]["relics"])
+                log(f"  ...{i + 1}/{len(ids)} verified (current belt shows {n})")
     log(f"  {verified} legal obtain hooks completed; "
         f"{legal_rejects} context-ineligible relics rejected cleanly")
     if bound:
         log(f"  context-bound relics exercised: "
             f"{len(bound & exercised)}/{len(bound)} ({','.join(sorted(bound))})")
-        failures.update(unexercised(bound, exercised))
+        for model, why in unexercised(bound, exercised).items():
+            fail(model, why)
     run("abandon", allow_fail=True)
     return failures
 

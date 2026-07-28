@@ -46,7 +46,9 @@ no Steam). Case groups:
                           clicks first options only. `./build.sh gate`
                           never passes it — the gate runs everything, and
                           tests/gate_coverage_test.py holds it to that.
-  e2e.py --only P1,M2     run a subset (case-name prefixes)
+  e2e.py --only P1,M2     run a subset: an exact case id selects that one
+                          case, anything else is a case-name prefix (--only M
+                          runs the M family)
   e2e.py --keys-out F     write the parity key sets to F
   e2e.py --log F          host stderr file (with --boot)
 
@@ -91,6 +93,9 @@ LOG_PATH = None  # set in main() when --boot
 # potions (one opens a mid-combat picker in the boss fight), treasure,
 # smith. SPIRECI2/SPIRECI3 also pass, with less potion coverage.
 PARITY_SEED = "SPIRECI1"
+# MerchantCardRemovalEntry.PriceIncrease off ascension: every removal a run
+# has already used adds this much to the next merchant's asking price.
+REMOVAL_PRICE_INCREASE = 25
 WORLD_CLAIMS = {
     "claim_reward_tiles": True,
     "claim_card_reward": True,
@@ -102,11 +107,41 @@ VICTORY_CLAIMS = {
 }
 
 
+def case_id(name):
+    """The leading token of a case name — its stable handle (`--only P14`,
+    the id cited in issues and commit messages)."""
+    return name.split(" ", 1)[0]
+
+
 def case(name, boot_only=False, deep=False):
+    """Register a case. Ids are unique: a repeat is a collision between two
+    independently added cases, and it silently makes both unaddressable by
+    `--only`, so it fails at import rather than at integration."""
     def deco(fn):
+        new = case_id(name)
+        for existing, _, _, _ in CASES:
+            if case_id(existing) == new:
+                raise ValueError(
+                    f"duplicate e2e case id {new!r}:\n"
+                    f"  already registered: {existing}\n"
+                    f"  newly registered:   {name}\n"
+                    "Case ids are handles (--only, issues, commits) and must "
+                    "be unique — give the new case a free id.")
         CASES.append((name, boot_only, deep, fn))
         return fn
     return deco
+
+
+def selects(name, only):
+    """Does a `--only` selection (a list of patterns, or None for all) pick
+    this case? A pattern that is exactly some case's id picks that one case
+    and nothing else, so every id addresses exactly one case; anything else
+    is a case-name prefix, which is how a family (`--only M`) is selected."""
+    if not only:
+        return True
+    ids = {case_id(existing) for existing, _, _, _ in CASES}
+    return any(case_id(name) == p if p in ids else name.startswith(p)
+               for p in only)
 
 
 # ---------- plumbing ----------
@@ -253,6 +288,29 @@ def latest_runlog_entry(action, *, cheat=None):
         if verb["action"] == action
         and (cheat is None or verb.get("args", {}).get("name") == cheat)
     )
+
+
+def remove_a_card_at_the_stall():
+    """Buy the merchant's card removal and drive its picker to the end.
+
+    `buy card_removal` only opens the picker — the purchase resolves when a
+    card is actually picked (and confirmed, where the grid asks for it), so
+    every assertion about a landed removal has to wait for that. Returns the
+    shop snapshot the removal landed in.
+    """
+    run("buy", "card_removal", "--idx", "0")
+    d = bridge.wait_phase(PHASE.CARD_SELECT)
+    before_rev = d["rev"]
+    run("pick-card", "0")
+    d = bridge.wait_until(
+        lambda snapshot: snapshot.get("phase") != PHASE.CARD_SELECT
+        or snapshot.get("confirmable") is True,
+        description="card removal pick to apply",
+        after_rev=before_rev,
+    )
+    if d["phase"] == PHASE.CARD_SELECT:
+        run("confirm")
+    return bridge.wait_phase(PHASE.SHOP)
 
 
 def open_amalgamator_picker():
@@ -1119,8 +1177,8 @@ def p18():
     to_menu()
 
 
-@case("P14 event economics are part of the semantic fingerprint")
-def p14():
+@case("P20 event economics are part of the semantic fingerprint")
+def p20():
     to_map(seed="CIEVENTVARS")
     before = obs()["rev"]
     run("cheat", PHASE.EVENT, "DENSE_VEGETATION")
@@ -1373,9 +1431,7 @@ def s1():
     d = obs()
     assert d["cardRemoval"] and not d["cardRemoval"]["used"], d.get("cardRemoval")
     # One stall, one index: the removal publishes the only idx buy accepts,
-    # and a rejected index leaves the deck alone. (`cardRemoval.used` is not
-    # the witness here — the engine only flips it from a GUI node, so it
-    # reads False even after a removal lands.)
+    # and a rejected index leaves the deck alone.
     assert d["cardRemoval"]["idx"] == 0, d["cardRemoval"]
     deck_before_rejects = len(d["player"]["deck"])
     for bad in ("1", "2", "7"):
@@ -1386,20 +1442,11 @@ def s1():
         f"a rejected card_removal idx still opened its picker: {d['phase']}"
     assert len(d["player"]["deck"]) == deck_before_rejects, \
         "a rejected card_removal idx removed a card anyway"
-    run("buy", "card_removal", "--idx", "0")
-    d = bridge.wait_phase(PHASE.CARD_SELECT)
-    before_rev = d["rev"]
-    run("pick-card", "0")
-    d = bridge.wait_until(
-        lambda snapshot: snapshot.get("phase") != PHASE.CARD_SELECT
-        or snapshot.get("confirmable") is True,
-        description="card removal pick to apply",
-        after_rev=before_rev,
-    )
-    if d["phase"] == PHASE.CARD_SELECT:
-        run("confirm")
-    bridge.wait_phase(PHASE.SHOP)
-    assert len(obs()["player"]["deck"]) == deck0 + 1, "removal did not shrink the deck"
+    d = remove_a_card_at_the_stall()
+    assert len(d["player"]["deck"]) == deck0 + 1, "removal did not shrink the deck"
+    # The stall is a one-shot, and `used` is the witness that says so — S5
+    # holds it to the whole sold-out contract.
+    assert d["cardRemoval"]["used"] is True, d["cardRemoval"]
 
     run("leave")
     bridge.wait_phase(PHASE.MAP)
@@ -1528,6 +1575,62 @@ def s4():
     assert "buy" not in legal(), legal()
     reject(["buy", "relic", "--idx", "0"], REJECTION.NOT_ENOUGH_GOLD)
     assert "leave" in legal(), legal()
+    to_menu()
+
+
+@case("S5 the card removal stall sells out once a removal lands")
+def s5():
+    # A merchant removes one card, ever. The engine flips that flag from a
+    # GUI node the headless seat never mounts, so the seat compensates for
+    # it — without that, gold and deck kept draining into an endless stall
+    # (#166).
+    d = to_map(seed="CISHOP")
+    shops = [p for p in d["graph"] if p["type"] == PHASE.SHOP]
+    assert shops, "seed CISHOP grew no shop — re-pin the seed"
+    bridge.follow("cheat", "gold", "5000")
+    run("cheat", "goto", str(shops[0]["col"]), str(shops[0]["row"]))
+    d = bridge.wait_phase(PHASE.SHOP)
+
+    stall = d["cardRemoval"]
+    assert stall and stall["used"] is False and stall["purchasable"] is True, stall
+    first_cost = stall["cost"]
+    deck_before = len(d["player"]["deck"])
+    gold_before = d["gold"]
+
+    d = remove_a_card_at_the_stall()
+    assert len(d["player"]["deck"]) == deck_before - 1, "removal did not land"
+    assert d["gold"] == gold_before - first_cost, \
+        f"removal cost {first_cost}: {gold_before} -> {d['gold']}"
+
+    # The observation taken straight after the removal already says sold
+    # out — an agent that reads `used`/`purchasable` never even asks.
+    stall = d["cardRemoval"]
+    assert stall["used"] is True, f"a landed removal left the stall unused: {stall}"
+    assert stall["purchasable"] is False, stall
+
+    # ...and the dispatcher rejects the second buy on the same fact.
+    err = reject(["buy", "card_removal", "--idx", "0"], REJECTION.BAD_INDEX)
+    assert "sold out" in err, err
+    d = obs()
+    assert d["phase"] == PHASE.SHOP, \
+        f"a sold-out card_removal still opened its picker: {d['phase']}"
+    assert len(d["player"]["deck"]) == deck_before - 1, \
+        "a sold-out card_removal removed a second card anyway"
+    assert d["gold"] == gold_before - first_cost, \
+        "a sold-out card_removal debited gold anyway"
+
+    # Sold out is this stall's fact, not the run's: the next merchant sells
+    # a removal again, priced up by the engine's own increase per removal
+    # the run has already used (75 -> 100 off ascension).
+    assert len(shops) > 1, "seed CISHOP grew only one shop — re-pin the seed"
+    run("leave")
+    bridge.wait_phase(PHASE.MAP)
+    run("cheat", "goto", str(shops[1]["col"]), str(shops[1]["row"]))
+    stall = bridge.wait_phase(PHASE.SHOP)["cardRemoval"]
+    assert stall["used"] is False and stall["purchasable"] is True, \
+        f"the next merchant opened already sold out: {stall}"
+    assert stall["cost"] == first_cost + REMOVAL_PRICE_INCREASE, \
+        f"removal priced {stall['cost']} after one at {first_cost}"
     to_menu()
 
 
@@ -3207,7 +3310,8 @@ def build_parser():
     ap.add_argument("--quick", action="store_true",
                     help="LOCAL ITERATION ONLY — skip the exhaustive sweeps "
                          "(M*), first-option E1; never for the pre-merge gate")
-    ap.add_argument("--only", help="comma-separated case-name prefixes")
+    ap.add_argument("--only",
+                    help="comma-separated case ids or case-name prefixes")
     ap.add_argument("--keys-out")
     ap.add_argument("--log", default=os.path.join(
         os.environ.get("TMPDIR", "/tmp"), "spirescry-ci-host.log"))
@@ -3248,7 +3352,7 @@ def main():
     failures = []
     try:
         for name, boot_only, deep, fn in CASES:
-            if only and not any(name.startswith(p) for p in only):
+            if not selects(name, only):
                 continue
             skipped = skip_reason(boot_only, deep,
                                   boot=ARGS.boot, quick=ARGS.quick)
@@ -3282,7 +3386,7 @@ def main():
                 proc.kill()
 
     ran = sum(1 for name, b, deep, _ in CASES
-              if (not only or any(name.startswith(p) for p in only))
+              if selects(name, only)
               and skip_reason(b, deep, boot=ARGS.boot, quick=ARGS.quick) is None)
     print(f"\n{ran - len(failures)}/{ran} cases passed"
           + (f"; FAILED: {failures}" if failures else ""))

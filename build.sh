@@ -760,7 +760,8 @@ gate() {
     for t in protocol_contract_test projection_schema_drift_test \
              world_walker_test parity_settlement_test e2e_settlement_test \
              build_identity_test play_skill_fault_protocol_test \
-             gate_coverage_test sweep_quarantine_test; do
+             gate_coverage_test sweep_quarantine_test sweep_reporting_test \
+             e2e_case_ids_test; do
         python3 "tests/$t.py"
     done
 

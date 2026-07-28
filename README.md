@@ -107,7 +107,10 @@ diagnosable from `/obs` alone.
 Shop inventory keeps `cost` as its original gold-price field and also
 exposes the clearer `price` alias. Card stock adds `playCost` and `starCost`;
 upgrade candidates keep the string `upgradedPreview` and add
-`upgradedPlayCost` / `upgradedStarCost` beside it.
+`upgradedPlayCost` / `upgradedStarCost` beside it. A merchant removes one
+card, ever: once a removal lands, `cardRemoval` reads `used: true` and
+`purchasable: false`, and a second `buy card_removal` is rejected as sold
+out. The next merchant stocks a fresh removal at the game's raised price.
 
 **`POST /step`** takes `{"action": ..., "args": ...}`. Add
 `"follow": <ms>` (CLI: `--follow [ms]`) to wait past acceptance until
@@ -408,6 +411,13 @@ swept, still printed as `SWEEP KNOWN FAILURE (#nnn)`, but not gate-reddening,
 so no one is tempted to reach for `--quick` over someone else's bug. Any
 other fault still fails, and a quarantined entry that starts passing fails
 too — the list only shrinks (`tests/sweep_quarantine_test.py`).
+
+Each e2e case is named `<id> <what it proves>`, and the id is its handle:
+`python3 tests/e2e.py --only P14` runs exactly that one case (any other
+pattern is a case-name prefix, so `--only M` runs the M family). Ids are
+unique — registering a second case under a taken id raises at import, naming
+the id and both titles, and `tests/e2e_case_ids_test.py` holds that in place
+so two branches cannot each add the same id and only collide on merge.
 
 CI runs only the pure unit tests (`unit-tests.yml`, GitHub-hosted): the
 host is built from the game's non-distributable dlls, so the end-to-end

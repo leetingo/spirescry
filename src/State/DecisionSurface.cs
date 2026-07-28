@@ -1267,12 +1267,17 @@ internal sealed class HeadlessDecisionSurface : IDecisionSurface
 
     public DecisionSurfaceResult Purchase(MerchantInventory inventory, MerchantEntry entry)
     {
-        Task? purchase = null;
+        Task<bool>? purchase = null;
         HeadlessPicker.Around(() =>
             purchase = entry.OnTryPurchaseWrapper(inventory, false));
         if (purchase is null)
             return DecisionSurfaceResult.Reject(
                 DecisionSurfaceError.Internal, "purchase did not start");
+        // The GUI seat needs no such line: NMerchantCardRemoval marks the
+        // stall used off the same completion. Headless mounts no NRun, so the
+        // seat performs that compensation itself (MerchantSeat).
+        if (entry is MerchantCardRemovalEntry removal)
+            MerchantSeat.MarkUsedWhenPurchased(purchase, removal.SetUsed);
         DecisionSurfaceActions.Track(purchase, "buy");
         return DecisionSurfaceResult.Success();
     }
