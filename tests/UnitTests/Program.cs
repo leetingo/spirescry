@@ -2318,6 +2318,38 @@ internal static class Tests
         False(RestSiteSeat.HasSpentItsChoice(null));
     }
 
+    public static void MerchantSeatMarksTheRemovalUsedOnlyWhenOneWasRemoved()
+    {
+        // `buy card_removal` opens a card picker; the entry is sold out only
+        // once the picker resolved a removal. The headless seat owes this
+        // marking because no NRun node is there to do it (#166).
+        var marked = 0;
+
+        // Cancelling the picker removes nothing and spends nothing, so the
+        // stall is still stocked and the next `buy` must still be legal.
+        MerchantSeat.MarkUsedWhenPurchased(Task.FromResult(false), () => marked++);
+        Equal(0, marked);
+
+        // A purchase that threw did not remove a card either.
+        var faulted = Task.FromException<bool>(
+            new InvalidOperationException("boom"));
+        MerchantSeat.MarkUsedWhenPurchased(faulted, () => marked++);
+        Equal(0, marked);
+        _ = faulted.Exception;  // observed for real by the dispatcher's Track
+
+        MerchantSeat.MarkUsedWhenPurchased(Task.FromResult(true), () => marked++);
+        Equal(1, marked);
+
+        // The continuation is synchronous: the marking has already landed by
+        // the time the verb settles, so the very next obs reads `used: true`
+        // and cannot advertise a second buy the dispatcher would reject.
+        var pending = new TaskCompletionSource<bool>();
+        MerchantSeat.MarkUsedWhenPurchased(pending.Task, () => marked++);
+        Equal(1, marked);
+        pending.SetResult(true);
+        Equal(2, marked);
+    }
+
     public static void DecisionUnavailableTransitionsDoNotAdvertiseActions()
     {
         foreach (var phase in new[] { Phase.Event, Phase.Rewards })

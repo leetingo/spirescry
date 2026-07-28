@@ -107,7 +107,10 @@ diagnosable from `/obs` alone.
 Shop inventory keeps `cost` as its original gold-price field and also
 exposes the clearer `price` alias. Card stock adds `playCost` and `starCost`;
 upgrade candidates keep the string `upgradedPreview` and add
-`upgradedPlayCost` / `upgradedStarCost` beside it.
+`upgradedPlayCost` / `upgradedStarCost` beside it. A merchant removes one
+card, ever: once a removal lands, `cardRemoval` reads `used: true` and
+`purchasable: false`, and a second `buy card_removal` is rejected as sold
+out. The next merchant stocks a fresh removal at the game's raised price.
 
 **`POST /step`** takes `{"action": ..., "args": ...}`. Add
 `"follow": <ms>` (CLI: `--follow [ms]`) to wait past acceptance until
