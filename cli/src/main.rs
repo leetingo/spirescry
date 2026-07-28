@@ -210,7 +210,7 @@ enum Cmd {
     },
     /// End the player turn
     EndTurn,
-    /// Use a potion by slot (combat, or Foul Potion in a shop; from obs.potions)
+    /// Use a potion by slot (combat, or Foul Potion at either merchant; from obs.potions)
     PotionUse {
         #[arg(value_parser = clap::value_parser!(i32).range(0..))]
         slot: i32,

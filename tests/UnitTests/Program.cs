@@ -2557,6 +2557,69 @@ internal static class Tests
         Equal(0, asked);
     }
 
+    public static void FakeMerchantFightNeedsARedeemablePotionAndAnUnspentStall()
+    {
+        // `canFight` used to scan the belt for a FOUL_POTION id while the
+        // dispatcher refused potion-use at the stall entirely (#167). The
+        // flag now says exactly what the redemption gate says — and a stall
+        // sells its one fight once.
+        True(MerchantRules.FightableAtStall(
+            startedFight: false, holdsRedeemablePotion: true));
+        False(MerchantRules.FightableAtStall(
+            startedFight: false, holdsRedeemablePotion: false));
+        False(MerchantRules.FightableAtStall(
+            startedFight: true, holdsRedeemablePotion: true));
+        False(MerchantRules.FightableAtStall(
+            startedFight: true, holdsRedeemablePotion: false));
+
+        // Same gate the ordinary shop redemption runs on, so a belt slot the
+        // shop would refuse cannot buy a fight either.
+        True(MerchantRules.FightableAtStall(
+            startedFight: false,
+            holdsRedeemablePotion: MerchantRules.RedeemableAtMerchant(
+                isFoulPotion: true, usableAnyTime: true, ownerAlive: true,
+                canUseOrRemovePotions: true, interactionAvailable: () => true)));
+        False(MerchantRules.FightableAtStall(
+            startedFight: false,
+            holdsRedeemablePotion: MerchantRules.RedeemableAtMerchant(
+                isFoulPotion: true, usableAnyTime: true, ownerAlive: false,
+                canUseOrRemovePotions: true, interactionAvailable: () => true)));
+    }
+
+    public static void DecisionFakeMerchantAdvertisesTheFoulPotionFight()
+    {
+        // The stall takes a Foul Potion for a fight. Only a stall footer
+        // marks a belt entry `playable` (Snapshotter runs MerchantFooterView
+        // on it), so potion-use rides that flag exactly as it does in a shop
+        // and an ordinary event never advertises it.
+        SnapshotContract Stall(params (string Model, bool Playable)[] belt) =>
+            new(Phase.Event)
+            {
+                Options = [],
+                ProceedAvailable = true,
+                Player = new SnapshotPlayerContract
+                {
+                    Potions = belt.Select((entry, i) => new SnapshotItemContract
+                    {
+                        Index = i, Slot = i,
+                        Model = entry.Model, Playable = entry.Playable,
+                    }).ToArray(),
+                },
+            };
+
+        Equal("potion-use,proceed,potion-discard,abandon", string.Join(',',
+            DecisionProjection.LegalVerbs(
+                Stall(("ENERGY_POTION", false), ("FOUL_POTION", true)),
+                runActive: true)));
+        // An ordinary potion is discardable at the stall and nothing more.
+        Equal("proceed,potion-discard,abandon", string.Join(',',
+            DecisionProjection.LegalVerbs(
+                Stall(("ENERGY_POTION", false)), runActive: true)));
+        // An empty belt offers neither verb.
+        Equal("proceed,abandon", string.Join(',',
+            DecisionProjection.LegalVerbs(Stall(), runActive: true)));
+    }
+
     public static void SnapshotContractPreservesUnconsumedProducerFields()
     {
         var card = new SnapshotItemContract

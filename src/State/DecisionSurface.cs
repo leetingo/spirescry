@@ -12,6 +12,7 @@ using MegaCrit.Sts2.Core.GameActions;
 using MegaCrit.Sts2.Core.Localization;
 using MegaCrit.Sts2.Core.Map;
 using MegaCrit.Sts2.Core.Models;
+using MegaCrit.Sts2.Core.Models.Events;
 using MegaCrit.Sts2.Core.Models.Potions;
 using MegaCrit.Sts2.Core.Multiplayer;
 using MegaCrit.Sts2.Core.Multiplayer.Game;
@@ -83,6 +84,13 @@ internal interface IDecisionSurface
     DecisionSurfaceResult ClickCrystalCell(int col, int row);
     bool MerchantPotionInteractionAvailable(PotionModel potion);
     DecisionSurfaceResult UsePotion(PotionModel potion, Creature? target);
+    // The Fake Merchant takes the Foul Potion as a fight, not as gold. The
+    // engine's own OnUse branch for it lives entirely inside a
+    // `Node is NFakeMerchant` test, so the two adapters reach the effect by
+    // different roads: GUI has the node and uses the potion normally,
+    // headless calls the model-layer method the node branch would have.
+    DecisionSurfaceResult ThrowFoulPotionAtStall(
+        FoulPotion potion, FakeMerchant stall);
     DecisionSurfaceResult DiscardPotion(
         LocalRunContext run, uint slot, bool inCombat);
     DecisionSurfaceResult PlayCard(
@@ -942,6 +950,16 @@ internal sealed class GuiDecisionSurface : IDecisionSurface
         return DecisionSurfaceResult.Success();
     }
 
+    // The real stall node exists here, so the ordinary use path already runs
+    // FoulPotion.OnUse's Fake Merchant branch — vfx, potion consumption and
+    // the fight together. Nothing to stand in for.
+    public DecisionSurfaceResult ThrowFoulPotionAtStall(
+        FoulPotion potion, FakeMerchant stall)
+    {
+        potion.EnqueueManualUse(null!);
+        return DecisionSurfaceResult.Success();
+    }
+
     public DecisionSurfaceResult DiscardPotion(
         LocalRunContext run, uint slot, bool inCombat)
     {
@@ -1481,6 +1499,35 @@ internal sealed class HeadlessDecisionSurface : IDecisionSurface
             result = DecisionSurfaceActions.ResolveInline(
                 potion.GetType().Name,
                 () => potion.EnqueueManualUse(target!)));
+        return result;
+    }
+
+    // FoulPotion.OnUse's Fake Merchant branch is unreachable without the
+    // NFakeMerchant node, but everything it does past the cosmetics is the
+    // public model-layer FakeMerchant.FoulPotionThrown — whose own node test
+    // guards only the thrown-potion animation. So the host bypasses OnUse and
+    // calls that directly, spending the potion first through the same discard
+    // the potion-discard verb uses: the slot clears exactly once and the
+    // potion cannot also be redeemed at a shop later.
+    public DecisionSurfaceResult ThrowFoulPotionAtStall(
+        FoulPotion potion, FakeMerchant stall)
+    {
+        if (LocalRunContext.Current is not { } run)
+            return BadState("run state not available");
+        var slots = run.Player.PotionSlots;
+        var slot = -1;
+        for (var i = 0; i < slots.Count; i++)
+            if (ReferenceEquals(slots[i], potion)) { slot = i; break; }
+        if (slot < 0)
+            return BadState($"{potion.Id.Entry} is no longer in the belt");
+        var spend = DiscardPotion(run, (uint)slot, inCombat: false);
+        if (!spend.Ok) return spend;
+
+        var result = DecisionSurfaceResult.Success();
+        HeadlessPicker.Around(() =>
+            result = DecisionSurfaceActions.ResolveInline(
+                nameof(FakeMerchant.FoulPotionThrown),
+                () => stall.FoulPotionThrown(potion).GetAwaiter().GetResult()));
         return result;
     }
 

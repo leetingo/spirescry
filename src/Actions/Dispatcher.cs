@@ -1065,7 +1065,13 @@ public static class Dispatcher
     private static DispatchResult PotionUse(JsonElement args)
     {
         var phase = PhaseDetector.Current();
-        if (phase != Phase.Shop)
+        // Both merchants take a Foul Potion — the ordinary shop for gold, the
+        // Fake Merchant for a fight. The stall is a shop wearing an event
+        // (#150), so the same branch serves it, behind the same gate.
+        var stall = phase == Phase.Event
+            ? Screens.CurrentEvent() as FakeMerchant
+            : null;
+        if (phase != Phase.Shop && stall is null)
         {
             if (CombatManager.Instance is not { IsInProgress: true })
                 return DispatchResult.Reject(RejectionCodes.BadPhase,
@@ -1085,16 +1091,23 @@ public static class Dispatcher
             return DispatchResult.Reject(RejectionCodes.NotPlayable, $"potion in slot {slot} already used");
 
         // Mirror the potion popup's model-layer gates. The headless fallback
-        // covers only the custom UI-node check: Phase.Shop has already
-        // established the semantic MerchantRoom and host mode intentionally
-        // has no NMerchantButton to satisfy that check. The snapshot marks
+        // covers only the custom UI-node check: reaching here has already
+        // established the semantic merchant — a MerchantRoom or the stall —
+        // and host mode intentionally has no NMerchantButton or NFakeMerchant
+        // to satisfy that check. The snapshot marks
         // the belt entry `playable` through this same gate, so obs.legal's
         // potion-use and this reject cannot disagree.
         if (!MerchantPotionGate.Redeemable(potion, player))
             return DispatchResult.Reject(RejectionCodes.NotPlayable,
-                $"{potion.Id.Entry} has no available merchant interaction in this shop");
-        return FromDecisionSurface(
-            DecisionSurface.Current.UsePotion(potion, target: null));
+                $"{potion.Id.Entry} has no available merchant interaction here");
+        // At the stall the Foul Potion buys a fight instead of gold, and the
+        // engine's own path to it is node-only — so the adapter owns the
+        // difference rather than the dispatcher.
+        return stall is not null && potion is FoulPotion foul
+            ? FromDecisionSurface(
+                DecisionSurface.Current.ThrowFoulPotionAtStall(foul, stall))
+            : FromDecisionSurface(
+                DecisionSurface.Current.UsePotion(potion, target: null));
     }
 
     private static DispatchResult PotionUse(

@@ -39,6 +39,11 @@ internal static class DecisionProjection
                 // relics the buy verb purchases. Only its entries carry
                 // `purchasable`, so an ordinary event never advertises buy.
                 if (ShopHasPurchase(snapshot)) Add("buy");
+                // And it takes the Foul Potion, for a fight rather than for
+                // gold. Only a stall footer marks a belt entry `playable`,
+                // so an ordinary event never advertises potion-use.
+                if (BeltPotions(snapshot).Any(potion => potion.Playable == true))
+                    Add("potion-use");
                 // Leaving is a decision the event has to offer: a page with
                 // a pickable, non-leave option is a required choice, and
                 // proceed there walked past the whole event body.

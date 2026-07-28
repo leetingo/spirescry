@@ -50,27 +50,33 @@ The custom event previously appeared as `finished:true`, description
 affordability. The existing `buy relic --idx N` contract now accepts this custom
 merchant and was verified to spend gold, grant the relic, and mark the tile sold.
 
+### Fake Merchant Foul Potion fight was advertised but unreachable
+
+`fakeMerchant.canFight` reported the special route while `potion-use` rejected
+it with `bad_phase` outside a shop. The stall now takes the potion through the
+same `potion-use` verb and the same redemption gate the ordinary merchant uses:
+`canFight`, the belt entry's `playable`, `obs.legal` and the dispatcher are one
+statement, and the headless adapter reaches the fight through the model-layer
+`FakeMerchant.FoulPotionThrown` the GUI-only node branch would have called.
+
 ## Confirmed remaining gaps
 
 Ordered by expected decision impact:
 
-1. **Fake Merchant Foul Potion fight.** `fakeMerchant.canFight` reports whether
-   the special route is available, but the bridge still needs a headless-safe
-   verb that consumes the potion and invokes the event combat/reward path.
-2. **Crystal Sphere partial-item identity.** The GUI's fog reveals item art,
+1. **Crystal Sphere partial-item identity.** The GUI's fog reveals item art,
    rarity, and footprint wherever a cell has been uncovered. JSON currently
    reports only `hasItem`; it should expose type/rarity/origin/size for an item
    only after at least one of its cells is visible.
-3. **Map decision metadata beyond routing.** Graph edges are exposed, but quest
+2. **Map decision metadata beyond routing.** Graph edges are exposed, but quest
    markers, ancient identity, and traveled-node history shown by the GUI are
    still absent.
-4. **Combat run context and special resources.** Combat now exposes relic
+3. **Combat run context and special resources.** Combat now exposes relic
    counters and the orb queue, but still omits the master deck, gold,
    act/floor/ascension, and pets. These should be added only where the GUI
    exposes them and without leaking draw order.
-5. **Picker intent.** Headless card selectors expose an empty prompt, so the
+4. **Picker intent.** Headless card selectors expose an empty prompt, so the
    agent must infer upgrade/remove/transform/discard from the preceding action.
-6. **Degradation markers.** Text, powers, intents, card vars, reflection-backed
+5. **Degradation markers.** Text, powers, intents, card vars, reflection-backed
    collections, and the 64-entry signal log can silently degrade to plausible
    empty/null values. Responses should identify degraded/truncated fields.
 
