@@ -9,6 +9,8 @@ description: Play Slay the Spire 2 — scry the board as JSON via the spirescry 
 **one verb**, wait for the world to change. The verbs on this page are
 the complete play surface.
 
+Do not write or run gameplay automation scripts; reason from each fresh observation and issue each verb yourself.
+
 `./build.sh` runs from the repo root — this file's real path
 (`readlink -f`) is `<repo>/.claude/skills/play-sts2/SKILL.md`.
 
